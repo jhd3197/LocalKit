@@ -52,6 +52,7 @@ function seed(): { values: Record<string, string>; injected: boolean } {
     if (legacy) {
       values.siteView = legacy;
       localStorage.removeItem(LEGACY_SITEVIEW_KEY);
+      localStorage.setItem(LS_PREFIX + "siteView", legacy);
       void ipc.setAppSetting("siteView", legacy).catch(() => {});
     }
   } catch {

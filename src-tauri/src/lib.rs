@@ -436,3 +436,23 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_init_script_publishes_kv() {
+        let dir = std::env::temp_dir().join(format!("localkit-test-{}", std::process::id()));
+        let db = Db::open(&dir.join("test.db")).unwrap();
+        db.set_setting("siteView", "list").unwrap();
+        db.set_setting("run_in_background", "true").unwrap();
+
+        let script = build_settings_init_script(&db);
+        assert!(script.starts_with("window.__LOCALKIT_SETTINGS__ = Object.freeze("));
+        assert!(script.contains("\"siteView\":\"list\""));
+        assert!(script.contains("\"run_in_background\":\"true\""));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

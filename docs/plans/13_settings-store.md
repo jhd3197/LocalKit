@@ -1,6 +1,6 @@
 # 13 — Settings store + pre-paint injection
 
-Status: ⬜ not started
+Status: ✅ shipped
 
 One unified frontend settings store backed by the existing `app_settings` KV
 table, injected into the window before first paint. This is the substrate

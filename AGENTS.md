@@ -15,9 +15,11 @@ src/                     React 18 + TS + Vite frontend
   lib/types.ts           shared TS types mirroring Rust payloads
   lib/terminalRegistry.ts  xterm.js instances living outside React (one PTY per
                          site; scrollback survives page switches; attach/detach)
-  stores/                Zustand stores (nav.ts = page state + settings modal +
-                         grid/list view pref, sites.ts = data/actions,
-                         toast.ts = global toasts + module-level toast.* helpers)
+  stores/                Zustand stores (nav.ts = page state + settings modal,
+                         settings.ts = unified prefs over the app_settings KV —
+                         seeded pre-paint from window.__LOCALKIT_SETTINGS__,
+                         sites.ts = data/actions, toast.ts = global toasts +
+                         module-level toast.* helpers)
   pages/                 Dashboard (grid/list site views), SiteDetail,
                          Terminal (one tab per site, shell in the wordpress
                          container), Settings (modal, opened via sidebar gear —
@@ -47,7 +49,10 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          `terminal://data` / `terminal://exit`
   src/serverkit.rs       ServerKit API client (X-API-Key) + connection model
   src/sync.rs            push/pull orchestration + SyncRecord (sync_history)
-  tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin
+  tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin;
+                         the main window is built in code (`lib.rs run()`), not
+                         from the config `windows` array, so the settings init
+                         script can attach pre-paint
 ```
 
 ## Build / test commands
@@ -123,6 +128,17 @@ src-tauri/               Rust backend (also a cargo workspace root)
   instead of dropping the event. On the frontend, `sites.ts handleEvent`
   renders these as a single pinned progress toast that resolves into
   success/error on done/error.
+- **Settings store (plan 13):** all frontend preferences flow through
+  `stores/settings.ts` over the `app_settings` KV — reads seed synchronously
+  from `window.__LOCALKIT_SETTINGS__` (published by
+  `build_settings_init_script` in `lib.rs` via `WebviewWindowBuilder::
+  initialization_script`, before first paint — that's why the main window is
+  built in code), with an async `settings_get_all` fallback for mock mode.
+  Writes are optimistic + fire-and-forget `set_app_setting` and mirrored to
+  localStorage (`localkit.settings.*`) so pure-web mock/dev keeps prefs.
+  New prefs need zero new Tauri commands — add a typed accessor in
+  `settings.ts`; parsing (`"true"` → bool, numbers) lives there. The old
+  `localkit.siteView` localStorage key is one-time migrated on store creation.
 - **Toasts:** global feedback lives in `stores/toast.ts` — call
   `toast.success/info/error(title, message?)` or `toast.progress`/`resolve`
   from stores (never per-component plumbing); the viewport is
