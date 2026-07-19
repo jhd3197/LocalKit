@@ -2,6 +2,7 @@ import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { siteUrl } from "../lib/domains";
 import { useNav } from "../stores/nav";
+import { useSiteView } from "../stores/settings";
 import { useRouter } from "../stores/router";
 import { useSites } from "../stores/sites";
 import type { SiteWithStatus } from "../lib/types";
@@ -12,8 +13,7 @@ import { GridIcon, ListIcon, PlusIcon } from "../components/icons";
 export default function Dashboard() {
   const sites = useSites((s) => s.sites);
   const loading = useSites((s) => s.loading);
-  const siteView = useNav((s) => s.siteView);
-  const setSiteView = useNav((s) => s.setSiteView);
+  const [siteView, setSiteView] = useSiteView();
   const [showDialog, setShowDialog] = useState(false);
 
   return (

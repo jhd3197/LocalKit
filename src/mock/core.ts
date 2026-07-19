@@ -255,6 +255,9 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       data.appSettings[String(a.key)] = String(a.value);
       return null;
 
+    case "settings_get_all":
+      return { ...data.appSettings };
+
     case "terminal_open": {
       const site = data.sites.find((s) => s.id === a.siteId);
       if (!site) throw `site not found: ${a.siteId}`;
