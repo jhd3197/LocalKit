@@ -1,0 +1,94 @@
+export interface Site {
+  id: string;
+  name: string;
+  slug: string;
+  path: string;
+  port: number;
+  wp_version: string;
+  php_version: string;
+  status: string;
+  admin_user: string;
+  admin_pass: string;
+  created_at: string;
+}
+
+export interface SiteWithStatus extends Site {
+  live_status: string;
+}
+
+export interface SiteDetail extends Site {
+  live_status: string;
+  db_host: string;
+  db_port: number;
+  db_name: string;
+  db_user: string;
+  db_password: string;
+}
+
+export interface DockerStatus {
+  available: boolean;
+  version: string | null;
+  error: string | null;
+}
+
+export interface PluginInfo {
+  name: string;
+  status: string;
+  version: string;
+}
+
+export interface WpInfo {
+  core_version: string;
+  plugins: PluginInfo[];
+}
+
+export interface AppInfo {
+  data_dir: string;
+  sites_dir: string;
+  wp_versions: string[];
+  php_versions: string[];
+}
+
+export interface SiteEvent {
+  id: string;
+  stage: string;
+  message: string;
+}
+
+export interface ServerKitConnection {
+  id: string;
+  label: string;
+  url: string;
+  api_key: string;
+  created_at: string;
+}
+
+export interface ServerKitInfo {
+  status: string;
+  service: string;
+  canonical_domain: string | null;
+  canonical_origin: string | null;
+  staging: boolean;
+  api_key_valid: boolean;
+  localkit_extension: boolean;
+}
+
+export interface RemoteWpSite {
+  id: number;
+  name: string;
+  url: string | null;
+  status: string;
+  wp_version: string | null;
+  environment_count: number;
+}
+
+export interface SyncRecord {
+  id: string;
+  site_id: string;
+  connection_id: string;
+  direction: string;
+  kind: string;
+  status: string;
+  message: string;
+  created_at: string;
+}
