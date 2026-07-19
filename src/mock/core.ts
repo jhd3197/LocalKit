@@ -56,6 +56,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       // Fake the staged progress the Rust backend emits while creating.
       const stages: Array<[string, string]> = [
         ["files", "Writing Docker Compose files…"],
+        ["pulling", "Downloading WordPress images (first run can take a few minutes)…"],
         ["containers", "Starting containers…"],
         ["waiting", "Waiting for WordPress to respond…"],
         ["install", "Installing WordPress…"],

@@ -7,9 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use tauri::AppHandle;
 
 use crate::docker;
-use crate::site::Site;
+use crate::site::{self, Site};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginInfo {
@@ -44,8 +45,15 @@ async fn wp(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// Auto-install WordPress with generated admin credentials.
 /// `url` is the public URL the site will be reached at (localhost:<port> or,
 /// when local domains are enabled, http(s)://<slug>.test).
-/// Retries while the containers/DB finish their first boot.
-pub async fn install(dir: &Path, site: &Site, admin_pass: &str, url: &str) -> Result<(), String> {
+/// Retries while the containers/DB finish their first boot; each attempt
+/// re-emits the `install` stage so the UI never looks hung.
+pub async fn install(
+    dir: &Path,
+    site: &Site,
+    admin_pass: &str,
+    url: &str,
+    app: Option<&AppHandle>,
+) -> Result<(), String> {
     let url_arg = format!("--url={url}");
     let title_arg = format!("--title={}", site.name);
     let user_arg = format!("--admin_user={}", site.admin_user);
@@ -62,8 +70,19 @@ pub async fn install(dir: &Path, site: &Site, admin_pass: &str, url: &str) -> Re
         "--skip-email",
     ];
 
+    const ATTEMPTS: u32 = 12;
     let mut last_err = String::new();
-    for _ in 0..12 {
+    for attempt in 1..=ATTEMPTS {
+        site::emit(
+            app,
+            &site.id,
+            "install",
+            &if attempt == 1 {
+                "Installing WordPress...".to_string()
+            } else {
+                format!("Installing WordPress... (attempt {attempt}/{ATTEMPTS}, waiting for database)")
+            },
+        );
         // Already installed? Nothing to do.
         if wp(dir, &["core", "is-installed"]).await.is_ok() {
             return Ok(());
