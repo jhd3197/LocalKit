@@ -231,10 +231,11 @@ async fn write_hosts_elevated(content: &str) -> Result<(), String> {
              }} catch {{ Write-Error $_; exit 1 }}",
             bat.display()
         );
-        let out = tokio::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps])
-            .output()
-            .await;
+        let out = docker::no_window(
+            tokio::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]),
+        )
+        .output()
+        .await;
         let _ = std::fs::remove_file(&bat);
         out
     };
@@ -548,8 +549,7 @@ async fn install_ca_cert(cert: &Path) -> Result<(), String> {
             ),
         ],
     );
-    let output = tokio::process::Command::new(program)
-        .args(&args)
+    let output = docker::no_window(tokio::process::Command::new(program).args(&args))
         .output()
         .await
         .map_err(|e| format!("failed to run {program}: {e}"))?;
