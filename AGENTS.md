@@ -97,6 +97,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - **Docker:** always shell out to the `docker compose` CLI from Rust
   (`docker.rs`); never add a Docker API client (bollard etc.). All compose
   invocations run with `current_dir = <site dir>` so `.env` is picked up.
+  Every subprocess spawn (`Command::new`, any module) must go through
+  `docker::no_window` (CREATE_NO_WINDOW) so the installed GUI app never
+  flashes a console window on Windows.
 - **Errors:** commands return `Result<T, String>` with user-displayable
   messages; `docker::friendly_error` maps common "Docker not running" stderr.
 - **DB:** forward-only migrations only — bump `user_version` and add an
@@ -111,9 +114,12 @@ src-tauri/               Rust backend (also a cargo workspace root)
   always pass `wp` as the first argument (the cli image's `wp` CMD is replaced
   by run args, so omitting it makes the entrypoint exec `core` and fail).
 - **Events:** long operations emit `site-event` (`{id, stage, message}`);
-  stages: files → containers → waiting → install → done | error. When there
-  is no Tauri app handle (CLI, examples), `site::emit` prints
-  `[stage] message` to stderr instead of dropping the event.
+  create stages: files → pulling → containers → waiting → install (re-emitted
+  per attempt) → done | error. The `pulling` stage pre-pulls all images
+  including the profile-gated wpcli (`docker::compose_pull`) so first-run
+  downloads are a labeled stage, not a silent stall. When there is no Tauri
+  app handle (CLI, examples), `site::emit` prints `[stage] message` to stderr
+  instead of dropping the event.
 - **CLI (`lk`):** a thin workspace crate (`src-tauri/lk/`) over
   `localkit_lib` — never add logic to it that belongs in the library; keep
   both frontends (Tauri commands and the CLI) as thin wrappers. Conventions:

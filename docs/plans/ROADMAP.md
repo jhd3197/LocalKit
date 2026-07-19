@@ -16,7 +16,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 6 | `6_local-domains` | ✅ shipped | `http(s)://<slug>.test` via a shared Caddy router, managed hosts block, local CA trust. |
 | 7 | `7_cli` | ✅ shipped | Headless CLI companion (`lk`) — same data dir as the GUI, scriptable output. |
 | 8 | `8_system-tray` | ✅ shipped | Tray icon + close-to-tray so sites keep running while the window is closed. |
-| 9 | `9_windows-console-and-install-hang` | ⬜ | Bugfix: hide Windows console windows on subprocess spawns; make first-run install visible (pre-pull + per-attempt progress) so it never looks hung. |
+| 9 | `9_windows-console-and-install-hang` | ✅ shipped | Bugfix: hide Windows console windows on subprocess spawns; make first-run install visible (pre-pull + per-attempt progress) so it never looks hung. |
 | 10 | `10_one-click-login` | ⬜ | One-click WP Admin login via one-time token MU plugin; multi-user picker later. |
 | 11 | `11_terminal` | ✅ shipped | Embedded per-site terminals: xterm.js + PTY shelling into each site's wordpress container (Faro's PtyManager pattern). |
 
@@ -32,7 +32,7 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   site, xterm.js + PTY running `docker compose exec wordpress bash`
 - ⬜ One-click WP Admin login via one-time-token MU plugin (plan 10;
   multi-user picker as phase 2)
-- ⬜ Windows polish: hide subprocess console windows, visible first-run
+- ✅ Windows polish: hide subprocess console windows, visible first-run
   install progress (plan 9)
 - ⬜ Site duplication / clone (nice-to-have, unplanned)
 

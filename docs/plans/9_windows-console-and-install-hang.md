@@ -1,6 +1,6 @@
 # 9 — Windows: hide console windows & fix install "hang"
 
-Status: ⬜ not started
+Status: ✅ shipped
 
 Two related Windows papercuts observed while creating a site from the
 installed MSI (screenshot 2026-07-19): clicking **Create** pops a black,
