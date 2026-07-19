@@ -2199,6 +2199,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "localkit",
+ "open",
  "serde",
  "serde_json",
  "tokio",
