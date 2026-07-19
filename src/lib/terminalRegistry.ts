@@ -9,6 +9,8 @@
 
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc, onTerminalData, onTerminalExit } from "./ipc";
 
 export type TermStatus = "opening" | "ready" | "exited";
@@ -87,6 +89,13 @@ export function acquireTerminal(siteId: string): TermEntry {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  // Ctrl-clickable URLs (wp-cli output, pasted logs) via the OS browser.
+  term.loadAddon(
+    new WebLinksAddon((event, uri) => {
+      event.preventDefault();
+      void openUrl(uri).catch(() => {});
+    })
+  );
 
   // The xterm renders into this cached node; React only re-parents it.
   const element = document.createElement("div");
@@ -139,6 +148,14 @@ export function acquireTerminal(siteId: string): TermEntry {
   entry.disposables.push(
     term.onResize(({ cols, rows }) => {
       if (entry.terminalId) ipc.terminalResize(entry.terminalId, cols, rows).catch(() => {});
+    })
+  );
+  // Copy-on-select (PuTTY-style): a non-empty selection goes straight to the
+  // clipboard; an empty selection never clobbers it.
+  entry.disposables.push(
+    term.onSelectionChange(() => {
+      const sel = term.getSelection();
+      if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
     })
   );
 
