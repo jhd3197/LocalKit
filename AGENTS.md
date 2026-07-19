@@ -15,6 +15,8 @@ src/                     React 18 + TS + Vite frontend
   lib/types.ts           shared TS types mirroring Rust payloads
   lib/terminalRegistry.ts  xterm.js instances living outside React (one PTY per
                          site; scrollback survives page switches; attach/detach)
+  lib/termSuggest.ts       ghost-text history suggestions (plan 14): per-site MRU
+                         in localStorage, →/End accepts, frontend-only
   stores/                Zustand stores (nav.ts = page state + settings modal,
                          settings.ts = unified prefs over the app_settings KV —
                          seeded pre-paint from window.__LOCALKIT_SETTINGS__,
@@ -190,6 +192,19 @@ src-tauri/               Rust backend (also a cargo workspace root)
   `terminal::PtyManager::new()`. Mock mode keeps fake shells in
   `mock/core.ts` (`mockShells`); `terminal_resize` must be a no-op there (the
   FitAddon fires one right after open).
+- **Terminal quick wins (plan 14):** the registry also loads
+  `@xterm/addon-web-links` (Ctrl-click URLs open via the opener plugin) and
+  copy-on-select (hardcoded on; empty selections never clobber the
+  clipboard). Ghost-text suggestions live in `lib/termSuggest.ts` — MRU
+  history per site in localStorage (`localkit.termHistory.<siteId>`), →/End
+  accepts, frontend-only (mock needs nothing). Two xterm-6 gotchas: the
+  XTerm options need `allowProposedApi: true` (decorations are still
+  proposed API), and the echo-check marker must be pinned when the input
+  line STARTS — v6 delivers input asynchronously, so at Enter the shell's
+  echo has often already moved the cursor off the command row. Settings →
+  Terminal exposes `terminalFontSize` (11–16, live-applied via a
+  `useSettings.subscribe` in the registry) and `terminalScrollback`
+  (1k/5k/10k, read at terminal creation only — noted in the UI).
 - **One-click login (plan 10):** `wordpress::login_url(dir, site, user,
   base_url)` mints a one-time token (`wp option update localkit_login_token`
   + `_exp`, ~120 s TTL) consumed by the MU plugin

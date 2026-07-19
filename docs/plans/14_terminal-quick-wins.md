@@ -1,10 +1,20 @@
 # 14 — Terminal quick wins
 
-Status: ⬜ not started
+Status: ✅ shipped
 
 Four small, independent upgrades to the plan-11 terminal, all ported from
 Faro where they've been running in production. Depends on plan 13 only for
 the settings-backed pieces (3 and 4 can land first if wanted).
+
+Shipped notes:
+- xterm 6 needed two deviations from the Faro originals: `allowProposedApi:
+  true` (decorations are still proposed API), and the suggestion echo-check
+  pins its marker when the input line STARTS, not at Enter — v6 delivers
+  input asynchronously, so at Enter time the shell's echo has often already
+  moved the cursor off the command row.
+- Accept key is → or End; history lives at `localkit.termHistory.<siteId>`.
+- `terminalFontSize` live-applies via a `useSettings.subscribe` in the
+  registry; `terminalScrollback` is read at terminal creation only.
 
 ## Motivation
 

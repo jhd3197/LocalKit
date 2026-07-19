@@ -21,7 +21,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 11 | `11_terminal` | ✅ shipped | Embedded per-site terminals: xterm.js + PTY shelling into each site's wordpress container (Faro's PtyManager pattern). |
 | 12 | `12_toasts` | ✅ | Global toast store + viewport (from Faro); success/error feedback for every action. |
 | 13 | `13_settings-store` | ✅ | Unified settings store on `app_settings` KV + pre-paint injection; substrate for terminal settings and themes. |
-| 14 | `14_terminal-quick-wins` | ⬜ | Web-links, copy-on-select, ghost-text history, terminal font/scrollback settings (needs 13). |
+| 14 | `14_terminal-quick-wins` | ✅ shipped | Web-links, copy-on-select, ghost-text history, terminal font/scrollback settings (needs 13). |
 | 15 | `15_command-palette-shortcuts` | ⬜ | Command registry + palette (mod+K), global shortcuts, remappable bindings in Settings (needs 13). |
 
 Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferred
@@ -87,7 +87,7 @@ Faro paths referenced in each plan):
 - ✅ Settings store (plan 13): unified frontend store over `app_settings`
   KV, pre-paint injection via `initialization_script` — substrate for
   terminal settings, themes, notification prefs
-- ⬜ Terminal quick wins (plan 14): web-links addon, copy-on-select,
+- ✅ Terminal quick wins (plan 14): web-links addon, copy-on-select,
   ghost-text per-site command history, font-size/scrollback settings
 - ⬜ Command palette + shortcuts (plan 15): one command registry feeding a
   fuzzy palette (mod+K), global shortcuts with editable-target guards,
