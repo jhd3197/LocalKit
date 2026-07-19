@@ -70,6 +70,17 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
   build`, `cargo check --workspace --all-targets`, `cargo test --workspace`
   (matches Faro's CI shape).
+- Releases: `.github/workflows/release.yml` — every push to `main` (i.e. a
+  dev→main merge) auto-bumps the patch version, tags `vX.Y.Z`, builds the
+  desktop app (macOS universal / Windows / Linux) **and** the `lk` CLI for all
+  platforms, and publishes a GitHub Release (unsigned; notes include the
+  xattr/SmartScreen caveats). Put `[skip ci]` in the commit message to push
+  to main without releasing; manual run with a pinned version is available
+  via workflow_dispatch.
+- App icons: generated from `assets/logo.png` (non-square master) via
+  `python scripts/make-square-logo.py` → `npx @tauri-apps/cli icon
+  assets/logo-square.png`; the bundle.icon list in tauri.conf.json is
+  maintained by hand.
 - Windows: use the **rustup MSVC toolchain** for cargo. If `cargo` resolves to a
   chocolatey/GNU install you get `dlltool.exe: program not found`; fix with
   `export PATH="$HOME/.cargo/bin:$PATH"`.
