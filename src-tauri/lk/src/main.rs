@@ -300,7 +300,8 @@ async fn cmd_delete(state: &AppState, query: &str, yes: bool) -> Result<(), Stri
         }
         eprint!(
             "{} delete `{}`? this removes its containers, volumes, and files. [y/N] ",
-            warn("!")
+            warn("!"),
+            s.slug
         );
         let mut line = String::new();
         use std::io::BufRead;
