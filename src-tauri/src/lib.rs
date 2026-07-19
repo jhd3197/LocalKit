@@ -102,6 +102,41 @@ async fn wp_cli_info(state: State<'_, AppState>, id: String) -> Result<wordpress
 }
 
 // ---------------------------------------------------------------------------
+// One-click WP Admin login (one-time token + MU plugin)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn login_site(
+    state: State<'_, AppState>,
+    id: String,
+    user_id: Option<u64>,
+) -> Result<String, String> {
+    let s = site::get(&state, &id)?;
+    let containers = docker::compose_ps(&s.dir()).await?;
+    if !containers
+        .iter()
+        .any(|c| c.service == "wordpress" && c.state == "running")
+    {
+        return Err(format!(
+            "\"{}\" is not running — start the site first.",
+            s.name
+        ));
+    }
+    let base = router::site_public_url(&state, &s);
+    let user = user_id.map(|n| n.to_string());
+    wordpress::login_url(&s.dir(), &s, user.as_deref(), &base).await
+}
+
+#[tauri::command]
+async fn site_wp_users(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<wordpress::WpUser>, String> {
+    let s = site::get(&state, &id)?;
+    wordpress::users(&s.dir()).await
+}
+
+// ---------------------------------------------------------------------------
 // ServerKit connections (M3, read-only)
 // ---------------------------------------------------------------------------
 
@@ -345,6 +380,8 @@ pub fn run() {
             delete_site,
             site_logs,
             wp_cli_info,
+            login_site,
+            site_wp_users,
             save_serverkit_connection,
             list_serverkit_connections,
             delete_serverkit_connection,

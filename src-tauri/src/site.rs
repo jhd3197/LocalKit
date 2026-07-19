@@ -311,6 +311,7 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
         .map_err(|e| format!("failed to write docker-compose.yml: {e}"))?;
     std::fs::write(dir.join(".env"), render_env(site, &db_password))
         .map_err(|e| format!("failed to write .env: {e}"))?;
+    wordpress::ensure_login_plugin(&dir)?;
 
     emit(
         app,
