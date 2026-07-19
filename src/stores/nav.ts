@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type Page = { name: "sites" } | { name: "site"; id: string };
+export type Page = { name: "sites" } | { name: "site"; id: string } | { name: "terminal"; siteId?: string };
 export type SiteView = "grid" | "list";
 
 interface NavState {

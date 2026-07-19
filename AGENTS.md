@@ -13,10 +13,14 @@ Push/pull talks to the `serverkit-localkit` extension on the server
 src/                     React 18 + TS + Vite frontend
   lib/ipc.ts             typed wrappers for all Tauri commands (invoke + events)
   lib/types.ts           shared TS types mirroring Rust payloads
+  lib/terminalRegistry.ts  xterm.js instances living outside React (one PTY per
+                         site; scrollback survives page switches; attach/detach)
   stores/                Zustand stores (nav.ts = page state + settings modal +
                          grid/list view pref, sites.ts = data/actions)
   pages/                 Dashboard (grid/list site views), SiteDetail,
-                         Settings (modal, opened via sidebar gear — not a page)
+                         Terminal (one tab per site, shell in the wordpress
+                         container), Settings (modal, opened via sidebar gear —
+                         not a page)
   components/            Sidebar, StatusBadge, CopyButton, NewSiteDialog,
                          icons.tsx (inline SVGs, 1.75px rounded strokes)
   assets/logo.png        Vite-bundled brand logo (sidebar); master at assets/logo.png
@@ -37,6 +41,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          hosts-file block + elevated writer, CA trust, status
   src/tray.rs            M8 system tray: close-to-tray, tray menu with quick
                          site Open/Start/Stop, single-instance focus
+  src/terminal.rs        per-site interactive terminals: `portable-pty` PTY
+                         running `docker compose exec wordpress bash`; events
+                         `terminal://data` / `terminal://exit`
   src/serverkit.rs       ServerKit API client (X-API-Key) + connection model
   src/sync.rs            push/pull orchestration + SyncRecord (sync_history)
   tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin
@@ -137,6 +144,19 @@ src-tauri/               Rust backend (also a cargo workspace root)
   Docker containers running on purpose. `tauri-plugin-single-instance`
   focuses the existing window on relaunch. Tray-driven start/stop spawn
   `tauri::async_runtime::spawn` so menu event handlers stay sync.
+- **Terminals:** `terminal.rs` (`PtyManager` on `AppState.terminals`) spawns a
+  real PTY via `portable-pty` (ConPTY on Windows) running `docker compose exec
+  wordpress bash` in the site dir — `terminal_open` first checks
+  `docker::compose_ps` that the wordpress container is running. Commands:
+  `terminal_open/write/resize/close`; output streams on `terminal://data`,
+  exit on `terminal://exit` (same event names as Faro, whose PtyManager this
+  mirrors). Frontend: xterm instances live in `lib/terminalRegistry.ts`
+  OUTSIDE React keyed by site id — pages only `attach`/`detach`, disposal is
+  explicit (`restartTerminal` after exit), so scrollback survives navigation.
+  Any `AppState` constructor (GUI, `lk`, examples) must pass
+  `terminal::PtyManager::new()`. Mock mode keeps fake shells in
+  `mock/core.ts` (`mockShells`); `terminal_resize` must be a no-op there (the
+  FitAddon fires one right after open).
 - **ServerKit (M3/M4):** client in `serverkit.rs` (reqwest rustls,
   `X-API-Key` header). `test_connection` = public `GET /api/v1/system/health`
   (no key sent — ServerKit 401s *any* request carrying an invalid key) + key

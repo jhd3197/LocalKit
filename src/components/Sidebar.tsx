@@ -1,5 +1,5 @@
 import { useNav } from "../stores/nav";
-import { GearIcon } from "./icons";
+import { GearIcon, TerminalIcon } from "./icons";
 import logo from "../assets/logo.png";
 
 export default function Sidebar() {
@@ -9,6 +9,12 @@ export default function Sidebar() {
   const setSettingsOpen = useNav((s) => s.setSettingsOpen);
 
   const sitesActive = (page.name === "sites" || page.name === "site") && !settingsOpen;
+  const terminalActive = page.name === "terminal" && !settingsOpen;
+
+  const navBtn = (active: boolean) =>
+    `flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors ${
+      active ? "bg-zinc-800 text-white" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+    }`;
 
   return (
     <aside className="flex w-52 flex-col border-r border-zinc-800 bg-zinc-900/40">
@@ -22,13 +28,19 @@ export default function Sidebar() {
             setSettingsOpen(false);
             navigate({ name: "sites" });
           }}
-          className={`w-full rounded-md px-3 py-2 text-left text-sm font-medium transition-colors ${
-            sitesActive
-              ? "bg-zinc-800 text-white"
-              : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
-          }`}
+          className={navBtn(sitesActive)}
         >
           Sites
+        </button>
+        <button
+          onClick={() => {
+            setSettingsOpen(false);
+            navigate({ name: "terminal" });
+          }}
+          className={navBtn(terminalActive)}
+        >
+          <TerminalIcon className="h-4 w-4" />
+          Terminal
         </button>
       </nav>
       <div className="mt-auto flex items-center justify-between border-t border-zinc-800 px-3 py-2.5">

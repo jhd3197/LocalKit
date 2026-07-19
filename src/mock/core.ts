@@ -10,6 +10,11 @@ type Args = Record<string, unknown>;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Fake interactive shells for the Terminal page (terminal_open/write/close).
+const mockShells = new Map<string, { slug: string; buffer: string }>();
+const prompt = (slug: string) =>
+  `\x1b[35mroot\x1b[0m@\x1b[34m${slug}\x1b[0m:\x1b[36m/var/www/html\x1b[0m# `;
+
 function slugify(name: string): string {
   return name
     .toLowerCase()
@@ -19,8 +24,9 @@ function slugify(name: string): string {
 }
 
 export async function invoke<T = unknown>(cmd: string, args: Args = {}): Promise<T> {
-  // Small latency so loading states behave like the real backend.
-  await sleep(120);
+  // Small latency so loading states behave like the real backend — but
+  // terminal keystrokes must echo immediately.
+  if (!cmd.startsWith("terminal_")) await sleep(120);
   return (await dispatch(cmd, args)) as T;
 }
 
@@ -228,6 +234,61 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "set_app_setting":
       data.appSettings[String(a.key)] = String(a.value);
       return null;
+
+    case "terminal_open": {
+      const site = data.sites.find((s) => s.id === a.siteId);
+      if (!site) throw `site not found: ${a.siteId}`;
+      if (site.live_status !== "running") {
+        throw `"${site.name}" is not running — start the site first.`;
+      }
+      const id = `mock-term-${site.id}-${Date.now()}`;
+      mockShells.set(id, { slug: site.slug, buffer: "" });
+      setTimeout(() => {
+        emit("terminal://data", {
+          terminalId: id,
+          data: `\x1b[90m# mock shell inside ${site.slug}'s wordpress container\x1b[0m\r\n`,
+        });
+        emit("terminal://data", { terminalId: id, data: prompt(site.slug) });
+      }, 250);
+      return id;
+    }
+
+    case "terminal_write": {
+      const shell = mockShells.get(String(a.terminalId));
+      if (!shell) return null;
+      const input = String(a.data);
+      for (const ch of input) {
+        if (ch === "\r") {
+          const line = shell.buffer;
+          shell.buffer = "";
+          emit("terminal://data", { terminalId: a.terminalId, data: "\r\n" });
+          if (line.trim()) {
+            emit("terminal://data", {
+              terminalId: a.terminalId,
+              data: `\x1b[90mbash: ${line.trim().split(/\s+/)[0]}: command not found (mock)\x1b[0m\r\n`,
+            });
+          }
+          emit("terminal://data", { terminalId: a.terminalId, data: prompt(shell.slug) });
+        } else if (ch === "" || ch === "\b") {
+          if (shell.buffer.length > 0) {
+            shell.buffer = shell.buffer.slice(0, -1);
+            emit("terminal://data", { terminalId: a.terminalId, data: "\b \b" });
+          }
+        } else if (ch >= " ") {
+          shell.buffer += ch;
+          emit("terminal://data", { terminalId: a.terminalId, data: ch });
+        }
+      }
+      return null;
+    }
+
+    case "terminal_resize":
+      return null;
+
+    case "terminal_close": {
+      mockShells.delete(String(a.terminalId));
+      return null;
+    }
 
     default:
       console.warn(`[mock] unhandled command: ${cmd}`);

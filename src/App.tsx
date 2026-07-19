@@ -6,6 +6,7 @@ import { useSites } from "./stores/sites";
 import Sidebar from "./components/Sidebar";
 import Dashboard from "./pages/Dashboard";
 import SiteDetail from "./pages/SiteDetail";
+import TerminalPage from "./pages/Terminal";
 import Settings from "./pages/Settings";
 
 export default function App() {
@@ -31,9 +32,10 @@ export default function App() {
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-950 text-zinc-200">
       <Sidebar />
-      <main className="flex-1 overflow-y-auto">
+      <main className={`flex-1 ${page.name === "terminal" ? "overflow-hidden" : "overflow-y-auto"}`}>
         {page.name === "sites" && <Dashboard />}
         {page.name === "site" && <SiteDetail id={page.id} />}
+        {page.name === "terminal" && <TerminalPage key={page.siteId ?? ""} siteId={page.siteId} />}
       </main>
 
       {settingsOpen && <Settings />}

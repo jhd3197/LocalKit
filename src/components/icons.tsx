@@ -82,8 +82,17 @@ export function SlidersIcon(props: IconProps) {
   );
 }
 
-export function GlobeIcon(props: IconProps) {
+export function TerminalIcon(props: IconProps) {
   return (
+    <svg {...base(props)}>
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <path d="M7 9l3 3-3 3" />
+      <path d="M13 15h4" />
+    </svg>
+  );
+}
+
+export function GlobeIcon(props: IconProps) {  return (
     <svg {...base(props)}>
       <circle cx="12" cy="12" r="10" />
       <line x1="2" y1="12" x2="22" y2="12" />

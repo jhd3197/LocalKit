@@ -12,6 +12,8 @@ import type {
   SiteEvent,
   SiteWithStatus,
   SyncRecord,
+  TerminalDataEvent,
+  TerminalExitEvent,
   WpInfo,
 } from "./types";
 
@@ -51,9 +53,26 @@ export const ipc = {
   getAppSetting: (key: string) => invoke<string | null>("get_app_setting", { key }),
   setAppSetting: (key: string, value: string) =>
     invoke<void>("set_app_setting", { key, value }),
+  terminalOpen: (siteId: string, cols: number, rows: number) =>
+    invoke<string>("terminal_open", { siteId, cols, rows }),
+  terminalWrite: (terminalId: string, data: string) =>
+    invoke<void>("terminal_write", { terminalId, data }),
+  terminalResize: (terminalId: string, cols: number, rows: number) =>
+    invoke<void>("terminal_resize", { terminalId, cols, rows }),
+  terminalClose: (terminalId: string) => invoke<void>("terminal_close", { terminalId }),
 };
 
 /** Subscribe to progress events emitted during long operations (site create). */
 export function onSiteEvent(cb: (event: SiteEvent) => void): Promise<UnlistenFn> {
   return listen<SiteEvent>("site-event", (e) => cb(e.payload));
+}
+
+/** Terminal output stream for one PTY session (filter by terminalId). */
+export function onTerminalData(cb: (event: TerminalDataEvent) => void): Promise<UnlistenFn> {
+  return listen<TerminalDataEvent>("terminal://data", (e) => cb(e.payload));
+}
+
+/** Fired when a terminal's shell exits (site stopped, `exit`, close). */
+export function onTerminalExit(cb: (event: TerminalExitEvent) => void): Promise<UnlistenFn> {
+  return listen<TerminalExitEvent>("terminal://exit", (e) => cb(e.payload));
 }

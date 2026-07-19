@@ -4,6 +4,7 @@ pub mod router;
 pub mod serverkit;
 pub mod site;
 pub mod sync;
+pub mod terminal;
 pub mod tray;
 pub mod wordpress;
 
@@ -19,6 +20,7 @@ use site::{Site, SiteDetail, SiteWithStatus};
 pub struct AppState {
     pub db: Mutex<Db>,
     pub data_dir: PathBuf,
+    pub terminals: terminal::PtyManager,
 }
 
 #[derive(Serialize)]
@@ -253,6 +255,54 @@ fn set_app_setting(state: State<AppState>, key: String, value: String) -> Result
     db.set_setting(&key, &value)
 }
 
+// ---------------------------------------------------------------------------
+// Terminals (interactive shells inside site containers)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn terminal_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    site_id: String,
+    cols: Option<u32>,
+    rows: Option<u32>,
+) -> Result<String, String> {
+    let site = site::get(&state, &site_id)?;
+    let containers = docker::compose_ps(&site.dir()).await?;
+    let running = containers
+        .iter()
+        .any(|c| c.service == "wordpress" && c.state == "running");
+    if !running {
+        return Err(format!(
+            "\"{}\" is not running — start the site first.",
+            site.name
+        ));
+    }
+    state
+        .terminals
+        .open(&app, &site.dir(), cols.unwrap_or(80), rows.unwrap_or(24))
+}
+
+#[tauri::command]
+fn terminal_write(state: State<AppState>, terminal_id: String, data: String) -> Result<(), String> {
+    state.terminals.write(&terminal_id, &data)
+}
+
+#[tauri::command]
+fn terminal_resize(
+    state: State<AppState>,
+    terminal_id: String,
+    cols: u32,
+    rows: u32,
+) -> Result<(), String> {
+    state.terminals.resize(&terminal_id, cols, rows)
+}
+
+#[tauri::command]
+fn terminal_close(state: State<AppState>, terminal_id: String) -> Result<(), String> {
+    state.terminals.close(&terminal_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = dirs::data_dir()
@@ -269,6 +319,7 @@ pub fn run() {
         .manage(AppState {
             db: Mutex::new(db),
             data_dir,
+            terminals: terminal::PtyManager::new(),
         })
         .setup(|app| {
             tray::setup(app.handle())?;
@@ -309,6 +360,10 @@ pub fn run() {
             trust_router_ca,
             get_app_setting,
             set_app_setting,
+            terminal_open,
+            terminal_write,
+            terminal_resize,
+            terminal_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

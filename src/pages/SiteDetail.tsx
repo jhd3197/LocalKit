@@ -101,6 +101,12 @@ export default function SiteDetail({ id }: { id: string }) {
             </button>
           )}
           <button
+            onClick={() => navigate({ name: "terminal", siteId: id })}
+            className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500"
+          >
+            Terminal
+          </button>
+          <button
             onClick={() => {
               if (window.confirm(`Delete "${detail.name}"? This removes its containers, database and files.`)) {
                 void remove(id).then(() => navigate({ name: "sites" }));

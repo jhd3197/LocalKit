@@ -437,6 +437,7 @@ fn make_state(cli: &Cli) -> Result<AppState, String> {
     Ok(AppState {
         db: Mutex::new(db),
         data_dir,
+        terminals: localkit_lib::terminal::PtyManager::new(),
     })
 }
 

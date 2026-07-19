@@ -99,3 +99,13 @@ export interface RouterStatus {
   ca_trusted: boolean;
   error: string | null;
 }
+
+export interface TerminalDataEvent {
+  terminalId: string;
+  data: string;
+}
+
+export interface TerminalExitEvent {
+  terminalId: string;
+  code: number | null;
+}
