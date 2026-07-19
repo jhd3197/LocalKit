@@ -96,6 +96,10 @@ pub async fn compose_up(dir: &Path) -> Result<(), String> {
     compose(dir, &["up", "-d"]).await.map(|_| ())
 }
 
+pub async fn compose_restart(dir: &Path) -> Result<(), String> {
+    compose(dir, &["restart"]).await.map(|_| ())
+}
+
 pub async fn compose_down(dir: &Path, volumes: bool) -> Result<(), String> {
     let args: &[&str] = if volumes { &["down", "-v"] } else { &["down"] };
     compose(dir, args).await.map(|_| ())
@@ -151,6 +155,22 @@ pub async fn compose_run_stdin(
 pub async fn compose_logs(dir: &Path, tail: u32) -> Result<String, String> {
     let tail_arg = format!("--tail={tail}");
     compose(dir, &["logs", "--no-color", &tail_arg]).await
+}
+
+/// Run a command inside a running compose service container:
+/// `docker compose exec -T <service> <args...>`
+pub async fn compose_exec(dir: &Path, service: &str, args: &[&str]) -> Result<String, String> {
+    let mut full: Vec<&str> = vec!["exec", "-T", service];
+    full.extend_from_slice(args);
+    compose(dir, &full).await
+}
+
+/// Copy a file out of a service container:
+/// `docker compose cp <service>:<src> <dest>`
+pub async fn compose_cp(dir: &Path, service: &str, src: &str, dest: &Path) -> Result<(), String> {
+    let from = format!("{service}:{src}");
+    let dest_arg = dest.to_string_lossy().to_string();
+    compose(dir, &["cp", &from, &dest_arg]).await.map(|_| ())
 }
 
 pub async fn compose_ps(dir: &Path) -> Result<Vec<ContainerInfo>, String> {

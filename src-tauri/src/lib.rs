@@ -1,15 +1,17 @@
 pub mod db;
 pub mod docker;
+pub mod router;
 pub mod serverkit;
 pub mod site;
 pub mod sync;
+pub mod tray;
 pub mod wordpress;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use db::Db;
 use site::{Site, SiteDetail, SiteWithStatus};
@@ -60,22 +62,30 @@ async fn create_site(
     wp_version: String,
     php_version: String,
 ) -> Result<Site, String> {
-    site::create(Some(&app), &state, name, wp_version, php_version).await
+    let site = site::create(Some(&app), &state, name, wp_version, php_version).await?;
+    tray::refresh(&app);
+    Ok(site)
 }
 
 #[tauri::command]
-async fn start_site(state: State<'_, AppState>, id: String) -> Result<Site, String> {
-    site::start(&state, &id).await
+async fn start_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Site, String> {
+    let site = site::start(&state, &id).await?;
+    tray::refresh(&app);
+    Ok(site)
 }
 
 #[tauri::command]
-async fn stop_site(state: State<'_, AppState>, id: String) -> Result<Site, String> {
-    site::stop(&state, &id).await
+async fn stop_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Site, String> {
+    let site = site::stop(&state, &id).await?;
+    tray::refresh(&app);
+    Ok(site)
 }
 
 #[tauri::command]
-async fn delete_site(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    site::delete(&state, &id).await
+async fn delete_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    site::delete(&state, &id).await?;
+    tray::refresh(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -205,6 +215,44 @@ fn list_sync_history(state: State<AppState>, site_id: String) -> Result<Vec<sync
     sync::history(&state, &site_id)
 }
 
+// ---------------------------------------------------------------------------
+// Local domains (M6) — shared Caddy router on ports 80/443
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn router_status(state: State<'_, AppState>) -> Result<router::RouterStatus, String> {
+    router::status(&state).await
+}
+
+#[tauri::command]
+async fn set_domains_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<router::RouterStatus, String> {
+    router::set_enabled(&state, enabled).await
+}
+
+#[tauri::command]
+async fn trust_router_ca(state: State<'_, AppState>) -> Result<router::RouterStatus, String> {
+    router::trust_ca(&state).await
+}
+
+// ---------------------------------------------------------------------------
+// App settings (generic KV over app_settings; used by the tray toggle)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_app_setting(state: State<AppState>, key: String) -> Result<Option<String>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_setting(&key)
+}
+
+#[tauri::command]
+fn set_app_setting(state: State<AppState>, key: String, value: String) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.set_setting(&key, &value)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = dirs::data_dir()
@@ -213,10 +261,27 @@ pub fn run() {
     let db = Db::open(&data_dir.join("localkit.db")).expect("failed to open LocalKit database");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Second launch while running (e.g. hidden in tray): just focus.
+            tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             db: Mutex::new(db),
             data_dir,
+        })
+        .setup(|app| {
+            tray::setup(app.handle())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Close-to-tray: hide instead of quitting when enabled (default).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && tray::run_in_background(&window.state::<AppState>()) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             check_docker,
@@ -239,6 +304,11 @@ pub fn run() {
             push_site_db,
             pull_site_db,
             list_sync_history,
+            router_status,
+            set_domains_enabled,
+            trust_router_ca,
+            get_app_setting,
+            set_app_setting,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -42,9 +42,11 @@ async fn wp(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Auto-install WordPress with generated admin credentials.
+/// `url` is the public URL the site will be reached at (localhost:<port> or,
+/// when local domains are enabled, http(s)://<slug>.test).
 /// Retries while the containers/DB finish their first boot.
-pub async fn install(dir: &Path, site: &Site, admin_pass: &str) -> Result<(), String> {
-    let url_arg = format!("--url=http://localhost:{}", site.port);
+pub async fn install(dir: &Path, site: &Site, admin_pass: &str, url: &str) -> Result<(), String> {
+    let url_arg = format!("--url={url}");
     let title_arg = format!("--title={}", site.name);
     let user_arg = format!("--admin_user={}", site.admin_user);
     let pass_arg = format!("--admin_password={admin_pass}");

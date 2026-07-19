@@ -4,6 +4,7 @@
 import type {
   AppInfo,
   RemoteWpSite,
+  RouterStatus,
   ServerKitConnection,
   SiteDetail,
   SiteWithStatus,
@@ -134,6 +135,18 @@ export const siteLogs: Record<string, string> = {
   "site-hiking-blog": "No logs — containers are stopped.",
   "site-client-demo": "Creating containers…",
 };
+
+// M6 local domains: fictional router state. Enabled + running so dashboard /
+// detail shots render `*.test` URLs; CA untrusted until trust_router_ca.
+export const routerStatus: RouterStatus = {
+  enabled: true,
+  running: true,
+  ca_trusted: false,
+  error: null,
+};
+
+/** In-memory app_settings KV (e.g. run_in_background for the tray toggle). */
+export const appSettings: Record<string, string> = {};
 
 export const connections: ServerKitConnection[] = [
   {

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:mock": "vite --mode mock --port 1425 --strictPort",
+    "dev:mock": "vite --mode mock --port 1426 --strictPort",
     "shots": "node scripts/capture-screenshots.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
@@ -19,6 +19,8 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
     "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",

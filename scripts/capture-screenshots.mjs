@@ -16,7 +16,7 @@ import puppeteer from "puppeteer-core";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const OUT = path.join(ROOT, "docs", "screenshots");
-const PORT = 1425;
+const PORT = 1426;
 const URL = `http://localhost:${PORT}/`;
 
 const CHROME_CANDIDATES = [
@@ -85,10 +85,11 @@ async function main() {
       await page.screenshot({ path: file });
       console.log("  ✓", `${name}.png`);
     };
-    // Wait until some text appears anywhere in the document.
+    // Wait until some text appears anywhere in the document (case-insensitive;
+    // CSS `uppercase` classes change what innerText returns).
     const waitForText = (text, timeout = 15_000) =>
       page.waitForFunction(
-        (t) => document.body.innerText.includes(t),
+        (t) => document.body.innerText.toLowerCase().includes(t.toLowerCase()),
         { timeout },
         text
       );
@@ -109,11 +110,18 @@ async function main() {
       if (!ok) throw new Error(`could not click ${selector} "${text}"`);
     };
 
-    // 1) Dashboard — site list with status badges.
+    // 1) Dashboard — grid view with status badges.
     await waitForText("Pixel Bakery");
     await waitForText("Client Demo");
     await settle(600);
     await shot("dashboard");
+
+    // 1b) Dashboard — dense list view via the toolbar toggle.
+    await page.click('button[aria-label="List view"]');
+    await settle(400);
+    await shot("dashboard-list");
+    await page.click('button[aria-label="Grid view"]');
+    await settle(300);
 
     // 2) Site detail — open a running site (credentials, wp-cli info, sync).
     await clickText("button", "Pixel Bakery");
@@ -125,7 +133,7 @@ async function main() {
     // 3) New site dialog — back to the dashboard, open it, type a name.
     await clickText("button", "← Back to sites");
     await waitForText("Pixel Bakery");
-    await clickText("button", "+ New Site");
+    await clickText("button", "New Site");
     await waitForText("New WordPress site");
     await page.type('input[placeholder="My Blog"]', "Portfolio Redesign");
     await settle(400);
@@ -133,12 +141,19 @@ async function main() {
     await clickText("button", "Cancel");
     await settle(300);
 
-    // 4) Settings — Docker status + a ServerKit connection row.
-    await clickText("nav button", "Settings");
+    // 4) Settings modal — opened via the sidebar gear icon; sectioned rail.
+    await page.click('button[aria-label="Settings"]');
     await waitForText("Docker is running");
-    await waitForText("Production");
     await settle(600);
     await shot("settings");
+    await clickText("nav button", "Local domains");
+    await waitForText("Trust HTTPS certificate");
+    await settle(400);
+    await shot("settings-domains");
+    await clickText("nav button", "ServerKit");
+    await waitForText("Production");
+    await settle(400);
+    await shot("settings-serverkit");
 
     console.log("› done. Wrote PNGs to docs/screenshots/");
   } finally {

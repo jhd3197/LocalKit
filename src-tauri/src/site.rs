@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-use crate::{docker, wordpress, AppState};
+use crate::{docker, router, wordpress, AppState};
 
 /// Allowlisted versions (kept small on purpose; extend as needed).
 pub const WP_VERSIONS: &[&str] = &["6.7", "6.6", "6.5"];
@@ -70,17 +70,21 @@ pub struct SiteEvent {
 }
 
 /// Emit a progress event to the frontend. `app` is optional so the lifecycle
-/// can also be driven from tests / example binaries without a Tauri runtime.
+/// can also be driven from tests / example binaries / the `lk` CLI without a
+/// Tauri runtime; in that case progress is printed to stderr instead.
 fn emit(app: Option<&AppHandle>, id: &str, stage: &str, message: &str) {
-    if let Some(app) = app {
-        let _ = app.emit(
-            "site-event",
-            SiteEvent {
-                id: id.to_string(),
-                stage: stage.to_string(),
-                message: message.to_string(),
-            },
-        );
+    match app {
+        Some(app) => {
+            let _ = app.emit(
+                "site-event",
+                SiteEvent {
+                    id: id.to_string(),
+                    stage: stage.to_string(),
+                    message: message.to_string(),
+                },
+            );
+        }
+        None => eprintln!("[{stage}] {message}"),
     }
 }
 
@@ -321,7 +325,14 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
 
     emit(app, &site.id, "install", "Installing WordPress...");
     let admin_pass = random_password(16);
-    wordpress::install(&dir, site, &admin_pass).await?;
+    // Install at the site's local domain when the router is enabled (M6).
+    let (domains_on, ca_trusted) = router::enabled_and_trusted(state);
+    let install_url = if domains_on {
+        router::site_url(&site.slug, ca_trusted)
+    } else {
+        format!("http://localhost:{}", site.port)
+    };
+    wordpress::install(&dir, site, &admin_pass, &install_url).await?;
 
     let mut site = site.clone();
     site.status = "running".into();
@@ -331,11 +342,14 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
         db.set_status(&site.id, "running")?;
         db.update_credentials(&site.id, &site.admin_user, &site.admin_pass)?;
     }
+    // Add the new site to the router's Caddyfile + hosts block (no-op when disabled).
+    router::refresh_routes(state).await;
+    router::refresh_hosts(state).await;
     emit(
         app,
         &site.id,
         "done",
-        &format!("{} is ready at http://localhost:{}", site.name, site.port),
+        &format!("{} is ready at {}", site.name, install_url),
     );
     Ok(site)
 }
@@ -390,6 +404,7 @@ pub async fn start(state: &AppState, id: &str) -> Result<Site, String> {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.set_status(id, "running")?;
     }
+    router::refresh_routes(state).await;
     get(state, id)
 }
 
@@ -400,6 +415,7 @@ pub async fn stop(state: &AppState, id: &str) -> Result<Site, String> {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.set_status(id, "stopped")?;
     }
+    router::refresh_routes(state).await;
     get(state, id)
 }
 
@@ -411,8 +427,15 @@ pub async fn delete(state: &AppState, id: &str) -> Result<(), String> {
         let _ = docker::compose_down(&dir, true).await;
         std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to remove site directory: {e}"))?;
     }
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.delete_site(id)
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.delete_site(id)?;
+    }
+    // Drop the deleted site from the router's Caddyfile + hosts block
+    // (no-op when disabled).
+    router::refresh_routes(state).await;
+    router::refresh_hosts(state).await;
+    Ok(())
 }
 
 pub async fn list(state: &AppState) -> Result<Vec<SiteWithStatus>, String> {

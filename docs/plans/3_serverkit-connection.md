@@ -1,11 +1,11 @@
-# Plan 3 — ServerKit Read-Only Connection (M3)
+# Plan 3 — ServerKit Connection (M3) ✅
 
 ## Context
 
 LocalKit's endgame is push/pull to servers managed by ServerKit. Before
-building sync, M3 validates the ServerKit API surface with a read-only
-connection: save a server URL + API key, test it, and (where the API allows)
-browse remote WordPress sites.
+building sync, M3 validates the ServerKit API surface: save a server URL +
+API key, test it, detect whether the `serverkit-localkit` extension is
+installed, and browse remote WordPress sites.
 
 ## Approach
 
@@ -14,23 +14,27 @@ browse remote WordPress sites.
 reqwest (rustls) client sending an `X-API-Key` header. `test_connection` =
 public `GET /api/v1/system/health` (no key sent — ServerKit 401s *any*
 request carrying an invalid key) + key validation via
-`GET /api/v1/setup-health/account` (`@auth_required`).
+`GET /api/v1/setup-health/account` (`@auth_required`) + a
+`/api/v1/localkit/pair` probe that reports whether the extension is present.
 
 ### Persistence
 
 `serverkit_connections` table (migration 2). **API keys are stored in
 plaintext SQLite** — accepted for v1, keyring is planned in M5.
 
-### Known upstream limitation
+### Why the extension
 
-`GET /api/v1/wordpress/sites` is bare `@jwt_required()` upstream today, so
-API keys get 401/422 `{"msg": ...}` — mapped to a clear "needs M4 extension"
-error in the UI instead of a generic failure.
+Core `GET /api/v1/wordpress/sites` is bare `@jwt_required()` upstream, so API
+keys get 401/422 there. All WordPress operations therefore go through the
+`serverkit-localkit` extension (`/api/v1/localkit/...`), which is
+API-key-aware; a missing extension maps to a clear "install the extension"
+error.
 
 ### UI
 
-Settings page section: add/test/delete connections, browse remote sites when
-the API permits.
+Settings page section: add/test/delete connections (test result shows health,
+key validity, and extension presence), browse remote sites, provision new
+ones.
 
 ## Phases
 
@@ -52,4 +56,4 @@ the API permits.
 ## Verification
 
 Manual against a real ServerKit instance: health check passes without a key,
-bad key → clear 401 message, good key → account info shown.
+bad key → clear 401 message, good key → account info + extension flag shown.

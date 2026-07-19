@@ -1,14 +1,39 @@
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-zinc-950 font-sans text-zinc-100 antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid rgba(108, 92, 231, 0.55);
+    outline-offset: 1px;
+  }
+}
 
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: #2a2f40;
   border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4056;
 }
 ::-webkit-scrollbar-track {
   background: transparent;

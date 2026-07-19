@@ -16,13 +16,14 @@ export default function ServerKitSettings() {
         <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">
           ServerKit connections
         </h2>
-        <span className="rounded-full border border-zinc-700 bg-zinc-500/15 px-2.5 py-0.5 text-xs font-medium text-zinc-400">
-          Read-only
+        <span className="rounded-full border border-violet-800 bg-violet-500/15 px-2.5 py-0.5 text-xs font-medium text-violet-400">
+          Push/pull
         </span>
       </div>
       <p className="mt-3 text-sm text-zinc-500">
-        Connect to a ServerKit-managed server to see its WordPress sites. Push/pull of code and
-        databases arrives in a later milestone. API keys are stored in LocalKit's local database.
+        Connect to a ServerKit-managed server to browse its WordPress sites and push/pull code and
+        databases from a site's detail page. Requires the serverkit-localkit extension on the
+        server. API keys are stored in LocalKit's local database.
       </p>
 
       <ConnectionForm />
@@ -52,7 +53,7 @@ function ConnectionForm() {
   const [error, setError] = useState<string | null>(null);
 
   const input =
-    "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-600";
+    "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600";
 
   const doTest = async () => {
     setError(null);
@@ -103,7 +104,7 @@ function ConnectionForm() {
         <button
           onClick={() => void doSave()}
           disabled={saving || !label.trim() || !url.trim() || !apiKey.trim()}
-          className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save connection"}
         </button>
