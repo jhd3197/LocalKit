@@ -42,6 +42,14 @@ export interface WpInfo {
   plugins: PluginInfo[];
 }
 
+/** A WordPress user, for the WP Admin one-click login picker. */
+export interface WpUser {
+  id: number;
+  login: string;
+  name: string;
+  roles: string;
+}
+
 export interface AppInfo {
   data_dir: string;
   sites_dir: string;

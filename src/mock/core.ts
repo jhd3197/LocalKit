@@ -124,6 +124,25 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return data.wpInfo[site.id] ?? { core_version: site.wp_version, plugins: [] };
     }
 
+    case "login_site": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      if (site.live_status !== "running") {
+        throw `"${site.name}" is not running — start the site first.`;
+      }
+      return `http://localhost:${site.port}/wp-login.php?localkit-login=mock-token&uid=${a.userId ?? 1}`;
+    }
+
+    case "site_wp_users": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      if (site.live_status !== "running") throw "site is not running";
+      return [
+        { id: 1, login: site.admin_user, name: "Site Admin", roles: "administrator" },
+        { id: 2, login: "editor", name: "Demo Editor", roles: "editor" },
+      ];
+    }
+
     case "save_serverkit_connection": {
       const conn = {
         id: `conn-${slugify(String(a.label))}`,

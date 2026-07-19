@@ -15,6 +15,7 @@ import type {
   TerminalDataEvent,
   TerminalExitEvent,
   WpInfo,
+  WpUser,
 } from "./types";
 
 /** Typed wrappers around the Tauri commands exposed by the Rust backend. */
@@ -30,6 +31,8 @@ export const ipc = {
   deleteSite: (id: string) => invoke<void>("delete_site", { id }),
   siteLogs: (id: string, tail = 200) => invoke<string>("site_logs", { id, tail }),
   wpCliInfo: (id: string) => invoke<WpInfo>("wp_cli_info", { id }),
+  loginSite: (id: string, userId?: number) => invoke<string>("login_site", { id, userId }),
+  siteWpUsers: (id: string) => invoke<WpUser[]>("site_wp_users", { id }),
   saveServerkitConnection: (label: string, url: string, apiKey: string) =>
     invoke<ServerKitConnection>("save_serverkit_connection", { label, url, apiKey }),
   listServerkitConnections: () => invoke<ServerKitConnection[]>("list_serverkit_connections"),
