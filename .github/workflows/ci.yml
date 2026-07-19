@@ -1,0 +1,63 @@
+name: ci
+
+# Fast feedback for every push + PR: cargo check + tests across the workspace
+# (GUI lib/bin and the lk CLI crate) and the Vite typecheck + production
+# bundle. No bundling, no platform matrix — that's what a release workflow
+# is for (M5).
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Linux — install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: TypeScript + Vite build
+        run: npm run build
+
+      - name: cargo check (whole workspace — GUI lib/bin + lk CLI)
+        working-directory: src-tauri
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test (lk unit tests + lib tests)
+        working-directory: src-tauri
+        run: cargo test --workspace
+
+      - name: cargo clippy (warnings allowed for now)
+        working-directory: src-tauri
+        run: cargo clippy --workspace -- -D warnings -A clippy::all
+        continue-on-error: true

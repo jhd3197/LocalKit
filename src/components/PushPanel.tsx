@@ -48,7 +48,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
   const selectedRemote: RemoteWpSite | undefined = sites.find((s) => s.id === remoteSiteId);
 
   const select =
-    "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-600";
+    "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600";
 
   const op = async (label: string, fn: () => Promise<void>) => {
     setBusy(label);
@@ -131,7 +131,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
             value={newSiteName}
             onChange={(e) => setNewSiteName(e.target.value)}
             placeholder="New remote site name…"
-            className="w-56 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-emerald-600"
+            className="w-56 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-violet-600"
           />
           <button
             onClick={() => void createRemote()}
@@ -150,7 +150,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
             void op("code", () => ipc.pushSiteCode(connectionId, siteId, remoteSiteId as number))
           }
           disabled={busy !== null || !connectionId || !remoteSiteId}
-          className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
         >
           {busy === "code" ? "Pushing…" : "Push code"}
         </button>
@@ -159,7 +159,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
             void op("pushdb", () => ipc.pushSiteDb(connectionId, siteId, remoteSiteId as number))
           }
           disabled={busy !== null || !connectionId || !remoteSiteId || !running}
-          className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
         >
           {busy === "pushdb" ? "Pushing…" : "Push DB"}
         </button>

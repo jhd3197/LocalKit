@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { onSiteEvent } from "./lib/ipc";
 import { useNav } from "./stores/nav";
+import { useRouter } from "./stores/router";
 import { useSites } from "./stores/sites";
 import Sidebar from "./components/Sidebar";
 import Dashboard from "./pages/Dashboard";
@@ -9,6 +10,7 @@ import Settings from "./pages/Settings";
 
 export default function App() {
   const page = useNav((s) => s.page);
+  const settingsOpen = useNav((s) => s.settingsOpen);
   const handleEvent = useSites((s) => s.handleEvent);
   const progress = useSites((s) => s.progress);
   const dismissProgress = useSites((s) => s.dismissProgress);
@@ -17,6 +19,7 @@ export default function App() {
 
   useEffect(() => {
     void useSites.getState().refresh();
+    void useRouter.getState().refresh();
     const unlisten = onSiteEvent(handleEvent);
     return () => {
       void unlisten.then((f) => f());
@@ -31,8 +34,9 @@ export default function App() {
       <main className="flex-1 overflow-y-auto">
         {page.name === "sites" && <Dashboard />}
         {page.name === "site" && <SiteDetail id={page.id} />}
-        {page.name === "settings" && <Settings />}
       </main>
+
+      {settingsOpen && <Settings />}
 
       {/* Progress toast for long operations (site create) */}
       {progress && (
@@ -46,7 +50,7 @@ export default function App() {
           }`}
         >
           {inFlight && (
-            <span className="mt-0.5 inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-500 border-t-emerald-400" />
+            <span className="mt-0.5 inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-500 border-t-violet-400" />
           )}
           <p className="flex-1 text-sm">{progress.message}</p>
           <button

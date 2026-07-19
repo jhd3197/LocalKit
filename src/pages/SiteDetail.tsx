@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../lib/ipc";
+import { siteUrl } from "../lib/domains";
 import { useNav } from "../stores/nav";
+import { useRouter } from "../stores/router";
 import { useSites } from "../stores/sites";
 import type { SiteDetail as SiteDetailData } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
@@ -19,6 +21,7 @@ export default function SiteDetail({ id }: { id: string }) {
   const wpInfo = useSites((s) => s.wpInfo[id]);
   const fetchWpInfo = useSites((s) => s.fetchWpInfo);
   const sites = useSites((s) => s.sites);
+  const router = useRouter((s) => s.status);
 
   const [detail, setDetail] = useState<SiteDetailData | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -65,7 +68,7 @@ export default function SiteDetail({ id }: { id: string }) {
     );
   }
 
-  const url = `http://localhost:${detail.port}`;
+  const url = siteUrl(detail.slug, detail.port, router);
   const running = detail.live_status === "running";
 
   return (
@@ -92,7 +95,7 @@ export default function SiteDetail({ id }: { id: string }) {
             <button
               onClick={() => void start(id)}
               disabled={busyId === id}
-              className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+              className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
             >
               Start
             </button>
@@ -115,7 +118,7 @@ export default function SiteDetail({ id }: { id: string }) {
         {/* URL */}
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Site</h2>
-          <p className="mt-3 font-mono text-sm text-emerald-400">{url}</p>
+          <p className="mt-3 font-mono text-sm text-violet-400">{url}</p>
           <p className="mt-1 text-xs text-zinc-600">
             WordPress {detail.wp_version} · PHP {detail.php_version}
           </p>
@@ -123,7 +126,7 @@ export default function SiteDetail({ id }: { id: string }) {
             <button
               onClick={() => void openUrl(url)}
               disabled={!running}
-              className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+              className="rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50"
             >
               Open site
             </button>
@@ -198,7 +201,7 @@ export default function SiteDetail({ id }: { id: string }) {
           ) : (
             <>
               <p className="mt-3 text-sm text-zinc-300">
-                Core version: <span className="font-mono text-emerald-400">{wpInfo.core_version}</span>
+                Core version: <span className="font-mono text-violet-400">{wpInfo.core_version}</span>
               </p>
               <table className="mt-3 w-full text-sm">
                 <thead>
@@ -226,7 +229,9 @@ export default function SiteDetail({ id }: { id: string }) {
       </div>
 
       {/* ServerKit push/pull (M4) */}
-      <PushPanel siteId={id} running={running} />
+      <div className="mt-4">
+        <PushPanel siteId={id} running={running} />
+      </div>
 
       {/* Logs */}
       <section className="mt-4 rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
@@ -238,7 +243,7 @@ export default function SiteDetail({ id }: { id: string }) {
                 type="checkbox"
                 checked={autoRefresh}
                 onChange={(e) => setAutoRefresh(e.target.checked)}
-                className="accent-emerald-500"
+                className="accent-violet-500"
               />
               Auto-refresh
             </label>

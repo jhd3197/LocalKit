@@ -60,7 +60,7 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
               onChange={(e) => setName(e.target.value)}
               placeholder="My Blog"
               autoFocus
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-600"
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600"
             />
           </label>
 
@@ -70,7 +70,7 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
               <select
                 value={wpVersion}
                 onChange={(e) => setWpVersion(e.target.value)}
-                className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-600"
+                className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600"
               >
                 {versions.wp_versions.map((v) => (
                   <option key={v} value={v}>
@@ -84,7 +84,7 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
               <select
                 value={phpVersion}
                 onChange={(e) => setPhpVersion(e.target.value)}
-                className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-600"
+                className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600"
               >
                 {versions.php_versions.map((v) => (
                   <option key={v} value={v}>
@@ -109,7 +109,7 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
           <button
             onClick={submit}
             disabled={creating || !name.trim()}
-            className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+            className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
           >
             {creating ? "Creating…" : "Create site"}
           </button>

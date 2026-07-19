@@ -22,7 +22,7 @@ Tauri updater plugin with signed releases published from GitHub Releases.
 
 Replace plaintext ServerKit API keys with the OS keyring (keyring crate);
 SQLite keeps a key reference. Migration: on first run after upgrade, move
-existing keys and null the column.
+existing keys and null the column (migration 4 — migration 3 is sync history).
 
 ### Tests
 
@@ -38,13 +38,13 @@ existing keys and null the column.
 1. CI workflow (cargo check + tsc/vite build)
 2. Release workflow (build + sign + publish installers)
 3. Tauri updater wiring
-4. Keyring migration (migration 3)
+4. Keyring migration (migration 4)
 5. Test suite + coverage of the risky bits (ports, templates, migrations)
 
 ## Integration points
 
 `.github/workflows/{ci,release}.yml` (new), `src-tauri/src/db.rs`
-(migration 3), `src-tauri/src/serverkit.rs` (keyring), `tauri.conf.json`
+(migration 4), `src-tauri/src/serverkit.rs` (keyring), `tauri.conf.json`
 
 ## Risks
 

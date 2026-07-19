@@ -4,6 +4,7 @@ import type {
   AppInfo,
   DockerStatus,
   RemoteWpSite,
+  RouterStatus,
   ServerKitConnection,
   ServerKitInfo,
   Site,
@@ -43,6 +44,13 @@ export const ipc = {
   pullSiteDb: (connectionId: string, siteId: string, remoteSiteId: number, remoteUrl: string | null) =>
     invoke<void>("pull_site_db", { connectionId, siteId, remoteSiteId, remoteUrl }),
   listSyncHistory: (siteId: string) => invoke<SyncRecord[]>("list_sync_history", { siteId }),
+  routerStatus: () => invoke<RouterStatus>("router_status"),
+  setDomainsEnabled: (enabled: boolean) =>
+    invoke<RouterStatus>("set_domains_enabled", { enabled }),
+  trustRouterCa: () => invoke<RouterStatus>("trust_router_ca"),
+  getAppSetting: (key: string) => invoke<string | null>("get_app_setting", { key }),
+  setAppSetting: (key: string, value: string) =>
+    invoke<void>("set_app_setting", { key, value }),
 };
 
 /** Subscribe to progress events emitted during long operations (site create). */

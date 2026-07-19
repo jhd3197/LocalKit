@@ -207,6 +207,28 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "list_sync_history":
       return data.syncHistory[String(a.siteId)] ?? [];
 
+    case "router_status":
+      return { ...data.routerStatus };
+
+    case "set_domains_enabled": {
+      const enabled = Boolean(a.enabled);
+      data.routerStatus.enabled = enabled;
+      data.routerStatus.running = enabled;
+      data.routerStatus.error = null;
+      return { ...data.routerStatus };
+    }
+
+    case "trust_router_ca":
+      data.routerStatus.ca_trusted = true;
+      return { ...data.routerStatus };
+
+    case "get_app_setting":
+      return (data.appSettings[String(a.key)] as string | undefined) ?? null;
+
+    case "set_app_setting":
+      data.appSettings[String(a.key)] = String(a.value);
+      return null;
+
     default:
       console.warn(`[mock] unhandled command: ${cmd}`);
       return null;

@@ -90,6 +90,50 @@ impl Db {
                 )
                 .map_err(|e| format!("migration 3 failed: {e}"))?;
         }
+        if version < 4 {
+            // M6 local domains: key-value app settings (domains_enabled,
+            // router_ca_trusted, router_last_error).
+            self.conn
+                .execute_batch(
+                    "
+                    CREATE TABLE app_settings (
+                        key   TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    PRAGMA user_version = 4;
+                    ",
+                )
+                .map_err(|e| format!("migration 4 failed: {e}"))?;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // App settings (M6 local domains)
+    // -----------------------------------------------------------------------
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(format!("failed to read setting {key}: {other}")),
+            })
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(|e| format!("failed to write setting {key}: {e}"))?;
         Ok(())
     }
 

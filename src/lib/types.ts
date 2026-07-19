@@ -92,3 +92,10 @@ export interface SyncRecord {
   message: string;
   created_at: string;
 }
+
+export interface RouterStatus {
+  enabled: boolean;
+  running: boolean;
+  ca_trusted: boolean;
+  error: string | null;
+}
