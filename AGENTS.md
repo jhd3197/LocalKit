@@ -16,7 +16,8 @@ src/                     React 18 + TS + Vite frontend
   lib/terminalRegistry.ts  xterm.js instances living outside React (one PTY per
                          site; scrollback survives page switches; attach/detach)
   stores/                Zustand stores (nav.ts = page state + settings modal +
-                         grid/list view pref, sites.ts = data/actions)
+                         grid/list view pref, sites.ts = data/actions,
+                         toast.ts = global toasts + module-level toast.* helpers)
   pages/                 Dashboard (grid/list site views), SiteDetail,
                          Terminal (one tab per site, shell in the wordpress
                          container), Settings (modal, opened via sidebar gear —
@@ -119,7 +120,17 @@ src-tauri/               Rust backend (also a cargo workspace root)
   including the profile-gated wpcli (`docker::compose_pull`) so first-run
   downloads are a labeled stage, not a silent stall. When there is no Tauri
   app handle (CLI, examples), `site::emit` prints `[stage] message` to stderr
-  instead of dropping the event.
+  instead of dropping the event. On the frontend, `sites.ts handleEvent`
+  renders these as a single pinned progress toast that resolves into
+  success/error on done/error.
+- **Toasts:** global feedback lives in `stores/toast.ts` — call
+  `toast.success/info/error(title, message?)` or `toast.progress`/`resolve`
+  from stores (never per-component plumbing); the viewport is
+  `components/Toasts.tsx` mounted once in `App.tsx`. For command failures use
+  `toastError(e, "Action name")` from `lib/errors.ts` — it unwraps the
+  `string` rejection and dedupes against the `error`-stage toast the
+  site-event stream already showed (create/push/pull both emit an error
+  event AND reject the promise).
 - **CLI (`lk`):** a thin workspace crate (`src-tauri/lk/`) over
   `localkit_lib` — never add logic to it that belongs in the library; keep
   both frontends (Tauri commands and the CLI) as thin wrappers. Conventions:

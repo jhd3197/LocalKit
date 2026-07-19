@@ -1,6 +1,6 @@
 # 12 — Toast notifications
 
-Status: ⬜ not started
+Status: ✅ shipped
 
 A global toast system so actions get visible success/failure feedback
 without page-level plumbing. Ported from Faro's `toastStore.ts`, trimmed to
