@@ -1,6 +1,6 @@
 # 10 — One-click WP Admin login (magic login link)
 
-Status: ⬜ not started
+Status: ✅ shipped
 
 Add a **"WP Admin"** button that logs the user straight into the site's
 `wp-admin` — no copy-pasting the password from the credentials card. One

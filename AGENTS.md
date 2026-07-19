@@ -71,9 +71,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   smoke site; **interactive only** (hosts-file writes trigger UAC/elevation
   prompts twice). Run `smoke -- create` first, `smoke -- cleanup` after.
 - `cd src-tauri && cargo run -p lk -- <cmd>` — headless CLI (`lk list |
-  create | start | stop | restart | delete | info | logs | wp | env | doctor`);
-  shares the GUI's data dir, so use `--data-dir` (or `LOCALKIT_DATA_DIR`) for
-  throwaway tests. See docs/plans/7_cli.md.
+  create | start | stop | restart | delete | info | logs | wp | env | login |
+  doctor`); shares the GUI's data dir, so use `--data-dir` (or
+  `LOCALKIT_DATA_DIR`) for throwaway tests. See docs/plans/7_cli.md.
 - CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
   build`, `cargo check --workspace --all-targets`, `cargo test --workspace`
   (matches Faro's CI shape).
@@ -163,6 +163,18 @@ src-tauri/               Rust backend (also a cargo workspace root)
   `terminal::PtyManager::new()`. Mock mode keeps fake shells in
   `mock/core.ts` (`mockShells`); `terminal_resize` must be a no-op there (the
   FitAddon fires one right after open).
+- **One-click login (plan 10):** `wordpress::login_url(dir, site, user,
+  base_url)` mints a one-time token (`wp option update localkit_login_token`
+  + `_exp`, ~120 s TTL) consumed by the MU plugin
+  `wp-content/mu-plugins/localkit-login.php` (`LOGIN_PLUGIN` const, written
+  idempotently by `ensure_login_plugin` at create and lazily on login — the
+  bind-mounted `wp-content` makes it a plain fs write). Base URL comes from
+  `router::site_public_url` (mirrors the frontend's `siteUrl`). Never log the
+  full login URL into events/history. Frontends: `login_site` /
+  `site_wp_users` Tauri commands (WP Admin button + user picker on
+  SiteDetail), `lk login [--user <id|login|email>] [--open]`. Default user =
+  the site's `admin_user`, falling back to the first administrator (pull DB
+  can overwrite local users).
 - **ServerKit (M3/M4):** client in `serverkit.rs` (reqwest rustls,
   `X-API-Key` header). `test_connection` = public `GET /api/v1/system/health`
   (no key sent — ServerKit 401s *any* request carrying an invalid key) + key
