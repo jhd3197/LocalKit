@@ -285,6 +285,14 @@ fn get_app_setting(state: State<AppState>, key: String) -> Result<Option<String>
 }
 
 #[tauri::command]
+fn settings_get_all(
+    state: State<AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_all_settings()
+}
+
+#[tauri::command]
 fn set_app_setting(state: State<AppState>, key: String, value: String) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.set_setting(&key, &value)
@@ -338,12 +346,26 @@ fn terminal_close(state: State<AppState>, terminal_id: String) -> Result<(), Str
     state.terminals.close(&terminal_id)
 }
 
+// ---------------------------------------------------------------------------
+// Pre-paint settings injection (plan 13)
+// ---------------------------------------------------------------------------
+
+/// JS run before any frontend code: publishes the app_settings KV as
+/// `window.__LOCALKIT_SETTINGS__` so the settings store seeds synchronously
+/// (no preference flash on cold start).
+fn build_settings_init_script(db: &Db) -> String {
+    let settings = db.get_all_settings().unwrap_or_default();
+    let json = serde_json::to_string(&settings).unwrap_or_else(|_| "{}".into());
+    format!("window.__LOCALKIT_SETTINGS__ = Object.freeze({json});")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("LocalKit");
     let db = Db::open(&data_dir.join("localkit.db")).expect("failed to open LocalKit database");
+    let settings_init_script = build_settings_init_script(&db);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -356,7 +378,15 @@ pub fn run() {
             data_dir,
             terminals: terminal::PtyManager::new(),
         })
-        .setup(|app| {
+        .setup(move |app| {
+            // Main window is built in code (not tauri.conf.json) so the
+            // settings init script can attach before first paint.
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+                .title("LocalKit")
+                .inner_size(1200.0, 800.0)
+                .min_inner_size(900.0, 600.0)
+                .initialization_script(&settings_init_script)
+                .build()?;
             tray::setup(app.handle())?;
             Ok(())
         })
@@ -397,6 +427,7 @@ pub fn run() {
             trust_router_ca,
             get_app_setting,
             set_app_setting,
+            settings_get_all,
             terminal_open,
             terminal_write,
             terminal_resize,
