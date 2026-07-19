@@ -67,6 +67,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   create | start | stop | restart | delete | info | logs | wp | env | doctor`);
   shares the GUI's data dir, so use `--data-dir` (or `LOCALKIT_DATA_DIR`) for
   throwaway tests. See docs/plans/7_cli.md.
+- CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
+  build`, `cargo check --workspace --all-targets`, `cargo test --workspace`
+  (matches Faro's CI shape).
 - Windows: use the **rustup MSVC toolchain** for cargo. If `cargo` resolves to a
   chocolatey/GNU install you get `dlltool.exe: program not found`; fix with
   `export PATH="$HOME/.cargo/bin:$PATH"`.
