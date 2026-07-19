@@ -77,6 +77,11 @@ export function attachSuggestions(
 
   /** Best guess of the shell's current input line (cursor assumed at end). */
   let line = "";
+  /** Marker on the buffer row where the current input line started. Registered
+   *  on the first keystroke of the line — NOT at Enter time: in xterm 6 input
+   *  delivery is async, so by the time the Enter keystroke reaches us the
+   *  shell's echo may already have moved the cursor off the command row. */
+  let lineMarker: IMarker | undefined;
   /** True once the line state can't be trusted (tab completion, cursor moves,
    *  Ctrl+R…). Cleared on the next line reset (Enter / Ctrl+C). */
   let dirty = false;
@@ -142,30 +147,35 @@ export function attachSuggestions(
   };
 
   // On Enter, only record the line if the shell actually echoed it back —
-  // checked a beat later against the buffer row the prompt was on. This is
+  // checked a beat later against the buffer row the input started on. This is
   // what keeps passwords (no echo) and desynced junk out of the history.
   const commit = () => {
     const cmd = line;
+    const marker = lineMarker;
     line = "";
+    lineMarker = undefined;
     const wasDirty = dirty;
     dirty = false;
-    if (wasDirty) return;
+    if (wasDirty) {
+      marker?.dispose();
+      return;
+    }
     const trimmed = cmd.trim();
     if (
       trimmed.length < MIN_PREFIX ||
       trimmed.length > MAX_CMD_LEN ||
       cmd.startsWith(" ") // bash HISTCONTROL convention: leading space = off the record
-    )
+    ) {
+      marker?.dispose();
       return;
-    const at = term.registerMarker(0);
-    if (!at) return;
+    }
     setTimeout(() => {
       try {
-        if (at.line >= 0 && logicalLineAt(term, at.line).includes(trimmed)) {
+        if (marker && marker.line >= 0 && logicalLineAt(term, marker.line).includes(trimmed)) {
           recordCommand(historyKey, trimmed);
         }
       } finally {
-        at.dispose();
+        marker?.dispose();
       }
     }, 250);
   };
@@ -185,14 +195,28 @@ export function attachSuggestions(
       } else if (ch === "\x03") {
         // Ctrl+C abandons the line; a fresh prompt follows.
         line = "";
+        lineMarker?.dispose();
+        lineMarker = undefined;
         dirty = false;
       } else if (ch === "\x15") {
         line = ""; // Ctrl+U kills the line
+        lineMarker?.dispose();
+        lineMarker = undefined;
       } else if (ch === "\x17") {
         line = line.replace(/\s+$/, "").replace(/\S+$/, ""); // Ctrl+W kills a word
+        if (line === "") {
+          lineMarker?.dispose();
+          lineMarker = undefined;
+        }
       } else if (ch < " ") {
         dirty = true; // tab completion, Ctrl+R, Ctrl+A… — can't track those
       } else {
+        if (line === "") {
+          // First keystroke of a new input line — pin the row it's starting
+          // on (echoes can only move the cursor within this row by now).
+          lineMarker?.dispose();
+          lineMarker = term.registerMarker(0);
+        }
         line += ch;
       }
     }
@@ -230,6 +254,8 @@ export function attachSuggestions(
       dataDisposable.dispose();
       writeDisposable.dispose();
       clearGhost();
+      lineMarker?.dispose();
+      lineMarker = undefined;
       term.attachCustomKeyEventHandler(() => true);
     },
   };

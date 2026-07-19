@@ -66,6 +66,7 @@ export function acquireTerminal(siteId: string): TermEntry {
     scrollback: getTerminalScrollback(), // new terminals only; live terms keep theirs
     lineHeight: 1.35,
     cursorBlink: true,
+    allowProposedApi: true, // registerDecoration (ghost text) is still proposed in xterm 6
     theme: {
       background: "#08090E",
       foreground: "#D8DBE6",
