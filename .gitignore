@@ -35,3 +35,6 @@ Thumbs.db
 *.local
 *.tsbuildinfo
 .eslintcache
+
+# Local-only plan executor prompt (per-machine, never commit)
+/docs/plans/prompt.md
