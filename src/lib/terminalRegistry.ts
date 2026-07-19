@@ -13,6 +13,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc, onTerminalData, onTerminalExit } from "./ipc";
 import { attachSuggestions } from "./termSuggest";
+import { getTerminalFontSize, getTerminalScrollback, useSettings } from "../stores/settings";
 
 export type TermStatus = "opening" | "ready" | "exited";
 
@@ -61,7 +62,8 @@ export function acquireTerminal(siteId: string): TermEntry {
 
   const term = new XTerm({
     fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 13,
+    fontSize: getTerminalFontSize(),
+    scrollback: getTerminalScrollback(), // new terminals only; live terms keep theirs
     lineHeight: 1.35,
     cursorBlink: true,
     theme: {
@@ -224,6 +226,18 @@ export function restartTerminal(siteId: string): TermEntry {
   disposeTerminal(siteId);
   return acquireTerminal(siteId);
 }
+
+// Live-apply the terminal font-size pref to every open terminal (scrollback
+// intentionally applies to newly created terminals only — xterm can't grow
+// an existing buffer's scrollback without dropping it).
+useSettings.subscribe((state, prev) => {
+  if (state.values.terminalFontSize === prev.values.terminalFontSize) return;
+  const px = getTerminalFontSize();
+  for (const entry of terminals.values()) {
+    entry.term.options.fontSize = px;
+    entry.refit();
+  }
+});
 
 // HMR: dispose every live terminal so a hot reload doesn't leak xterm
 // instances or orphan PTYs. Pages re-acquire on the next render.

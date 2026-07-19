@@ -97,18 +97,46 @@ export function useSiteView(): [SiteView, (view: SiteView) => void] {
   return [view, (v) => set("siteView", v)];
 }
 
-/** Terminal font size in px (plan 14 consumes; matches the current hardcode). */
-export function useTerminalFontSize(): number {
-  return useSettings((s) => {
-    const n = Number(s.values.terminalFontSize);
-    return Number.isFinite(n) && n > 0 ? n : 13;
-  });
+/** Terminal font size in px (11–16, default 13). */
+export const TERMINAL_FONT_SIZE_DEFAULT = 13;
+/** Terminal scrollback lines (default 5k). */
+export const TERMINAL_SCROLLBACK_DEFAULT = 5000;
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : fallback;
 }
 
-/** Terminal scrollback lines (plan 14 consumes). */
-export function useTerminalScrollback(): number {
-  return useSettings((s) => {
-    const n = Number(s.values.terminalScrollback);
-    return Number.isFinite(n) && n > 0 ? n : 5000;
-  });
+/** Non-hook read (terminal registry creates terminals outside React). */
+export function getTerminalFontSize(): number {
+  return parsePositiveInt(
+    useSettings.getState().values.terminalFontSize,
+    TERMINAL_FONT_SIZE_DEFAULT
+  );
+}
+
+/** Non-hook read (terminal registry creates terminals outside React). */
+export function getTerminalScrollback(): number {
+  return parsePositiveInt(
+    useSettings.getState().values.terminalScrollback,
+    TERMINAL_SCROLLBACK_DEFAULT
+  );
+}
+
+/** Terminal font size in px (plan 14; matches the historical hardcode). */
+export function useTerminalFontSize(): [number, (px: number) => void] {
+  const size = useSettings((s) =>
+    parsePositiveInt(s.values.terminalFontSize, TERMINAL_FONT_SIZE_DEFAULT)
+  );
+  const set = useSettings((s) => s.set);
+  return [size, (px) => set("terminalFontSize", String(px))];
+}
+
+/** Terminal scrollback lines (plan 14; applies to newly opened terminals). */
+export function useTerminalScrollback(): [number, (lines: number) => void] {
+  const lines = useSettings((s) =>
+    parsePositiveInt(s.values.terminalScrollback, TERMINAL_SCROLLBACK_DEFAULT)
+  );
+  const set = useSettings((s) => s.set);
+  return [lines, (n) => set("terminalScrollback", String(n))];
 }

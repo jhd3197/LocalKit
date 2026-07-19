@@ -2,14 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 import { ipc } from "../lib/ipc";
 import type { AppInfo, DockerStatus } from "../lib/types";
 import { useNav } from "../stores/nav";
+import { useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
 import ServerKitSettings from "../components/ServerKitSettings";
 import DomainsSettings from "../components/DomainsSettings";
-import { CloseIcon, GlobeIcon, ServerIcon, SlidersIcon } from "../components/icons";
+import { CloseIcon, GlobeIcon, ServerIcon, SlidersIcon, TerminalIcon } from "../components/icons";
 
-type SectionId = "general" | "domains" | "serverkit";
+type SectionId = "general" | "terminal" | "domains" | "serverkit";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "general", label: "General", icon: <SlidersIcon className="h-3.5 w-3.5" /> },
+  { id: "terminal", label: "Terminal", icon: <TerminalIcon className="h-3.5 w-3.5" /> },
   { id: "domains", label: "Local domains", icon: <GlobeIcon className="h-3.5 w-3.5" /> },
   { id: "serverkit", label: "ServerKit", icon: <ServerIcon className="h-3.5 w-3.5" /> },
 ];
@@ -81,6 +83,7 @@ export default function Settings() {
 
           <div className="flex-1 overflow-y-auto px-5 py-4">
             {active === "general" && <GeneralSection />}
+            {active === "terminal" && <TerminalSection />}
             {active === "domains" && <DomainsSettings />}
             {active === "serverkit" && <ServerKitSettings />}
           </div>
@@ -197,6 +200,86 @@ function GeneralSection() {
             <dd className="font-mono text-xs text-zinc-300">{info?.php_versions.join(", ") ?? "…"}</dd>
           </div>
         </dl>
+      </section>
+    </div>
+  );
+}
+
+const FONT_SIZES = [11, 12, 13, 14, 15, 16];
+const SCROLLBACKS: { label: string; value: number }[] = [
+  { label: "1k", value: 1000 },
+  { label: "5k", value: 5000 },
+  { label: "10k", value: 10000 },
+];
+
+function TerminalSection() {
+  const [fontSize, setFontSize] = useTerminalFontSize();
+  const [scrollback, setScrollback] = useTerminalScrollback();
+
+  return (
+    <div className="space-y-4">
+      {/* Font size — live-applies to open terminals */}
+      <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Font size</h2>
+        <div className="mt-2.5 flex items-center gap-1">
+          {FONT_SIZES.map((px) => (
+            <button
+              key={px}
+              onClick={() => setFontSize(px)}
+              aria-pressed={fontSize === px}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium tabular-nums transition-colors ${
+                fontSize === px
+                  ? "bg-violet-500/15 text-violet-400"
+                  : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
+              }`}
+            >
+              {px}
+            </button>
+          ))}
+          <span className="ml-2 text-xs text-zinc-600">px</span>
+        </div>
+        <p className="mt-2.5 text-sm text-zinc-500">
+          Applies immediately to every open terminal.
+        </p>
+      </section>
+
+      {/* Scrollback — new terminals only */}
+      <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Scrollback lines
+        </h2>
+        <div className="mt-2.5 flex items-center gap-1">
+          {SCROLLBACKS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setScrollback(opt.value)}
+              aria-pressed={scrollback === opt.value}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium tabular-nums transition-colors ${
+                scrollback === opt.value
+                  ? "bg-violet-500/15 text-violet-400"
+                  : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <p className="mt-2.5 text-sm text-zinc-500">
+          Applies to newly opened terminals — reconnect or open a new tab to pick it up.
+        </p>
+      </section>
+
+      {/* Behavior notes — hardcoded for v1, documented here */}
+      <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Behavior</h2>
+        <ul className="mt-2.5 list-disc space-y-1.5 pl-4 text-sm text-zinc-500">
+          <li>Selecting text copies it to the clipboard automatically.</li>
+          <li>URLs in the output are Ctrl+click to open in your browser.</li>
+          <li>
+            As you type, a matching previous command appears as ghost text — press → or End to
+            accept it. History is kept per site on this machine.
+          </li>
+        </ul>
       </section>
     </div>
   );
