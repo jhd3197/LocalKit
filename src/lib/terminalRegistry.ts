@@ -12,6 +12,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc, onTerminalData, onTerminalExit } from "./ipc";
+import { attachSuggestions } from "./termSuggest";
 
 export type TermStatus = "opening" | "ready" | "exited";
 
@@ -156,6 +157,16 @@ export function acquireTerminal(siteId: string): TermEntry {
     term.onSelectionChange(() => {
       const sel = term.getSelection();
       if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+    })
+  );
+
+  // Ghost-text history suggestions, MRU keyed per site; →/End accepts.
+  entry.disposables.push(
+    attachSuggestions(term, {
+      historyKey: siteId,
+      send: (data) => {
+        if (entry.terminalId) void ipc.terminalWrite(entry.terminalId, data).catch(() => {});
+      },
     })
   );
 
