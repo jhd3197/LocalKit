@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use localkit_lib::{db::Db, docker, router, site, wordpress, AppState};
+use localkit_lib::{db::Db, docker, router, site, snapshot, wordpress, AppState};
 
 // ---------------------------------------------------------------------------
 // clap surface
@@ -85,13 +85,21 @@ enum Cmd {
     Restart { site: String },
 
     /// Delete a site (removes containers, volumes, and files).
+    /// A restorable snapshot is kept unless --delete-snapshots is passed.
     /// Prompts for confirmation unless --yes; --yes is required non-interactively.
     Delete {
         site: String,
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Also delete this site's snapshots (they are kept by default)
+        #[arg(long)]
+        delete_snapshots: bool,
     },
+
+    /// Manage point-in-time snapshots (database + wp-content) of a site
+    #[command(subcommand)]
+    Snapshot(SnapshotCmd),
 
     /// Show site details, including DB credentials
     Info {
@@ -143,6 +151,49 @@ enum Cmd {
     /// Diagnose the local environment (Docker, compose, data dir).
     /// Exits non-zero while any check fails, so it can gate scripts.
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum SnapshotCmd {
+    /// List a site's snapshots, newest first
+    List {
+        site: String,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Take a snapshot now. Prints the new snapshot id on stdout.
+    Create {
+        site: String,
+        /// Optional note stored in the snapshot's manifest
+        #[arg(long)]
+        note: Option<String>,
+        /// Output the created snapshot as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Restore a site to a snapshot (destructive — snapshots first, then
+    /// replaces the database and wp-content). Prompts unless --yes.
+    Restore {
+        site: String,
+        /// Snapshot id from `lk snapshot list`
+        snapshot: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Delete one snapshot. Prompts unless --yes.
+    Delete {
+        site: String,
+        /// Snapshot id from `lk snapshot list`
+        snapshot: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +248,12 @@ async fn run(cli: &Cli) -> Result<(), String> {
             println!("{}", site_url(&s));
             Ok(())
         }
-        Cmd::Delete { site: q, yes } => cmd_delete(&state, q, *yes).await,
+        Cmd::Delete {
+            site: q,
+            yes,
+            delete_snapshots,
+        } => cmd_delete(&state, q, *yes, *delete_snapshots).await,
+        Cmd::Snapshot(sub) => cmd_snapshot(&state, sub).await,
         Cmd::Info { site: q, json } => cmd_info(&state, q, *json),
         Cmd::Logs { site: q, tail } => {
             let s = resolve(&state, q)?;
@@ -303,31 +359,170 @@ async fn cmd_create(
     Ok(())
 }
 
-async fn cmd_delete(state: &AppState, query: &str, yes: bool) -> Result<(), String> {
+/// Does `query` name a deleted site whose snapshots are still on disk?
+/// Only an exact site id can match — there is no sites row left to map a
+/// slug through.
+fn orphan_snapshots_exist(state: &AppState, query: &str) -> bool {
+    snapshot::site_snapshots_dir(&state.data_dir, query).is_dir()
+}
+
+/// Destructive-command gate: prompt with a No default unless `--yes`, and
+/// require `--yes` when there is no TTY to prompt on.
+fn confirm(yes: bool, question: &str, non_tty_hint: &str) -> Result<(), String> {
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdout().is_terminal() {
+        return Err(non_tty_hint.to_string());
+    }
+    eprint!("{} {question} [y/N] ", warn("!"));
+    let mut line = String::new();
+    use std::io::BufRead;
+    // EOF/no-tty falls through to the No path.
+    let read = std::io::stdin().lock().read_line(&mut line);
+    if read.is_err() || !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+        return Err("aborted".into());
+    }
+    Ok(())
+}
+
+async fn cmd_delete(
+    state: &AppState,
+    query: &str,
+    yes: bool,
+    delete_snapshots: bool,
+) -> Result<(), String> {
     let s = resolve(state, query)?;
-    if !yes {
-        if !std::io::stdout().is_terminal() {
-            return Err(format!(
-                "`lk delete` removes `{}` permanently. pass --yes to confirm.",
-                s.slug
-            ));
-        }
-        eprint!(
-            "{} delete `{}`? this removes its containers, volumes, and files. [y/N] ",
-            warn("!"),
+    let tail = if delete_snapshots {
+        "this removes its containers, volumes, files AND snapshots."
+    } else {
+        "this removes its containers, volumes, and files (a snapshot is kept)."
+    };
+    confirm(
+        yes,
+        &format!("delete `{}`? {tail}", s.slug),
+        &format!(
+            "`lk delete` removes `{}` permanently. pass --yes to confirm.",
             s.slug
+        ),
+    )?;
+    site::delete(None, state, &s.id, delete_snapshots).await?;
+    eprintln!("{} {} deleted", ok("✓"), bold(&s.name));
+    if !delete_snapshots {
+        eprintln!(
+            "{} snapshots kept — `lk snapshot list {}` still lists them",
+            info("→"),
+            s.id
         );
-        let mut line = String::new();
-        use std::io::BufRead;
-        // EOF/no-tty falls through to the No path.
-        let read = std::io::stdin().lock().read_line(&mut line);
-        if read.is_err() || !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
-            return Err("aborted".into());
+    }
+    Ok(())
+}
+
+async fn cmd_snapshot(state: &AppState, cmd: &SnapshotCmd) -> Result<(), String> {
+    match cmd {
+        SnapshotCmd::List { site: q, json } => {
+            // Listing tolerates a site that no longer exists: deleting a site
+            // keeps its snapshots, and their manifests carry the name/slug, so
+            // `lk snapshot list <site id>` stays useful afterwards. (Restore
+            // and delete still require a live site — there is nothing to
+            // restore *into*.)
+            let (id, label) = match resolve(state, q) {
+                Ok(s) => (s.id, s.slug),
+                Err(_) if orphan_snapshots_exist(state, q) => (q.to_string(), q.to_string()),
+                Err(e) => return Err(e),
+            };
+            let snaps = snapshot::list(state, &id)?;
+            if *json {
+                return print_json(&snaps);
+            }
+            if snaps.is_empty() {
+                eprintln!(
+                    "{} no snapshots for `{label}` yet. take one with `lk snapshot create {label}`.",
+                    info("→"),
+                );
+                return Ok(());
+            }
+            let rows: Vec<[String; 5]> = snaps
+                .iter()
+                .map(|x| {
+                    [
+                        x.id.clone(),
+                        short_time(&x.created_at),
+                        x.kind.clone(),
+                        format!("{} + {}", human_bytes(x.db_bytes), human_bytes(x.code_bytes)),
+                        x.note.clone(),
+                    ]
+                })
+                .collect();
+            print_table(&["ID", "CREATED", "KIND", "DB + CODE", "NOTE"], &rows);
+            Ok(())
+        }
+
+        SnapshotCmd::Create { site: q, note, json } => {
+            let s = resolve(state, q)?;
+            let snap = snapshot::create(
+                None,
+                state,
+                &s.id,
+                snapshot::KIND_MANUAL,
+                note.clone(),
+            )
+            .await?;
+            if *json {
+                print_json(&snap)?;
+            } else {
+                // stdout carries the id (scriptable); chrome stays on stderr.
+                println!("{}", snap.id);
+            }
+            eprintln!(
+                "{} snapshot of {} taken ({} database, {} wp-content)",
+                ok("✓"),
+                bold(&s.name),
+                human_bytes(snap.db_bytes),
+                human_bytes(snap.code_bytes)
+            );
+            Ok(())
+        }
+
+        SnapshotCmd::Restore {
+            site: q,
+            snapshot: id,
+            yes,
+        } => {
+            let s = resolve(state, q)?;
+            confirm(
+                *yes,
+                &format!(
+                    "restore `{}` to snapshot {id}? this replaces its database and wp-content \
+                     (a pre-restore snapshot is taken first).",
+                    s.slug
+                ),
+                &format!(
+                    "`lk snapshot restore` overwrites `{}`. pass --yes to confirm.",
+                    s.slug
+                ),
+            )?;
+            let message = snapshot::restore(None, state, &s.id, id).await?;
+            eprintln!("{} {message}", ok("✓"));
+            Ok(())
+        }
+
+        SnapshotCmd::Delete {
+            site: q,
+            snapshot: id,
+            yes,
+        } => {
+            let s = resolve(state, q)?;
+            confirm(
+                *yes,
+                &format!("delete snapshot {id} of `{}`? this cannot be undone.", s.slug),
+                &format!("`lk snapshot delete` removes snapshot {id} permanently. pass --yes to confirm."),
+            )?;
+            snapshot::delete(state, &s.id, id)?;
+            eprintln!("{} snapshot {id} deleted", ok("✓"));
+            Ok(())
         }
     }
-    site::delete(state, &s.id).await?;
-    eprintln!("{} {} deleted", ok("✓"), bold(&s.name));
-    Ok(())
 }
 
 fn cmd_info(state: &AppState, query: &str, json: bool) -> Result<(), String> {
@@ -590,6 +785,59 @@ fn site_url(s: &site::Site) -> String {
     format!("http://localhost:{}", s.port)
 }
 
+/// RFC3339 down to seconds for table display — the stored timestamps carry
+/// sub-second precision and an offset, which is noise in a column.
+/// `--json` keeps the full value.
+fn short_time(rfc3339: &str) -> String {
+    match rfc3339.split_once('T') {
+        Some((date, rest)) => {
+            let time: String = rest.chars().take(8).collect();
+            format!("{date} {time}")
+        }
+        None => rfc3339.to_string(),
+    }
+}
+
+/// Byte counts for humans — snapshot archives run from KB to GB.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Left-aligned column table with dimmed headers (stdout — it is data).
+fn print_table<const N: usize>(headers: &[&str; N], rows: &[[String; N]]) {
+    let mut w = [0usize; N];
+    for (i, h) in headers.iter().enumerate() {
+        w[i] = h.len();
+    }
+    for r in rows {
+        for (i, c) in r.iter().enumerate() {
+            w[i] = w[i].max(c.len());
+        }
+    }
+    for (i, h) in headers.iter().enumerate() {
+        // Pad first, then colorize, so ANSI codes don't break alignment.
+        print!("{}  ", dim(&format!("{:<width$}", h, width = w[i])));
+    }
+    println!();
+    for r in rows {
+        for (i, c) in r.iter().enumerate() {
+            print!("{:<width$}  ", c, width = w[i]);
+        }
+        println!();
+    }
+}
+
 /// Render eval-able export lines for a shell.
 fn render_exports(shell: Shell, pairs: &[(String, String)]) -> String {
     let mut out = String::new();
@@ -736,6 +984,32 @@ mod tests {
             &[("DB_HOST".into(), "127.0.0.1".into())],
         );
         assert_eq!(out, "export DB_HOST=\"127.0.0.1\"\n");
+    }
+
+    #[test]
+    fn short_time_drops_subseconds_and_offset() {
+        assert_eq!(
+            short_time("2026-07-20T18:23:53.160418100+00:00"),
+            "2026-07-20 18:23:53"
+        );
+    }
+
+    #[test]
+    fn short_time_passes_through_anything_unexpected() {
+        assert_eq!(short_time("not a timestamp"), "not a timestamp");
+    }
+
+    #[test]
+    fn human_bytes_stays_exact_under_a_kilobyte() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn human_bytes_scales_up() {
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1024 * 1024 * 3 / 2), "1.5 MB");
+        assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GB");
     }
 
     #[test]
