@@ -325,6 +325,17 @@ fn list_sync_history(state: State<AppState>, site_id: String) -> Result<Vec<sync
     sync::history(&state, &site_id)
 }
 
+/// Ask the in-flight chunked sync for a site to stop (plan 19).
+///
+/// Returns whether there was one to cancel. The transfer notices between
+/// chunks and unwinds through the normal error path; nothing on the server is
+/// half-applied, because processing only ever runs after a completed upload
+/// verifies its hash.
+#[tauri::command]
+fn cancel_sync(state: State<AppState>, site_id: String) -> bool {
+    state.transfers.cancel(&site_id)
+}
+
 /// Clone a remote ServerKit site down as a brand-new local site (plan 18).
 #[tauri::command]
 async fn import_remote_site(
@@ -532,6 +543,7 @@ pub fn run() {
             pull_site_db,
             import_remote_site,
             list_sync_history,
+            cancel_sync,
             router_status,
             set_domains_enabled,
             set_router_ports,

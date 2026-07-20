@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use tauri::AppHandle;
 use uuid::Uuid;
 
-use crate::{docker, router, serverkit, site, snapshot, wordpress, AppState};
+use crate::{docker, router, serverkit, site, snapshot, transfer, wordpress, AppState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {
@@ -68,6 +68,27 @@ async fn run(
             );
             Ok(())
         }
+        // A user pressing Cancel travels the error path but is not a failure:
+        // it gets its own terminal stage and history status so the UI can say
+        // "cancelled" in neutral colours instead of flashing a red error.
+        Err(e) if transfer::is_cancel(&e) => {
+            let message = format!("{direction} {kind} cancelled");
+            emit(app, site_id, "cancelled", &message);
+            record(
+                state,
+                &SyncRecord {
+                    id: Uuid::new_v4().to_string(),
+                    site_id: site_id.to_string(),
+                    connection_id: connection_id.to_string(),
+                    direction: direction.to_string(),
+                    kind: kind.to_string(),
+                    status: "cancelled".to_string(),
+                    message: message.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+            Err(message)
+        }
         Err(e) => {
             emit(app, site_id, "error", &format!("{direction} {kind} failed: {e}"));
             record(
@@ -88,6 +109,39 @@ async fn run(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Protocol selection (plan 19)
+// ---------------------------------------------------------------------------
+
+/// Does this server speak the chunked protocol?
+///
+/// One client, both servers: a server without `sync-v2` gets the v1 monolithic
+/// path untouched. A failed probe answers "no" on purpose — falling back to v1
+/// always works, so a blip on `/pair` must not fail the push outright.
+async fn supports_v2(conn: &serverkit::ServerKitConnection) -> bool {
+    serverkit::has_feature(&conn.url, &conn.api_key, serverkit::FEATURE_SYNC_V2)
+        .await
+        .unwrap_or(false)
+}
+
+/// Byte-progress reporter for a transfer stage.
+///
+/// The event carries raw counters and a bare label; formatting the
+/// "148 MB / 312 MB" readout is the frontend's job (and `site::emit_bytes`
+/// does it for stderr when there is no frontend).
+fn reporter<'a>(
+    app: Option<&'a AppHandle>,
+    site_id: &'a str,
+    stage: &'a str,
+    label: &'a str,
+) -> impl Fn(u64, u64) + Send + Sync + 'a {
+    move |done, total| site::emit_bytes(app, site_id, stage, label, done, total)
+}
+
+// ---------------------------------------------------------------------------
+// Push code
+// ---------------------------------------------------------------------------
+
 pub async fn push_code(
     app: Option<&AppHandle>,
     state: &AppState,
@@ -96,15 +150,72 @@ pub async fn push_code(
     remote_site_id: i64,
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
-    emit(app, site_id, "push", "Bundling wp-content...");
-    let tgz = snapshot::build_wp_content_tgz(&site.dir())?;
-    let size_mb = tgz.len() as f64 / 1_048_576.0;
-    emit(app, site_id, "push", &format!("Uploading wp-content ({size_mb:.1} MB)..."));
-    run(app, state, connection_id, site_id, "push", "code", async move {
-        serverkit::push_code(&conn.url, &conn.api_key, remote_site_id, tgz).await?;
-        Ok(format!("{} code pushed to remote site #{remote_site_id}", site.name))
+    let v2 = supports_v2(&conn).await;
+    let cancel = state.transfers.begin(site_id);
+    run(app, state, connection_id, site_id, "push", "code", async {
+        if v2 {
+            push_code_v2(app, &conn, &site, site_id, remote_site_id, &cancel).await
+        } else {
+            push_code_v1(app, &conn, &site, site_id, remote_site_id).await
+        }
     })
     .await
+}
+
+/// Sync v1: build the whole archive in memory, POST it in one multipart
+/// request. Deliberately left as one isolated function rather than a set of
+/// `if v2` branches sprinkled through the v2 flow — the two protocols share
+/// nothing but their inputs and their success message.
+async fn push_code_v1(
+    app: Option<&AppHandle>,
+    conn: &serverkit::ServerKitConnection,
+    site: &site::Site,
+    site_id: &str,
+    remote_site_id: i64,
+) -> Result<String, String> {
+    emit(app, site_id, "push", "Bundling wp-content...");
+    let tgz = snapshot::build_wp_content_tgz(&site.dir())?;
+    let size = transfer::human_bytes(tgz.len() as u64);
+    emit(app, site_id, "push", &format!("Uploading wp-content ({size})..."));
+    serverkit::push_code(&conn.url, &conn.api_key, remote_site_id, tgz).await?;
+    Ok(format!("{} code pushed to remote site #{remote_site_id}", site.name))
+}
+
+/// Sync v2: tar straight into a staging file, then upload it in chunks.
+///
+/// The archive never exists as a `Vec<u8>`, which is what makes a site with a
+/// real `uploads/` directory pushable at all — and the chunking is what gets
+/// it past the server's 100 MB request limit.
+async fn push_code_v2(
+    app: Option<&AppHandle>,
+    conn: &serverkit::ServerKitConnection,
+    site: &site::Site,
+    site_id: &str,
+    remote_site_id: i64,
+    cancel: &transfer::CancelToken,
+) -> Result<String, String> {
+    emit(app, site_id, "push", "Bundling wp-content...");
+    let dir = site.dir();
+    let staged = transfer::stage("wp-content", |w| snapshot::write_wp_content_tgz(&dir, w))?;
+    cancel.check()?;
+
+    let size = transfer::human_bytes(staged.total());
+    let progress = reporter(app, site_id, "push", "Pushing wp-content");
+    serverkit::push_chunked(
+        &conn.url,
+        &conn.api_key,
+        "code",
+        remote_site_id,
+        None,
+        &staged,
+        cancel,
+        &progress,
+    )
+    .await?;
+    Ok(format!(
+        "{} code pushed to remote site #{remote_site_id} ({size})",
+        site.name
+    ))
 }
 
 /// Local safety net before a sync mutates something (plan 17).
@@ -127,6 +238,10 @@ async fn pre_sync_snapshot(
         .map_err(|e| format!("pre-sync snapshot failed, nothing was synced: {e}"))
 }
 
+// ---------------------------------------------------------------------------
+// Push database
+// ---------------------------------------------------------------------------
+
 pub async fn push_db(
     app: Option<&AppHandle>,
     state: &AppState,
@@ -136,21 +251,34 @@ pub async fn push_db(
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
     pre_sync_snapshot(app, state, site_id, snapshot::KIND_PRE_PUSH, &conn, remote_site_id).await?;
-    emit(app, site_id, "push", "Exporting local database...");
-    let dump_path = std::env::temp_dir().join(format!("localkit-dump-{}.sql", site.slug));
-    wordpress::export_db(&site.dir(), &dump_path).await?;
-    let sql = std::fs::read(&dump_path).map_err(|e| format!("failed to read dump: {e}"));
-    let _ = std::fs::remove_file(&dump_path);
-    let sql = sql?;
 
     // Whatever the site is actually served at — its `.test` domain (with the
     // port in fallback mode) when local domains are on. The server rewrites
     // local -> remote with this, so a hardcoded localhost:<port> would leave
     // `<slug>.test` URLs baked into the remote database.
     let local_url = router::site_public_url(state, &site);
-    emit(app, site_id, "push", "Uploading database dump...");
-    run(app, state, connection_id, site_id, "push", "db", async move {
-        serverkit::push_db(&conn.url, &conn.api_key, remote_site_id, &local_url, sql).await?;
+    let v2 = supports_v2(&conn).await;
+    let cancel = state.transfers.begin(site_id);
+    run(app, state, connection_id, site_id, "push", "db", async {
+        let dump = export_dump(app, &site, site_id).await?;
+        if v2 {
+            let progress = reporter(app, site_id, "push", "Pushing database");
+            serverkit::push_chunked(
+                &conn.url,
+                &conn.api_key,
+                "db",
+                remote_site_id,
+                Some(&local_url),
+                &dump,
+                &cancel,
+                &progress,
+            )
+            .await?;
+        } else {
+            emit(app, site_id, "push", "Uploading database dump...");
+            let sql = std::fs::read(dump.path()).map_err(|e| format!("failed to read dump: {e}"))?;
+            serverkit::push_db(&conn.url, &conn.api_key, remote_site_id, &local_url, sql).await?;
+        }
         Ok(format!(
             "{} database pushed to remote site #{remote_site_id} (URLs rewritten to remote)",
             site.name
@@ -158,6 +286,27 @@ pub async fn push_db(
     })
     .await
 }
+
+/// Export the local database to a self-deleting staged file.
+///
+/// Staged rather than read into a `Vec` because v2 uploads it chunk by chunk
+/// straight off disk; the v1 path reads it back, which is what it did before.
+async fn export_dump(
+    app: Option<&AppHandle>,
+    site: &site::Site,
+    site_id: &str,
+) -> Result<transfer::Staged, String> {
+    emit(app, site_id, "push", "Exporting local database...");
+    // A TempFile from the start, so a failed export cleans up after itself
+    // instead of leaving a partial dump behind.
+    let dump = transfer::TempFile::new(&format!("dump-{}", site.slug))?;
+    wordpress::export_db(&site.dir(), dump.path()).await?;
+    transfer::Staged::adopt_temp(dump)
+}
+
+// ---------------------------------------------------------------------------
+// Pull database
+// ---------------------------------------------------------------------------
 
 pub async fn pull_db(
     app: Option<&AppHandle>,
@@ -168,27 +317,59 @@ pub async fn pull_db(
     remote_url: Option<String>,
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
-    pre_sync_snapshot(app, state, site_id, snapshot::KIND_PRE_PULL, &conn, remote_site_id).await?;
-    emit(app, site_id, "pull", "Downloading remote database dump...");
-    let gz = serverkit::pull_db(&conn.url, &conn.api_key, remote_site_id).await?;
+    let v2 = supports_v2(&conn).await;
 
-    // Decompress the .sql.gz dump.
-    let mut sql = Vec::new();
-    flate2::read::GzDecoder::new(&gz[..])
-        .read_to_end(&mut sql)
-        .map_err(|e| format!("failed to decompress remote dump: {e}"))?;
+    // v1 snapshots before the download because it has no way to stop one
+    // half-way. v2 does: the download is cancellable, so the snapshot is taken
+    // after it, once something is actually about to be overwritten — a
+    // cancelled pull then leaves no pointless `pre_pull` snapshot behind.
+    if !v2 {
+        pre_sync_snapshot(app, state, site_id, snapshot::KIND_PRE_PULL, &conn, remote_site_id).await?;
+    }
 
     // Same rule on the way back in: pulling must land the site on its current
     // public URL, not silently knock it off its domain onto localhost.
     let local_url = router::site_public_url(state, &site);
-    emit(app, site_id, "pull", "Importing database into local site...");
-    run(app, state, connection_id, site_id, "pull", "db", async move {
-        wordpress::import_db(&site.dir(), &sql).await?;
-        wordpress::update_site_urls(&site.dir(), &local_url).await?;
+    let cancel = state.transfers.begin(site_id);
+    let dir = site.dir();
+
+    run(app, state, connection_id, site_id, "pull", "db", async {
+        if v2 {
+            emit(app, site_id, "pull", "Downloading remote database dump...");
+            let progress = reporter(app, site_id, "pull", "Pulling database");
+            let gz = serverkit::download_resumable(
+                &conn.url,
+                &conn.api_key,
+                "/api/v1/localkit/pull/db",
+                remote_site_id,
+                "database dump",
+                &cancel,
+                &progress,
+            )
+            .await?;
+            cancel.check()?;
+            pre_sync_snapshot(app, state, site_id, snapshot::KIND_PRE_PULL, &conn, remote_site_id)
+                .await?;
+            emit(app, site_id, "pull", "Importing database into local site...");
+            // Streams decompress -> pipe -> `wp db import`; the dump never
+            // exists decompressed in memory.
+            wordpress::import_db_from_gz(&dir, gz.path()).await?;
+        } else {
+            emit(app, site_id, "pull", "Downloading remote database dump...");
+            let gz = serverkit::pull_db(&conn.url, &conn.api_key, remote_site_id).await?;
+            let mut sql = Vec::new();
+            flate2::read::GzDecoder::new(&gz[..])
+                .read_to_end(&mut sql)
+                .map_err(|e| format!("failed to decompress remote dump: {e}"))?;
+            emit(app, site_id, "pull", "Importing database into local site...");
+            wordpress::import_db(&dir, &sql).await?;
+        }
+
+        wordpress::update_site_urls(&dir, &local_url).await?;
         let mut msg = format!("Remote database imported into {}", site.name);
-        if let Some(remote) = remote_url.filter(|u| !u.is_empty() && *u != local_url) {
+        if let Some(remote) = remote_url.as_deref().filter(|u| !u.is_empty() && *u != local_url) {
             emit(app, site_id, "pull", "Rewriting URLs remote -> local...");
-            wordpress::search_replace(&site.dir(), &remote, &local_url).await?;
+            wordpress::search_replace(&dir, remote, &local_url).await?;
             msg = format!("{msg} (URLs rewritten to local)");
         }
         Ok(msg)
@@ -247,7 +428,11 @@ fn safe_entry_path(name: &Path) -> Result<PathBuf, String> {
 ///
 /// Entries are prefixed `wp-content/`, matching what `push_code` uploads and
 /// what a snapshot archives — one archive format in both directions.
-fn extract_wp_content(tgz: &[u8], site_dir: &Path) -> Result<usize, String> {
+///
+/// Takes a reader rather than a byte slice so the import can untar straight
+/// off the downloaded file (plan 19): a 4 GB remote `wp-content` should never
+/// need 4 GB of RAM to land.
+fn extract_wp_content<R: Read>(tgz: R, site_dir: &Path) -> Result<usize, String> {
     use tar::EntryType;
 
     let dest = site_dir
@@ -363,6 +548,8 @@ pub async fn import_site(
     let (wp_version, wp_exact) = match_version(site::WP_VERSIONS, remote.wp_version.as_deref());
     let (php_version, php_exact) = match_version(site::PHP_VERSIONS, remote.php_version.as_deref());
 
+    let v2 = supports_v2(&conn).await;
+
     let site = site::reserve(
         state,
         name,
@@ -372,8 +559,12 @@ pub async fn import_site(
     )
     .await?;
 
+    // The cancel token is keyed on the *new* site's id — that is what the UI
+    // shows progress against, so it is what a Cancel button can address.
+    let cancel = state.transfers.begin(&site.id);
+
     // From here on a failure owns cleanup — the site row and directory exist.
-    match do_import(app, state, &conn, &site, &remote, (wp_exact, php_exact)).await {
+    match do_import(app, state, &conn, &site, &remote, (wp_exact, php_exact), v2, &cancel).await {
         Ok(message) => {
             emit(app, &site.id, "done", &message);
             record(
@@ -392,11 +583,17 @@ pub async fn import_site(
             site::get(state, &site.id)
         }
         Err(e) => {
-            emit(app, &site.id, "error", &format!("Import failed: {e}"));
+            let cancelled = transfer::is_cancel(&e);
+            let message = if cancelled {
+                "Import cancelled".to_string()
+            } else {
+                format!("Import failed: {e}")
+            };
+            emit(app, &site.id, if cancelled { "cancelled" } else { "error" }, &message);
             // The sync record is keyed to a site that is about to disappear,
             // so the failure is reported through the event stream only.
             let _ = site::cleanup(state, &site).await;
-            Err(e)
+            Err(message)
         }
     }
 }
@@ -447,6 +644,7 @@ async fn pre_import(
 }
 
 /// The provisioning half of an import. Returns the success message.
+#[allow(clippy::too_many_arguments)]
 async fn do_import(
     app: Option<&AppHandle>,
     state: &AppState,
@@ -454,6 +652,8 @@ async fn do_import(
     site: &site::Site,
     remote: &serverkit::RemoteWpSite,
     exact: (bool, bool),
+    v2: bool,
+    cancel: &transfer::CancelToken,
 ) -> Result<String, String> {
     let dir = site.dir();
     let id = site.id.as_str();
@@ -485,11 +685,30 @@ async fn do_import(
     docker::compose_pull(&dir, &["wordpress", "db", "wpcli"]).await?;
 
     emit(app, id, "code", "Downloading remote wp-content...");
-    let tgz = serverkit::pull_code(&conn.url, &conn.api_key, remote.id).await?;
-    let size_mb = tgz.len() as f64 / 1_048_576.0;
-    emit(app, id, "code", &format!("Extracting wp-content ({size_mb:.1} MB)..."));
-    let files = extract_wp_content(&tgz, &dir)?;
-    drop(tgz);
+    let files = if v2 {
+        let progress = reporter(app, id, "code", "Downloading wp-content");
+        let tgz = serverkit::download_resumable(
+            &conn.url,
+            &conn.api_key,
+            "/api/v1/localkit/pull/code",
+            remote.id,
+            "wp-content archive",
+            cancel,
+            &progress,
+        )
+        .await?;
+        cancel.check()?;
+        let size = transfer::human_bytes(tgz.len());
+        emit(app, id, "code", &format!("Extracting wp-content ({size})..."));
+        let file = std::fs::File::open(tgz.path())
+            .map_err(|e| format!("failed to reopen the downloaded archive: {e}"))?;
+        extract_wp_content(std::io::BufReader::new(file), &dir)?
+    } else {
+        let tgz = serverkit::pull_code(&conn.url, &conn.api_key, remote.id).await?;
+        let size = transfer::human_bytes(tgz.len() as u64);
+        emit(app, id, "code", &format!("Extracting wp-content ({size})..."));
+        extract_wp_content(&tgz[..], &dir)?
+    };
     // The archive may have brought its own mu-plugins directory over the one
     // written a moment ago; one-click login must survive the import.
     wordpress::ensure_login_plugin(&dir)?;
@@ -505,19 +724,34 @@ async fn do_import(
     wordpress::wait_for_config(&dir, 24).await?;
 
     emit(app, id, "install", "Downloading remote database...");
-    let gz = serverkit::pull_db(&conn.url, &conn.api_key, remote.id).await?;
-    let mut sql = Vec::new();
-    flate2::read::GzDecoder::new(&gz[..])
-        .read_to_end(&mut sql)
-        .map_err(|e| format!("failed to decompress remote dump: {e}"))?;
-    drop(gz);
-
     // No `wp core install` anywhere in here: the imported database IS the
     // site. Installing would overwrite the content this whole flow exists to
     // bring down.
-    emit(app, id, "install", "Importing remote database...");
-    wordpress::import_db(&dir, &sql).await?;
-    drop(sql);
+    if v2 {
+        let progress = reporter(app, id, "install", "Downloading database");
+        let gz = serverkit::download_resumable(
+            &conn.url,
+            &conn.api_key,
+            "/api/v1/localkit/pull/db",
+            remote.id,
+            "database dump",
+            cancel,
+            &progress,
+        )
+        .await?;
+        cancel.check()?;
+        emit(app, id, "install", "Importing remote database...");
+        wordpress::import_db_from_gz(&dir, gz.path()).await?;
+    } else {
+        let gz = serverkit::pull_db(&conn.url, &conn.api_key, remote.id).await?;
+        let mut sql = Vec::new();
+        flate2::read::GzDecoder::new(&gz[..])
+            .read_to_end(&mut sql)
+            .map_err(|e| format!("failed to decompress remote dump: {e}"))?;
+        drop(gz);
+        emit(app, id, "install", "Importing remote database...");
+        wordpress::import_db(&dir, &sql).await?;
+    }
 
     let local_url = router::site_public_url(state, site);
     emit(app, id, "install", "Rewriting URLs remote -> local...");
@@ -727,7 +961,7 @@ mod tests {
             file_entry(b, "wp-content/plugins/hello.php", b"<?php");
         });
 
-        let files = extract_wp_content(&tgz, &dir).unwrap();
+        let files = extract_wp_content(&tgz[..], &dir).unwrap();
         assert_eq!(files, 2);
         assert_eq!(
             std::fs::read_to_string(dir.join("wp-content/themes/mytheme/style.css")).unwrap(),
@@ -744,7 +978,7 @@ mod tests {
             file_entry(b, "wp-content/../../pwned.txt", b"pwned");
         });
 
-        let err = extract_wp_content(&tgz, &dir).unwrap_err();
+        let err = extract_wp_content(&tgz[..], &dir).unwrap_err();
         assert!(err.contains("escapes the site directory"), "unexpected: {err}");
         // And nothing landed outside the destination.
         assert!(!dir.parent().unwrap().join("pwned.txt").exists());
@@ -759,7 +993,7 @@ mod tests {
             link_entry(b, "wp-content/escape", "/etc/passwd");
         });
 
-        let err = extract_wp_content(&tgz, &dir).unwrap_err();
+        let err = extract_wp_content(&tgz[..], &dir).unwrap_err();
         assert!(err.contains("link"), "unexpected: {err}");
         assert!(!dir.join("wp-content/escape").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -770,7 +1004,7 @@ mod tests {
         let dir = scratch("outside");
         let tgz = gz(|b| file_entry(b, "wp-config.php", b"<?php"));
 
-        let err = extract_wp_content(&tgz, &dir).unwrap_err();
+        let err = extract_wp_content(&tgz[..], &dir).unwrap_err();
         assert!(err.contains("outside wp-content"), "unexpected: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -779,7 +1013,7 @@ mod tests {
     fn refuses_an_empty_archive() {
         let dir = scratch("empty");
         let tgz = gz(|_| {});
-        assert!(extract_wp_content(&tgz, &dir).unwrap_err().contains("no files"));
+        assert!(extract_wp_content(&tgz[..], &dir).unwrap_err().contains("no files"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

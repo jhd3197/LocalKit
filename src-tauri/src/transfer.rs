@@ -160,20 +160,77 @@ fn hex(bytes: &[u8]) -> String {
 // Staged payloads
 // ---------------------------------------------------------------------------
 
+/// A temp file that deletes itself on drop.
+///
+/// Every large payload in a v2 transfer lives in one of these — the staged
+/// upload on the way out, the streamed download on the way in — so no error
+/// path can leave a copy of someone's site sitting in the temp dir.
+#[derive(Debug)]
+pub struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    /// Create an empty temp file. `tag` only exists to make a stray file
+    /// identifiable if the process is killed hard enough to skip `Drop`.
+    pub fn new(tag: &str) -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!(
+            "localkit-{tag}-{}-{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::File::create(&path)
+            .map_err(|e| format!("failed to create a temporary file: {e}"))?;
+        Ok(Self { path })
+    }
+
+    /// Adopt a file someone else created; it is deleted on drop just the same.
+    pub fn adopt(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Bytes currently on disk — for a download, how much has landed so far.
+    pub fn len(&self) -> u64 {
+        std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Throw away whatever has been written; used when a server answers a
+    /// resume request with the whole body instead of the range we asked for.
+    pub fn truncate(&self) -> Result<(), String> {
+        std::fs::File::create(&self.path)
+            .map(|_| ())
+            .map_err(|e| format!("failed to reset the temporary file: {e}"))
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// A payload written to a temp file, with its size and hash.
 ///
 /// The file is removed on drop, including on every error path — a failed push
 /// must not leave a copy of the site's `wp-content` sitting in the temp dir.
 #[derive(Debug)]
 pub struct Staged {
-    path: PathBuf,
+    file: TempFile,
     total: u64,
     sha256: String,
 }
 
 impl Staged {
     pub fn path(&self) -> &Path {
-        &self.path
+        self.file.path()
     }
 
     pub fn total(&self) -> u64 {
@@ -191,7 +248,7 @@ impl Staged {
     /// (holding an async file handle across the whole upload) buys nothing and
     /// complicates the resume path.
     pub fn read_chunk(&self, chunk: Chunk) -> Result<Vec<u8>, String> {
-        let mut f = std::fs::File::open(&self.path)
+        let mut f = std::fs::File::open(self.path())
             .map_err(|e| format!("failed to reopen the staged payload: {e}"))?;
         f.seek(SeekFrom::Start(chunk.offset))
             .map_err(|e| format!("failed to seek the staged payload: {e}"))?;
@@ -204,6 +261,12 @@ impl Staged {
     /// Take ownership of a file someone else wrote (e.g. `wp db export`),
     /// hashing it in place. The file is deleted on drop just like a staged one.
     pub fn adopt(path: PathBuf) -> Result<Self, String> {
+        Self::adopt_temp(TempFile::adopt(path))
+    }
+
+    /// Promote an already-owned temp file to a staged payload.
+    pub fn adopt_temp(file: TempFile) -> Result<Self, String> {
+        let path = file.path().to_path_buf();
         let mut f = std::fs::File::open(&path)
             .map_err(|e| format!("failed to open the staged payload: {e}"))?;
         let mut hasher = Sha256::new();
@@ -219,30 +282,19 @@ impl Staged {
             hasher.update(&buf[..n]);
             total += n as u64;
         }
-        Ok(Self { path, total, sha256: hex(&hasher.finalize()) })
-    }
-}
-
-impl Drop for Staged {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        Ok(Self { file, total, sha256: hex(&hasher.finalize()) })
     }
 }
 
 /// Write a payload to a temp file through a hashing writer.
-///
-/// `tag` only exists to make a stray file identifiable if the process is killed
-/// hard enough to skip `Drop`.
 pub fn stage<F>(tag: &str, build: F) -> Result<Staged, String>
 where
     F: FnOnce(&mut dyn Write) -> Result<(), String>,
 {
-    let path = std::env::temp_dir().join(format!(
-        "localkit-{tag}-{}-{}.tmp",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    let file = std::fs::File::create(&path)
+    // The TempFile exists before anything is written, so every error path from
+    // here on cleans up after itself.
+    let temp = TempFile::new(tag)?;
+    let file = std::fs::File::create(temp.path())
         .map_err(|e| format!("failed to create a staging file: {e}"))?;
 
     // Hash first, buffer second: every byte still passes through the hasher,
@@ -254,11 +306,33 @@ where
         .flush()
         .map_err(|e| format!("failed to finish the staging file: {e}"));
 
-    // A `Staged` exists from here on, so any error below still cleans up.
-    let staged = Staged { path, total, sha256 };
     built?;
     flushed?;
-    Ok(staged)
+    Ok(Staged { file: temp, total, sha256 })
+}
+
+/// Human-readable byte count for progress messages.
+///
+/// Deliberately coarse — this only ever ends up in a one-line status like
+/// "Pushing code — 148 MB / 312 MB", where a third decimal place is noise.
+pub fn human_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    let n = n as f64;
+    if n < KB {
+        return format!("{n:.0} B");
+    }
+    let units = ["KB", "MB", "GB", "TB"];
+    let mut value = n / KB;
+    let mut unit = 0;
+    while value >= KB && unit + 1 < units.len() {
+        value /= KB;
+        unit += 1;
+    }
+    if value >= 100.0 {
+        format!("{value:.0} {}", units[unit])
+    } else {
+        format!("{value:.1} {}", units[unit])
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +588,37 @@ mod tests {
         assert_eq!(total, 9);
         assert_eq!(digest, sha256_hex(b"SELECT 1;"));
         assert!(!path.exists(), "adopt did not take ownership of the file");
+    }
+
+    #[test]
+    fn a_temp_file_tracks_its_length_and_resets() {
+        let temp = TempFile::new("test-temp").unwrap();
+        assert!(temp.is_empty());
+        std::fs::write(temp.path(), b"0123456789").unwrap();
+        assert_eq!(temp.len(), 10);
+        temp.truncate().unwrap();
+        assert_eq!(temp.len(), 0, "truncate left bytes behind");
+    }
+
+    #[test]
+    fn a_temp_file_is_removed_on_drop() {
+        let path = {
+            let temp = TempFile::new("test-temp-drop").unwrap();
+            temp.path().to_path_buf()
+        };
+        assert!(!path.exists(), "the temp file outlived its TempFile");
+    }
+
+    // -- formatting ---------------------------------------------------------
+
+    #[test]
+    fn byte_counts_read_the_way_a_progress_line_should() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(999), "999 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1_048_576), "1.0 MB");
+        assert_eq!(human_bytes(157_286_400), "150 MB");
+        assert_eq!(human_bytes(3_221_225_472), "3.0 GB");
     }
 
     // -- cancellation -------------------------------------------------------

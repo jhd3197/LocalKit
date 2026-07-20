@@ -92,22 +92,39 @@ fn new_id() -> String {
 
 /// Bundle the site's wp-content directory as a tar.gz in memory.
 pub(crate) fn build_wp_content_tgz(site_dir: &Path) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    write_wp_content_tgz(site_dir, &mut buf)?;
+    Ok(buf)
+}
+
+/// Stream the same archive into an arbitrary writer.
+///
+/// This is the form sync v2 uses (plan 19): the tar/gzip pipeline runs
+/// straight into a staging file, so a site with a real `uploads/` directory
+/// never has to exist as a `Vec<u8>` first. `build_wp_content_tgz` is now just
+/// this with a `Vec` on the end.
+pub(crate) fn write_wp_content_tgz(
+    site_dir: &Path,
+    out: &mut dyn std::io::Write,
+) -> Result<(), String> {
     let wp_content = site_dir.join("wp-content");
     if !wp_content.is_dir() {
         return Err("wp-content directory not found in the local site".into());
     }
-    let mut buf = Vec::new();
-    {
-        let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
-        let mut builder = tar::Builder::new(enc);
-        builder
-            .append_dir_all("wp-content", &wp_content)
-            .map_err(|e| format!("failed to bundle wp-content: {e}"))?;
-        builder
-            .finish()
-            .map_err(|e| format!("failed to finalize archive: {e}"))?;
-    }
-    Ok(buf)
+    let enc = flate2::write::GzEncoder::new(out, flate2::Compression::fast());
+    let mut builder = tar::Builder::new(enc);
+    builder
+        .append_dir_all("wp-content", &wp_content)
+        .map_err(|e| format!("failed to bundle wp-content: {e}"))?;
+    // Finish both layers explicitly: letting the encoder write its trailer on
+    // drop would discard the error, and a truncated gzip only shows up much
+    // later as an unreadable archive.
+    builder
+        .into_inner()
+        .map_err(|e| format!("failed to finalize archive: {e}"))?
+        .finish()
+        .map_err(|e| format!("failed to finalize archive: {e}"))?;
+    Ok(())
 }
 
 fn gzip(bytes: &[u8]) -> Result<Vec<u8>, String> {

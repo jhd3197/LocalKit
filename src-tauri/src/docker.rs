@@ -138,6 +138,27 @@ pub async fn compose_run_stdin(
     args: &[&str],
     input: &[u8],
 ) -> Result<String, String> {
+    compose_run_reader(dir, service, args, &mut &input[..]).await
+}
+
+/// Like `compose_run_stdin`, but pumps from a reader instead of a slice.
+///
+/// This is what keeps a pulled database off the heap (plan 19): the caller
+/// hands over a `GzDecoder` on the downloaded file, and the dump streams
+/// decompress -> pipe -> `wp db import` a megabyte at a time. Materializing a
+/// multi-GB dump as a `Vec<u8>` just to write it to a pipe was the other half
+/// of sync v1's memory problem.
+///
+/// The read side is blocking on purpose: it is a 1 MiB read off local disk
+/// between two awaits, which is how the rest of this codebase treats file IO.
+/// `Send` on the reader is not optional — it is held across an await, and every
+/// future in this crate has to stay `Send` to reach a Tauri command.
+pub async fn compose_run_reader(
+    dir: &Path,
+    service: &str,
+    args: &[&str],
+    input: &mut (dyn std::io::Read + Send),
+) -> Result<String, String> {
     use tokio::io::AsyncWriteExt;
     if !dir.exists() {
         return Err(format!("site directory not found: {}", dir.display()));
@@ -157,7 +178,20 @@ pub async fn compose_run_stdin(
     .map_err(|e| format!("failed to run docker compose: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input).await;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            match input.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    // A closed pipe means the command died; stop pumping and
+                    // let wait_with_output report why.
+                    if stdin.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => return Err(format!("failed to read the input stream: {e}")),
+            }
+        }
         let _ = stdin.shutdown().await;
     }
     let output = child

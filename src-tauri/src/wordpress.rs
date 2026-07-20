@@ -328,6 +328,19 @@ pub async fn import_db(dir: &Path, sql: &[u8]) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// Import a gzipped dump straight off disk, decompressing into the pipe.
+///
+/// The streaming counterpart of `import_db`, used by the pull/import flows so
+/// a remote database never has to exist decompressed in memory (plan 19).
+pub async fn import_db_from_gz(dir: &Path, gz_path: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(gz_path)
+        .map_err(|e| format!("failed to open the downloaded dump: {e}"))?;
+    let mut reader = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+    docker::compose_run_reader(dir, "wpcli", &["wp", "db", "import", "-"], &mut reader)
+        .await
+        .map(|_| ())
+}
+
 /// Serialization-safe URL rewrite across all tables.
 pub async fn search_replace(dir: &Path, from: &str, to: &str) -> Result<(), String> {
     wp(dir, &["search-replace", from, to, "--all-tables"])

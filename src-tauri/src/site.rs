@@ -74,12 +74,45 @@ pub struct SiteEvent {
     pub id: String,
     pub stage: String,
     pub message: String,
+    /// Byte counters, present only during a chunked transfer (plan 19).
+    /// Absent everywhere else, so every non-transfer stage keeps rendering
+    /// as the plain stage message it always was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_done: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
 }
 
 /// Emit a progress event to the frontend. `app` is optional so the lifecycle
 /// can also be driven from tests / example binaries / the `lk` CLI without a
 /// Tauri runtime; in that case progress is printed to stderr instead.
 pub(crate) fn emit(app: Option<&AppHandle>, id: &str, stage: &str, message: &str) {
+    dispatch(app, id, stage, message, None, None);
+}
+
+/// Emit a transfer-progress event carrying byte counters.
+///
+/// These fire once per chunk, so the frontend gets a real byte readout instead
+/// of one coarse "Uploading..." that sits there for ten minutes.
+pub(crate) fn emit_bytes(
+    app: Option<&AppHandle>,
+    id: &str,
+    stage: &str,
+    message: &str,
+    done: u64,
+    total: u64,
+) {
+    dispatch(app, id, stage, message, Some(done), Some(total));
+}
+
+fn dispatch(
+    app: Option<&AppHandle>,
+    id: &str,
+    stage: &str,
+    message: &str,
+    bytes_done: Option<u64>,
+    bytes_total: Option<u64>,
+) {
     match app {
         Some(app) => {
             let _ = app.emit(
@@ -88,10 +121,19 @@ pub(crate) fn emit(app: Option<&AppHandle>, id: &str, stage: &str, message: &str
                     id: id.to_string(),
                     stage: stage.to_string(),
                     message: message.to_string(),
+                    bytes_done,
+                    bytes_total,
                 },
             );
         }
-        None => eprintln!("[{stage}] {message}"),
+        None => match (bytes_done, bytes_total) {
+            (Some(done), Some(total)) => eprintln!(
+                "[{stage}] {message} ({} / {})",
+                crate::transfer::human_bytes(done),
+                crate::transfer::human_bytes(total)
+            ),
+            _ => eprintln!("[{stage}] {message}"),
+        },
     }
 }
 

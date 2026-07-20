@@ -22,6 +22,19 @@ pub struct ServerKitConnection {
 /// extension simply omits one, and the matching UI is disabled instead of
 /// failing halfway through an operation.
 pub const FEATURE_PULL_CODE: &str = "pull-code";
+/// Chunked, resumable transfers (plan 19). Absent = talk v1 to this server.
+pub const FEATURE_SYNC_V2: &str = "sync-v2";
+
+/// Per-chunk request budget. reqwest's `timeout` is a *total* request budget,
+/// so with one chunk per request this is exactly the per-chunk timeout the
+/// plan calls for: the whole operation is bounded by liveness, not duration,
+/// and a two-hour upload never trips a clock as long as chunks keep landing.
+const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How many times one chunk is retried before the transfer gives up. A failed
+/// transfer is resumable anyway, so this only saves the user from having to
+/// press the button again after a momentary blip.
+const CHUNK_ATTEMPTS: u32 = 3;
 
 /// Result of a successful connection test.
 #[derive(Debug, Clone, Serialize)]
@@ -439,6 +452,319 @@ async fn download(
         .await
         .map(|b| b.to_vec())
         .map_err(|e| format!("failed to download {what}: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Sync v2 — chunked, resumable transfers (plan 19)
+// ---------------------------------------------------------------------------
+
+/// Reports transfer progress as `(bytes_done, bytes_total)`.
+///
+/// A plain `dyn Fn` rather than a generic parameter: it crosses two async
+/// functions and several await points, and monomorphizing that buys nothing
+/// when it fires once per 8 MiB.
+pub type ProgressFn<'a> = &'a (dyn Fn(u64, u64) + Send + Sync);
+
+#[derive(Deserialize)]
+struct InitResponse {
+    transfer_id: String,
+    #[serde(default)]
+    chunk_size: Option<u64>,
+    /// Offsets the server already holds — subtracting these from our own
+    /// chunk plan is the entirety of resume.
+    #[serde(default)]
+    received: Vec<u64>,
+}
+
+/// Map an extension error response onto something a user can act on.
+fn api_error(what: &str, code: u16, body: &str) -> String {
+    match code {
+        404 => extract_error(body).unwrap_or_else(|| {
+            "The serverkit-localkit extension is not installed on this ServerKit server (404).".into()
+        }),
+        401 | 403 => "The API key was rejected (or lacks admin rights). Check the key.".into(),
+        413 => "The upload is too large for the server (ServerKit limit is 100MB).".into(),
+        _ => extract_error(body).unwrap_or_else(|| format!("{what} failed with HTTP {code}.")),
+    }
+}
+
+/// Upload a staged payload in chunks, resuming whatever a previous attempt left
+/// behind (`POST init` → `PUT chunk`… → `POST finish`).
+///
+/// `kind` is `"code"` or `"db"`. The server only processes anything in
+/// `finish`, and only after the whole-file hash verifies — so abandoning this
+/// mid-way (cancel, crash, dropped link) can never leave the remote site half
+/// updated.
+#[allow(clippy::too_many_arguments)]
+pub async fn push_chunked(
+    url: &str,
+    api_key: &str,
+    kind: &str,
+    remote_site_id: i64,
+    local_url: Option<&str>,
+    staged: &crate::transfer::Staged,
+    cancel: &crate::transfer::CancelToken,
+    progress: ProgressFn<'_>,
+) -> Result<serde_json::Value, String> {
+    use crate::transfer;
+
+    let base = normalize_base_url(url)?;
+    let http = build_client(CHUNK_TIMEOUT)?;
+    let total = staged.total();
+
+    let mut init_body = serde_json::json!({
+        "site_id": remote_site_id,
+        "total_bytes": total,
+        "chunk_size": transfer::CHUNK_SIZE,
+        "sha256": staged.sha256(),
+        "filename": if kind == "code" { "wp-content.tar.gz" } else { "dump.sql" },
+    });
+    if let Some(u) = local_url {
+        init_body["local_url"] = serde_json::Value::String(u.to_string());
+    }
+
+    let init: InitResponse = post_json(
+        &http,
+        &base,
+        &format!("/api/v1/localkit/push/{kind}/init"),
+        api_key,
+        &init_body,
+        "Starting the upload",
+    )
+    .await?;
+
+    // The server owns the offsets, so if it reports a chunk size, that is the
+    // one the plan has to be built from.
+    let chunk_size = init.chunk_size.filter(|c| *c > 0).unwrap_or(transfer::CHUNK_SIZE);
+    let plan = transfer::remaining(total, chunk_size, &init.received);
+    let mut done = total.saturating_sub(transfer::bytes_of(&plan));
+    progress(done, total);
+
+    for chunk in plan {
+        cancel.check()?;
+        let bytes = staged.read_chunk(chunk)?;
+        let chunk_sha = transfer::sha256_hex(&bytes);
+        put_chunk(&http, &base, api_key, kind, &init.transfer_id, chunk, &chunk_sha, bytes, cancel)
+            .await?;
+        done += chunk.len;
+        progress(done, total);
+    }
+
+    cancel.check()?;
+    // `finish` runs the server-side extract/import, which can take minutes on a
+    // big site — it gets the generous transfer budget, not the chunk one.
+    post_json(
+        &transfer_client()?,
+        &base,
+        &format!("/api/v1/localkit/push/{kind}/finish"),
+        api_key,
+        &serde_json::json!({ "transfer_id": init.transfer_id }),
+        "Finishing the upload",
+    )
+    .await
+}
+
+async fn post_json<T: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    base: &str,
+    path: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    what: &str,
+) -> Result<T, String> {
+    let resp = http
+        .post(format!("{base}{path}"))
+        .header("X-API-Key", api_key)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| request_error(base, &e))?;
+    let code = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&code) {
+        return Err(api_error(what, code, &text));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("{what}: unexpected server response ({e})"))
+}
+
+/// PUT one chunk, retrying transient failures.
+///
+/// Only transport errors and 5xx are retried: a 4xx means the server rejected
+/// what we sent (bad offset, failed checksum), and sending the identical bytes
+/// again would fail identically.
+#[allow(clippy::too_many_arguments)]
+async fn put_chunk(
+    http: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    kind: &str,
+    transfer_id: &str,
+    chunk: crate::transfer::Chunk,
+    chunk_sha: &str,
+    bytes: Vec<u8>,
+    cancel: &crate::transfer::CancelToken,
+) -> Result<(), String> {
+    let url = format!("{base}/api/v1/localkit/push/{kind}/chunk");
+    let mut last = String::new();
+    for attempt in 1..=CHUNK_ATTEMPTS {
+        cancel.check()?;
+        let result = http
+            .put(&url)
+            .header("X-API-Key", api_key)
+            .header("Content-Type", "application/octet-stream")
+            .query(&[
+                ("transfer_id", transfer_id.to_string()),
+                ("offset", chunk.offset.to_string()),
+                ("sha256", chunk_sha.to_string()),
+            ])
+            .body(bytes.clone())
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                if (200..300).contains(&code) {
+                    return Ok(());
+                }
+                let body = resp.text().await.unwrap_or_default();
+                last = api_error(&format!("Uploading the chunk at {}", chunk.offset), code, &body);
+                if code < 500 {
+                    return Err(last);
+                }
+            }
+            Err(e) => last = request_error(base, &e),
+        }
+
+        if attempt < CHUNK_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
+        }
+    }
+    Err(last)
+}
+
+/// Download to a temp file with byte progress, resume and cancel.
+///
+/// No protocol invention: HTTP `Range` already is the chunked protocol in this
+/// direction. `session` pins one materialized export on the server so that the
+/// ranges of an interrupted download all come from the same bytes; a server
+/// that ignores it (or has reaped the session) answers a range request with
+/// the whole body, and the `200` branch below simply starts over.
+pub async fn download_resumable(
+    url: &str,
+    api_key: &str,
+    path: &str,
+    remote_site_id: i64,
+    what: &str,
+    cancel: &crate::transfer::CancelToken,
+    progress: ProgressFn<'_>,
+) -> Result<crate::transfer::TempFile, String> {
+    use std::io::Write;
+
+    let base = normalize_base_url(url)?;
+    let http = build_client(CHUNK_TIMEOUT)?;
+    let session = uuid::Uuid::new_v4().simple().to_string();
+    let temp = crate::transfer::TempFile::new("download")?;
+
+    let mut etag: Option<String> = None;
+    let mut last = String::new();
+
+    for attempt in 1..=CHUNK_ATTEMPTS {
+        cancel.check()?;
+        let have = temp.len();
+
+        let mut req = http
+            .get(format!("{base}{path}"))
+            .query(&[
+                ("site_id", remote_site_id.to_string()),
+                ("session", session.clone()),
+            ])
+            .header("X-API-Key", api_key);
+        if have > 0 {
+            req = req.header("Range", format!("bytes={have}-"));
+            // If-Range makes the resume safe: if the export changed under us,
+            // the server owes us a 200 with the whole body rather than a tail
+            // that would splice into nonsense.
+            if let Some(tag) = &etag {
+                req = req.header("If-Range", tag.clone());
+            }
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last = request_error(&base, &e);
+                if attempt < CHUNK_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
+                }
+                continue;
+            }
+        };
+
+        let code = resp.status().as_u16();
+        if code != 200 && code != 206 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(api_error(&format!("Downloading the {what}"), code, &body));
+        }
+
+        etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+
+        // A 200 to a ranged request means "here is everything" — the partial
+        // file is worthless, so throw it away rather than appending a second
+        // copy of the head onto it.
+        let mut done = if code == 206 { have } else { 0 };
+        if code == 200 && have > 0 {
+            temp.truncate()?;
+        }
+        let total = resp.content_length().map(|len| done + len).unwrap_or(0);
+        progress(done, total);
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(temp.path())
+            .map_err(|e| format!("failed to open the download file: {e}"))?;
+
+        let mut resp = resp;
+        let mut stalled = None;
+        loop {
+            if cancel.cancelled() {
+                return Err(crate::transfer::CANCELLED.to_string());
+            }
+            match resp.chunk().await {
+                Ok(Some(bytes)) => {
+                    file.write_all(&bytes)
+                        .map_err(|e| format!("failed to write the download: {e}"))?;
+                    done += bytes.len() as u64;
+                    progress(done, total.max(done));
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    // Mid-stream failure: flush what we have and resume from
+                    // there on the next attempt.
+                    stalled = Some(format!("failed to download the {what}: {e}"));
+                    break;
+                }
+            }
+        }
+        file.flush().map_err(|e| format!("failed to write the download: {e}"))?;
+        drop(file);
+
+        match stalled {
+            None => return Ok(temp),
+            Some(e) => {
+                last = e;
+                if attempt < CHUNK_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
+                }
+            }
+        }
+    }
+    Err(last)
 }
 
 /// Provision a new remote WordPress site (`POST /api/v1/localkit/sites`).
