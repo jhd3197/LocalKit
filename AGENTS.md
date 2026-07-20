@@ -65,6 +65,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   src/serverkit.rs       ServerKit API client (X-API-Key) + connection model
   src/sync.rs            push/pull orchestration + SyncRecord (sync_history) +
                          plan 18 import (clone a remote site to a new local one)
+  src/transfer.rs        plan 19 chunked transfers: chunk planning + resume
+                         subtraction, sha256 hashing writer, self-deleting
+                         staged/temp files, per-site cancel registry
   src/snapshot.rs        plan 17 snapshots: DB dump + wp-content archive on
                          disk (no DB table), restore, retention
   tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin;
@@ -107,6 +110,19 @@ src-tauri/               Rust backend (also a cargo workspace root)
   first, port 9872); requires the smoke site to exist. Since plan 18 it also
   imports a remote site as a real new local site (containers and all) and
   deletes it again, and asserts the multisite refusal provisions nothing.
+  Since plan 19 it also drives the chunked path: it writes a 110 MB
+  incompressible filler into the smoke site's wp-content, has the mock refuse
+  chunks after two land, and asserts the retry re-sends only the missing ones,
+  that the same >100 MB archive is refused over v1, and that v1 still works
+  when `/pair` withholds `sync-v2`.
+- `node scripts/verify-sync-progress.mjs` — headless runtime check of the
+  plan-19 transfer UX against the mock server (the byte readout advancing
+  monotonically against a fixed total, the Cancel button appearing only while
+  bytes move, a cancel resolving neutrally and really stopping the transfer,
+  `cancelled` in sync history, and an uninterrupted transfer still finishing
+  green). Its click helper reports disabled buttons instead of silently
+  no-opping — that is what catches "a terminal stage nobody handled left the
+  buttons stuck".
 - `node scripts/verify-import.mjs` — headless runtime check of the plan-18
   import UX against the mock server (per-row Import buttons, the multisite
   refusal and its tooltip, the version-match readout and mismatch warning,
@@ -164,15 +180,19 @@ src-tauri/               Rust backend (also a cargo workspace root)
   `wpcli` service (`wordpress:cli-php<ver>`) via `docker::compose_run`, and
   always pass `wp` as the first argument (the cli image's `wp` CMD is replaced
   by run args, so omitting it makes the entrypoint exec `core` and fail).
-- **Events:** long operations emit `site-event` (`{id, stage, message}`);
+- **Events:** long operations emit `site-event`
+  (`{id, stage, message, bytes_done?, bytes_total?}`);
   create stages: files → pulling → containers → waiting → install (re-emitted
   per attempt) → done | error. The `pulling` stage pre-pulls all images
   including the profile-gated wpcli (`docker::compose_pull`) so first-run
   downloads are a labeled stage, not a silent stall. When there is no Tauri
   app handle (CLI, examples), `site::emit` prints `[stage] message` to stderr
   instead of dropping the event. On the frontend, `sites.ts handleEvent`
-  renders these as a single pinned progress toast that resolves into
-  success/error on done/error.
+  renders these as a single pinned progress toast that resolves on any
+  terminal stage (`done` | `error` | `cancelled` — see `isTerminalStage`).
+  The byte fields are present only during a chunked transfer (`emit_bytes`):
+  the backend sends raw counters and a bare label, and the frontend composes
+  "Pushing wp-content — 148 MB / 312 MB". Never format the readout backend-side.
 - **Settings store (plan 13):** all frontend preferences flow through
   `stores/settings.ts` over the `app_settings` KV — reads seed synchronously
   from `window.__LOCALKIT_SETTINGS__` (published by
@@ -321,6 +341,36 @@ src-tauri/               Rust backend (also a cargo workspace root)
   of vanishing. Bulk transfers use `serverkit::transfer_client` (30 min), not
   the 15 s probe client — reqwest's `timeout` is a *total* request budget, so
   the short one aborts any payload bigger than a fast link can move in 15 s.
+  Since plan 19 this v1 path only runs against servers without `sync-v2`.
+- **Sync v2 — chunked transfers (plan 19):** `transfer.rs` holds the
+  substrate (no HTTP in it, so the offset math is unit-testable);
+  `serverkit::push_chunked` / `download_resumable` are the wire protocol;
+  `sync.rs` picks between them and v1 **once, at the top** of each operation
+  via `supports_v2` (`GET /pair` → `sync-v2`). **Keep v1 as one isolated
+  function per operation** — never sprinkle `if v2` through a shared flow; a
+  failed capability probe must fall back to v1, because falling back always
+  works. Uploads: `CHUNK_SIZE` is 8 MiB and is a **const, not a setting**;
+  each chunk is one request, so reqwest's total-request `timeout` *is* the
+  per-chunk timeout (the operation is bounded by liveness, not duration).
+  Resume is nothing but `transfer::remaining` subtracting the offsets `init`
+  reports — the client persists no state, and offsets it never planned are
+  ignored rather than trusted. The server processes only inside `finish`,
+  **after** the whole-file sha256 verifies, which is why an abandoned transfer
+  can never half-apply; the safe-extract policy still applies to the verified
+  archive (verified means intact, not friendly). Downloads use HTTP `Range` +
+  `If-Range` with a client-generated `?session=` that pins one materialized
+  export server-side — `pull/db` and `pull/code` build their payload per
+  request, so ranges from two different `mysqldump`/`tar` runs would splice
+  into garbage; a `200` answering a ranged request means "start over".
+  **Nothing large is held in memory anymore**: `snapshot::write_wp_content_tgz`
+  tars into a staging file, `docker::compose_run_reader` streams a dump
+  decompress→pipe→`wp db import`, and the import untars straight off disk.
+  Cancel: `AppState.transfers` (`transfer::CancelRegistry`) hands each op a
+  token checked between chunks; `cancel_sync(site_id)` sets it. **A cancel is
+  not a failure** — it emits the `cancelled` stage and records
+  `status: "cancelled"`. Frontend listeners must use `isTerminalStage` from
+  `stores/sites.ts` rather than hardcoding `done | error`, or they silently
+  stop resetting when a stage is added.
 - **Import (plan 18):** `sync::import_site` clones a remote site into a *new*
   local site. Order is the design: `pre_import` checks everything knowable
   before provisioning (extension advertises `pull-code`, remote exists, not

@@ -1,6 +1,6 @@
 # 19 — Sync v2: chunked transfers, byte progress, resume, cancel
 
-Status: ⬜ planned
+Status: ✅ shipped (one deferred item — see *What shipped* below)
 
 Replace the monolithic in-memory push/pull with a chunked, resumable
 transfer protocol between LocalKit and the `serverkit-localkit` extension,
@@ -89,3 +89,58 @@ as its known v1 limitation.
   is gone and memory stays flat (`docker stats`-level eyeball is fine).
 - Unit tests: chunker/hasher pipeline (offset math, hash continuity),
   resume-set subtraction.
+
+## What shipped
+
+Phases 1 and 2 in full; phase 3 except the job-queue handoff.
+
+- **Client** — `src-tauri/src/transfer.rs` (chunk planning, resume
+  subtraction, hashing writer, self-deleting staged/temp files, per-site
+  cancel registry; 28 unit tests), `serverkit::push_chunked` /
+  `download_resumable`, protocol selection in `sync.rs` via `supports_v2`
+  with v1 preserved as one isolated function per operation.
+- **Server** — `POST /push/<kind>/init`, `PUT /push/<kind>/chunk`,
+  `POST /push/<kind>/finish` in the ServerKit extension, plus `?session=` +
+  `conditional=True` on both pulls. v1 and v2 both end in the shared
+  `_install_code` / `_import_db`, so there is exactly one processing path.
+  `FEATURES` gained `sync-v2`.
+- **Memory** — the plan's "tar straight to the pipeline" turned out to matter
+  more than the chunking: `snapshot::write_wp_content_tgz` stages the archive
+  to a file, `docker::compose_run_reader` streams a dump into
+  `wp db import`, and the import untars off disk. Nothing large is buffered
+  in either direction anymore.
+- **UI** — byte counters on `site-event`, "Pushing wp-content — 148 MB /
+  312 MB" in the pinned toast, a Cancel button while bytes move, and a
+  `cancelled` terminal stage/history status that reads neutral rather than
+  as a failure.
+- **Verification** — `m4_smoke` writes a 110 MB incompressible fixture, has
+  the mock refuse chunks after two land, and asserts the retry re-sends only
+  the missing 14 of 16; the same 123 MB archive is refused over v1 with the
+  100 MB error, and v1 still works when `/pair` withholds `sync-v2`.
+  `scripts/verify-sync-progress.mjs` covers the UI headlessly.
+
+### Deferred: the server-side job queue
+
+Phase 3's "move `finish`'s processing onto the extension's job queue with a
+`GET /jobs/<id>` poll" is **not** implemented. `finish` still processes
+inline. The gap it leaves is narrow — a client that disconnects *during
+server-side processing* (not during transfer) cannot re-attach to learn the
+outcome — and it is partly mitigated: a transfer whose processing fails is
+kept rather than discarded, so a retry resumes straight to `finish` instead
+of re-uploading. Closing it properly needs job infrastructure the extension
+does not have today (ServerKit's `deployment_job_service` is
+deployment-specific), which is a larger piece of work than the rest of this
+plan combined and belongs in its own slice.
+
+### Notes for whoever picks this up
+
+- Resume needed one thing the plan did not anticipate: `pull/db` and
+  `pull/code` *materialize* their payload per request, so plain `Range`
+  against them would splice bytes from two different exports. Hence the
+  client-generated `?session=` that pins one export server-side. It is a
+  small addition to "HTTP already is the chunked protocol here", not a
+  replacement for it.
+- Adding a third terminal stage (`cancelled`) broke two frontend components
+  that hardcoded `done | error` — they stopped clearing `busy` and left the
+  push buttons disabled forever. `isTerminalStage` in `stores/sites.ts` is
+  now the single list; use it.

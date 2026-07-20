@@ -97,6 +97,7 @@ npm run tauri build
 | | |
 |---|---|
 | **Push Code**<br>Push your local `wp-content` straight to a remote site on your ServerKit server. | **Push / Pull Database**<br>Push the DB, or pull a remote DB into your local site with automatic URL search-replace. |
+| **Resumable Transfers**<br>Sync in 8 MiB chunks with byte-level progress. Lose the connection at 99% and the retry re-sends only what was missing — no size ceiling, nothing buffered in RAM. | **Cancel Any Transfer**<br>Stop a push or pull mid-flight. The server only applies a payload once its checksum verifies, so a cancelled sync leaves nothing half-written. |
 | **Import a Remote Site**<br>Clone any site on your server down as a *new* local site — wp-content, database and URL rewriting in one step, from the app or `lk import`. | **Sync History**<br>Every sync op is recorded per site, with its result. |
 | **Connections**<br>Save, test, and delete server connections; browse remote sites and provision new ones — all through the `serverkit-localkit` extension. | **Capability-Aware**<br>The app asks the extension what it supports, so features an older server can't do are disabled with a reason instead of failing halfway. |
 
@@ -190,6 +191,7 @@ src-tauri/               Rust backend
   src/router.rs          local domains: shared Caddy router + hosts block + CA trust
   src/serverkit.rs       ServerKit API client (X-API-Key)
   src/sync.rs            push/pull orchestration + sync history
+  src/transfer.rs        chunked transfers: chunk planning, resume, hashing, cancel
 scripts/                 capture-screenshots.mjs (npm run shots), generate-funding-qr.mjs
 docs/
   plans/                 ROADMAP.md + numbered implementation plans
@@ -213,7 +215,10 @@ docs/
 - Auth is via `X-API-Key` (create a key in ServerKit → API settings).
 - Connection test = public `/api/v1/system/health` + key validation against `/api/v1/setup-health/account` + a `/api/v1/localkit/pair` probe that detects the extension.
 - All sync endpoints live in the `serverkit-localkit` extension (`/api/v1/localkit/...`); without it, LocalKit tells you exactly what's missing.
-- **Push code** = in-memory tar.gz of `wp-content/` → multipart POST. **Push DB** = `wp db export` → multipart POST. **Pull DB** = download dump → `wp db import` → `wp search-replace` remote URL → local URL.
+- **Transfers are chunked and resumable.** Uploads go up in 8 MiB chunks; the server assembles them, verifies a SHA-256 of the whole archive, and only *then* applies anything — so an interrupted push can never leave the remote site half-updated. Retrying re-sends only the chunks that were actually lost. Downloads resume the same way over HTTP `Range`. This lifts the server's 100 MB request limit, and nothing large is held in memory in either direction.
+- Progress is reported in bytes ("Pushing wp-content — 148 MB / 312 MB") and any transfer can be cancelled mid-flight.
+- Against a server running an older extension, LocalKit falls back to the v1 single-request upload automatically — one client, both servers.
+- **Push code** = tar.gz of `wp-content/`. **Push DB** = `wp db export`. **Pull DB** = download dump → `wp db import` → `wp search-replace` remote URL → local URL.
 - **Import** provisions a new local site, then lands the remote `wp-content` (via the extension's `pull/code`) and database on it. WordPress is never installed over the imported database — the database *is* the site, so its posts, users and settings come across intact. Log in with the remote's own accounts (`lk login`, or the app's WP Admin button).
 - The app gates Import on the capabilities the extension reports from `GET /pair`, so a server running an older extension shows the button disabled with the reason rather than failing mid-import. Multisite installs are refused outright.
 - Downloaded archives are extracted under a strict policy — only plain files and directories under `wp-content/`; absolute paths, `..`, and symlinks are rejected.
@@ -261,7 +266,7 @@ back to 80/443 in Settings → Local domains, and hit Retry.
 - **M1 — Local site lifecycle** ✅ create/start/stop/delete, compose projects, port allocation
 - **M2 — WordPress install & detail** ✅ wp-cli install, credentials, logs, wp info
 - **M3 — ServerKit connection** ✅ save/test connections, extension detection, browse remote sites
-- **M4 — Push / pull** ✅ push code, push DB, pull DB with URL rewrite, sync history, import a remote site as a new local site
+- **M4 — Push / pull** ✅ push code, push DB, pull DB with URL rewrite, sync history, import a remote site as a new local site, chunked resumable transfers with byte progress and cancel
 - **M5 — Release polish** ⬜ installers, auto-update, OS keyring for API keys, test suite
 - **M6 — Local domains** ✅ `http(s)://<slug>.test` via a shared Caddy router, managed hosts block + local CA trust (plan 6)
 - **M7 — CLI (`lk`)** ✅ headless companion binary: lifecycle, wp passthrough, `env`, `doctor`, JSON output (plan 7)

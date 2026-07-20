@@ -26,7 +26,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 16 | `16_router-coexistence` | ✅ shipped | Port-80/443 conflict pre-flight + configurable router ports so domains survive alongside LocalWP & co. |
 | 17 | `17_snapshots` | ✅ shipped | DB + wp-content snapshots with one-click restore; automatic before push/pull/delete. Safety net for 18–20. |
 | 18 | `18_import-remote-site` | ✅ shipped | Clone a ServerKit site down as a *new* local site; adds the extension's `pull/code` endpoint + a `features` capability contract. |
-| 19 | `19_sync-v2-chunked` | ⬜ | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). |
+| 19 | `19_sync-v2-chunked` | ✅ shipped | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). Server-side job-queue handoff deferred — see the plan. |
 | 20 | `20_clone-and-blueprints` | ⬜ | One-click site clone + save-site-as-blueprint creation flows (needs 17). |
 | 21 | `21_cli-serverkit` | ⬜ | `lk connection/push/pull` + remote listing + shell completions (Track D). |
 | 22 | `22_multi-stack-core` | ⬜ | Kind/capability site model + bring-your-own-compose Docker apps — before 23–25 so new features are capability-aware from day one. |
@@ -67,6 +67,13 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   migration-5 origin columns, Import UI + `lk import`
 - ✅ Extension capability contract (`GET /pair` → `features`), so the UI
   disables what an older server cannot do instead of failing mid-operation
+- ✅ Sync v2 (plan 19): chunked resumable push (8 MiB chunks, hash-verified
+  `finish`), `Range`-resumed downloads, byte-level progress and cancel —
+  the 100 MB request limit and the build-it-all-in-RAM ceiling are both gone,
+  with v1 kept as the fallback for servers without `sync-v2`
+- ⬜ Server-side job queue for the post-upload import/extract (plan 19 phase 3
+  remainder): today `finish` processes inline, so a client that disconnects
+  *during processing* — not transfer — cannot re-attach to learn the outcome
 
 ## Track C — Product (M5–M6)
 
