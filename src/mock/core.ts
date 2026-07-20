@@ -48,6 +48,8 @@ function mockConflict(conflicts: PortConflict[], keepEnabled = false): RouterSta
 
 // Fake interactive shells for the Terminal page (terminal_open/write/close).
 const mockShells = new Map<string, { slug: string; buffer: string }>();
+/** Site ids whose in-flight mock transfer has been asked to stop (plan 19). */
+const mockCancels = new Set<string>();
 const prompt = (slug: string) =>
   `\x1b[35mroot\x1b[0m@\x1b[34m${slug}\x1b[0m:\x1b[36m/var/www/html\x1b[0m# `;
 
@@ -419,19 +421,8 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
           `${conn?.label ?? "server"} (#${a.remoteSiteId} on ${conn?.url ?? "?"})`
         );
       }
-      void (async () => {
-        emit("site-event", {
-          id: siteId,
-          stage: "push",
-          message: `${direction === "push" ? "Pushing" : "Pulling"} ${kind} for ${site?.name}…`,
-        } satisfies SiteEvent);
-        await sleep(1200);
-        emit("site-event", {
-          id: siteId,
-          stage: "done",
-          message: `${direction === "push" ? "Pushed" : "Pulled"} ${kind} for ${site?.name}.`,
-        } satisfies SiteEvent);
-      })();
+      const verb = direction === "push" ? "Pushing" : "Pulling";
+      const past = direction === "push" ? "Pushed" : "Pulled";
       const record = {
         id,
         site_id: siteId,
@@ -439,11 +430,57 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         direction,
         kind,
         status: "success",
-        message: `${direction === "push" ? "Pushed" : "Pulled"} ${kind} via mock.`,
+        message: `${past} ${kind} via mock.`,
         created_at: new Date().toISOString(),
       };
       (data.syncHistory[siteId] ??= []).unshift(record);
+
+      // Plan 19: a chunked transfer, so the mock UI shows the same byte
+      // readout and Cancel button the real backend drives.
+      void (async () => {
+        mockCancels.delete(siteId);
+        const total = 312 * 1024 * 1024;
+        const chunk = 8 * 1024 * 1024;
+        emit("site-event", {
+          id: siteId,
+          stage: direction,
+          message: kind === "code" ? "Bundling wp-content…" : "Exporting local database…",
+        } satisfies SiteEvent);
+        await sleep(500);
+
+        for (let done = 0; done <= total; done += chunk) {
+          if (mockCancels.delete(siteId)) {
+            record.status = "cancelled";
+            record.message = `${direction} ${kind} cancelled`;
+            emit("site-event", {
+              id: siteId,
+              stage: "cancelled",
+              message: `${direction} ${kind} cancelled`,
+            } satisfies SiteEvent);
+            return;
+          }
+          emit("site-event", {
+            id: siteId,
+            stage: direction,
+            message: `${verb} ${kind === "code" ? "wp-content" : "database"}`,
+            bytes_done: Math.min(done, total),
+            bytes_total: total,
+          } satisfies SiteEvent);
+          await sleep(80);
+        }
+        emit("site-event", {
+          id: siteId,
+          stage: "done",
+          message: `${past} ${kind} for ${site?.name}.`,
+        } satisfies SiteEvent);
+      })();
       return null;
+    }
+
+    case "cancel_sync": {
+      const siteId = String(a.siteId);
+      mockCancels.add(siteId);
+      return true;
     }
 
     case "list_sync_history":

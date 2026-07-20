@@ -60,6 +60,8 @@ export const ipc = {
   importRemoteSite: (connectionId: string, remoteSiteId: number, name?: string) =>
     invoke<Site>("import_remote_site", { connectionId, remoteSiteId, name }),
   listSyncHistory: (siteId: string) => invoke<SyncRecord[]>("list_sync_history", { siteId }),
+  /** Stop the in-flight chunked sync for a site; resolves to whether there was one. */
+  cancelSync: (siteId: string) => invoke<boolean>("cancel_sync", { siteId }),
   routerStatus: () => invoke<RouterStatus>("router_status"),
   setDomainsEnabled: (enabled: boolean) =>
     invoke<RouterStatus>("set_domains_enabled", { enabled }),

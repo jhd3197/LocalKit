@@ -2,8 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { toastError } from "../lib/errors";
 import { useServerKit } from "../stores/serverkit";
-import { useSites } from "../stores/sites";
+import { isTerminalStage, useSites } from "../stores/sites";
 import type { RemoteWpSite, SyncRecord } from "../lib/types";
+
+/** Sync-history result colours; anything unrecognised falls through to red. */
+const STATUS_CLASSES: Record<string, string> = {
+  success: "text-emerald-400",
+  cancelled: "text-zinc-400",
+};
 
 /** "Push to ServerKit" panel on the site detail page (M4). */
 export default function PushPanel({ siteId, running }: { siteId: string; running: boolean }) {
@@ -30,9 +36,11 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
     refreshHistory();
   }, [refreshConnections, refreshHistory]);
 
-  // Refresh history when a sync operation for this site finishes.
+  // Refresh history when a sync operation for this site finishes — including
+  // a cancel, which is just as terminal as a failure. Missing that stage here
+  // would leave `busy` set and every push button disabled for good.
   useEffect(() => {
-    if (progress && (progress.stage === "done" || progress.stage === "error")) {
+    if (progress && isTerminalStage(progress.stage)) {
       refreshHistory();
       setBusy(null);
     }
@@ -204,7 +212,8 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
                   <td className="py-1.5 pr-2 text-zinc-300">
                     {h.direction} {h.kind}
                   </td>
-                  <td className={`py-1.5 pr-2 ${h.status === "success" ? "text-emerald-400" : "text-red-400"}`}>
+                  {/* A cancel was deliberate — neutral, not red like a failure. */}
+                  <td className={`py-1.5 pr-2 ${STATUS_CLASSES[h.status] ?? "text-red-400"}`}>
                     {h.status}
                   </td>
                   <td className="max-w-xs truncate py-1.5 text-xs text-zinc-500" title={h.message}>

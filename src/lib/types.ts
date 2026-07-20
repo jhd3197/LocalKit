@@ -64,6 +64,13 @@ export interface SiteEvent {
   id: string;
   stage: string;
   message: string;
+  /**
+   * Byte counters, present only during a chunked transfer (plan 19). Absent on
+   * every other stage, which is what tells the UI to render the plain stage
+   * message instead of a byte readout.
+   */
+  bytes_done?: number;
+  bytes_total?: number;
 }
 
 export interface ServerKitConnection {

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { errMsg, markEventError, toastError } from "../lib/errors";
-import { toast, useToast } from "./toast";
+import { toast, useToast, type ToastKind } from "./toast";
 import type { Site, SiteEvent, SiteWithStatus, WpInfo } from "../lib/types";
 
 interface SitesState {
@@ -29,6 +29,52 @@ let progressToastId: number | null = null;
 
 function siteName(sites: SiteWithStatus[], id: string): string | undefined {
   return sites.find((s) => s.id === id)?.name;
+}
+
+/** Terminal stages: the ones that resolve the pinned progress toast. */
+const TERMINAL: Record<string, ToastKind> = {
+  done: "success",
+  error: "error",
+  // A cancel is deliberate, so it resolves neutral rather than red (plan 19).
+  cancelled: "info",
+};
+
+/**
+ * Has a site-event stream reached its end?
+ *
+ * Exported so every listener agrees on what "finished" means. Components that
+ * hardcoded `done | error` silently stopped resetting themselves the moment
+ * `cancelled` was added — one list, one source of truth.
+ */
+export function isTerminalStage(stage: string): boolean {
+  return stage in TERMINAL;
+}
+
+/**
+ * Byte count for a progress line. Mirrors `transfer::human_bytes` on the Rust
+ * side so the CLI's stderr output and the GUI toast read identically.
+ */
+function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit + 1 < units.length) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+/**
+ * Title for a progress toast: "Pushing wp-content — 148 MB / 312 MB" during a
+ * chunked transfer, the bare stage message everywhere else. The backend sends
+ * counters, not prose, so this is the only place the readout is composed.
+ */
+function progressTitle(event: SiteEvent): string {
+  const { bytes_done, bytes_total } = event;
+  if (bytes_done == null || !bytes_total) return event.message;
+  return `${event.message} — ${humanBytes(bytes_done)} / ${humanBytes(bytes_total)}`;
 }
 
 export const useSites = create<SitesState>((set, get) => ({
@@ -130,20 +176,38 @@ export const useSites = create<SitesState>((set, get) => ({
 
   handleEvent: (event) => {
     set({ progress: event });
-    if (event.stage === "done" || event.stage === "error") {
-      const kind = event.stage === "done" ? "success" : "error";
+    const terminal = TERMINAL[event.stage];
+    if (terminal) {
       if (progressToastId != null) {
-        toast.resolve(progressToastId, kind, event.message);
+        toast.resolve(progressToastId, terminal, event.message);
         progressToastId = null;
       } else {
-        toast[kind](event.message);
+        toast[terminal](event.message);
       }
-      if (kind === "error") markEventError(event.message);
+      // Both error and cancel reject the command promise as well; dedupe so
+      // the user sees one message, not two.
+      if (terminal !== "success") markEventError(event.message);
       void get().refresh();
-    } else if (progressToastId != null) {
-      useToast.getState().update(progressToastId, { title: event.message });
+      return;
+    }
+
+    // Only a byte-carrying stage is cancellable: those are the chunked
+    // transfers, which stop cleanly between chunks. Offering Cancel on
+    // `docker compose up` would be a button that does nothing.
+    //
+    // Set on every event, not just the first: a push opens its toast on
+    // "Bundling wp-content..." (no bytes) and only becomes cancellable once
+    // chunks start flowing — and stops being cancellable again when the
+    // server moves on to importing.
+    const action = event.bytes_total
+      ? { label: "Cancel", onClick: () => void ipc.cancelSync(event.id).catch(() => {}) }
+      : undefined;
+    const title = progressTitle(event);
+
+    if (progressToastId != null) {
+      useToast.getState().update(progressToastId, { title, action });
     } else {
-      progressToastId = toast.progress(event.message);
+      progressToastId = toast.progress(title, action);
     }
   },
 }));

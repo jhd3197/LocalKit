@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { toastError } from "../lib/errors";
 import { toast } from "../stores/toast";
-import { useSites } from "../stores/sites";
+import { isTerminalStage, useSites } from "../stores/sites";
 import type { Snapshot, SnapshotKind } from "../lib/types";
 
 /**
@@ -53,7 +53,7 @@ export default function SnapshotsPanel({ siteId }: { siteId: string }) {
   // Push/pull/delete take snapshots of their own — pick them up when the
   // operation that created them finishes.
   useEffect(() => {
-    if (progress && (progress.stage === "done" || progress.stage === "error")) {
+    if (progress && isTerminalStage(progress.stage)) {
       refresh();
       setBusy(null);
     }
