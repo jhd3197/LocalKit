@@ -24,7 +24,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 14 | `14_terminal-quick-wins` | ✅ shipped | Web-links, copy-on-select, ghost-text history, terminal font/scrollback settings (needs 13). |
 | 15 | `15_command-palette-shortcuts` | ✅ shipped | Command registry + palette (mod+K), global shortcuts, remappable bindings in Settings (needs 13). |
 | 16 | `16_router-coexistence` | ✅ shipped | Port-80/443 conflict pre-flight + configurable router ports so domains survive alongside LocalWP & co. |
-| 17 | `17_snapshots` | ⬜ | DB + wp-content snapshots with one-click restore; automatic before push/pull/delete. Safety net for 18–20. |
+| 17 | `17_snapshots` | ✅ shipped | DB + wp-content snapshots with one-click restore; automatic before push/pull/delete. Safety net for 18–20. |
 | 18 | `18_import-remote-site` | ⬜ | Clone a ServerKit site down as a *new* local site (needs the extension's missing pull/code endpoint). |
 | 19 | `19_sync-v2-chunked` | ⬜ | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). |
 | 20 | `20_clone-and-blueprints` | ⬜ | One-click site clone + save-site-as-blueprint creation flows (needs 17). |
@@ -49,6 +49,9 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   (plan 10)
 - ✅ Windows polish: hide subprocess console windows, visible first-run
   install progress (plan 9)
+- ✅ Snapshots + one-click restore (plan 17): DB dump + wp-content archive per
+  snapshot, taken automatically before every push, pull, delete and restore;
+  retention capped per kind; Snapshots panel, `lk snapshot`, palette command
 - ⬜ Site duplication / clone (plan 20, with blueprints)
 
 ## Track B — ServerKit (M3–M4)

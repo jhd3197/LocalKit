@@ -38,7 +38,8 @@ src/                     React 18 + TS + Vite frontend
                          not a page)
   components/            Sidebar, StatusBadge, CopyButton, NewSiteDialog,
                          CommandPalette, KeyboardSettings,
-                         KeyboardShortcutsDialog,
+                         KeyboardShortcutsDialog, SnapshotsPanel,
+                         DeleteSiteDialog,
                          icons.tsx (inline SVGs, 1.75px rounded strokes)
   assets/logo.png        Vite-bundled brand logo (sidebar); master at assets/logo.png
   mock/                  in-browser mocks of @tauri-apps/* for `vite --mode mock`
@@ -63,6 +64,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          `terminal://data` / `terminal://exit`
   src/serverkit.rs       ServerKit API client (X-API-Key) + connection model
   src/sync.rs            push/pull orchestration + SyncRecord (sync_history)
+  src/snapshot.rs        plan 17 snapshots: DB dump + wp-content archive on
+                         disk (no DB table), restore, retention
   tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin;
                          the main window is built in code (`lib.rs run()`), not
                          from the config `windows` array, so the settings init
@@ -90,18 +93,30 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
   uses a scratch data dir under the OS temp dir.
+- `node scripts/verify-snapshots.mjs` — headless runtime check of the plan-17
+  snapshot UX against the mock server (listing + kind badges, take-with-note,
+  restore taking a pre-restore snapshot first, delete, a DB pull leaving a
+  `pre_pull` snapshot, and both delete-site dialog paths).
+- `cd src-tauri && cargo run --example snapshot_smoke [-- run|clean]` — plan-17
+  E2E against real Docker: snapshots the `smoke` site, deletes post 1 and a
+  canary file in wp-content, restores, asserts both are back. Run
+  `smoke -- create` first.
 - `cd src-tauri && cargo run --example m4_smoke` — M4 push/pull E2E against a
   mock serverkit-localkit extension (`node examples/mock_localkit_ext.cjs`
   first, port 9872); requires the smoke site to exist.
 - `cd src-tauri && cargo test --lib router` — unit tests for the M6 hosts-file
   block logic (insert/replace/remove idempotency, CRLF preservation) plus the
-  plan-16 port probe, compose port mapping and `site_url` formatting.
+  plan-16 port probe, listener-table parsing, compose port mapping and
+  `site_url` formatting.
+- `cd src-tauri && cargo test --lib snapshot` — plan-17 retention rules
+  (per-kind cap, manual never pruned) + manifest/gzip round-trips.
 - `cd src-tauri && cargo run --example m6_smoke` — M6 router E2E against the
   smoke site; **interactive only** (hosts-file writes trigger UAC/elevation
   prompts twice). Run `smoke -- create` first, `smoke -- cleanup` after.
 - `cd src-tauri && cargo run -p lk -- <cmd>` — headless CLI (`lk list |
   create | start | stop | restart | delete | info | logs | wp | env | login |
-  doctor`); shares the GUI's data dir, so use `--data-dir` (or
+  snapshot list|create|restore|delete | doctor`); shares the GUI's data dir,
+  so use `--data-dir` (or
   `LOCALKIT_DATA_DIR`) for throwaway tests. See docs/plans/7_cli.md.
 - CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
   build`, `cargo check --workspace --all-targets`, `cargo test --workspace`
@@ -295,6 +310,30 @@ src-tauri/               Rust backend (also a cargo workspace root)
   rows in `sync_history` (migration 3). Connections live in
   `serverkit_connections` (migration 2); **API keys in plaintext SQLite** —
   accepted for v1, revisit with a keyring later.
+- **Snapshots (plan 17):** `snapshot.rs`. A snapshot is a *directory*, not a
+  DB row — no migration: `<data dir>/snapshots/<site_id>/<ts>/` holding
+  `manifest.json` + `db.sql.gz` + `wp-content.tar.gz`. The manifest carries
+  `site_name`/`site_slug` so it stays meaningful after the site row is gone.
+  Payloads are written **before** the manifest, so a half-written snapshot has
+  no manifest and `list` skips it instead of offering a broken restore.
+  `build_wp_content_tgz` lives here and is what `sync::push_code` uploads —
+  one archive format, so snapshots untar by hand. `create` emits only
+  `snapshot`-stage events, never `done`/`error`, because it nests inside
+  push/pull/delete whose progress toast must not resolve early; standalone
+  callers (the Tauri command) emit the terminal stage themselves. Restore
+  swaps wp-content's *contents*, never the directory (it is bind-mounted —
+  removing it breaks the mount), and auto-starts a stopped site for the DB
+  import. **Every destructive flow snapshots first:** `push_db`/`pull_db`
+  abort if it fails (never mutate without a net), `site::delete` takes a
+  `pre_delete` one best-effort (a broken site must stay deletable) and keeps
+  the snapshot dir unless the caller passes `delete_snapshots`. Retention is
+  the pure, unit-tested `prunable()`: newest 5 per site per auto kind,
+  `manual` never pruned.
+- **Port allocation:** `site::free_port` checks the OS listener table
+  (`router::listening_ports`), not just a trial bind, and checks the DB port
+  (site port + 10000) as well as the site port. Bind-only probing is the
+  plan-16 SO_REUSEADDR trap: a port published by a running container reads as
+  free, and creation then dies at `compose up` *after* the image pull.
 - **Design system:** tailwind.config.js remaps the zinc scale to the brand navy
   surfaces (#0D0F16 bg / #151822 surface / #2A2F40 borders / #9097AB muted) and
   violet to brand (#6C5CE7 primary, #7A6BEA hover, #B8AFFA lavender accent);

@@ -90,6 +90,7 @@ npm run tauri build
 | **One-Click WordPress Sites**<br>Pick a name, a WordPress version, and a PHP version — done. | **Per-Site Docker Compose Project**<br>`wordpress:<wp>-php<php>-apache` + `mariadb:11`, fully isolated per site. |
 | **Automatic WordPress Install**<br>Installed via wp-cli, with generated admin credentials handed to you. | **Unique Host Ports**<br>Sites on `http://localhost:8081+`, databases on `18081+` — no conflicts. |
 | **Lifecycle & Logs**<br>Start / stop / delete, live container status badges, and a container log viewer. | **Local Domains**<br>Optional `http(s)://<slug>.test` URLs via a shared Caddy router on ports 80/443, managed hosts-file block (one-time admin approval), and one-click local-CA trust for HTTPS. |
+| **Snapshots & One-Click Restore**<br>Point-in-time copies of the database and `wp-content`, restorable from the site page or the CLI. | **Nothing Destructive Is One-Way**<br>A snapshot is taken automatically before every push, pull, delete and restore — deleting a site keeps one unless you opt out. |
 
 ### 🔁 ServerKit Sync
 
@@ -103,7 +104,7 @@ npm run tauri build
 | | |
 |---|---|
 | **Dashboard Views**<br>Grid or dense list view for the dashboard, remembered between launches. | **Site Detail Page**<br>Open site / wp-admin, copyable admin + DB credentials, wp-cli info (core version, plugins). |
-| **`lk` CLI**<br>Manage sites from the terminal: `lk create`, `start/stop/restart`, `wp` passthrough, `env` exports, `doctor`, JSON output — shares the app's data dir. | **Bind-Mounted Code**<br>`wp-content` lives in a plain host folder, so you edit themes and plugins in your own editor. |
+| **`lk` CLI**<br>Manage sites from the terminal: `lk create`, `start/stop/restart`, `wp` passthrough, `env` exports, `snapshot`, `doctor`, JSON output — shares the app's data dir. | **Bind-Mounted Code**<br>`wp-content` lives in a plain host folder, so you edit themes and plugins in your own editor. |
 
 ---
 
@@ -134,6 +135,8 @@ cargo run -p lk -- list                 # or: cargo build -p lk → target/debug
 lk create "My Blog"                     # full site create, prints the site URL
 lk wp my-blog plugin list               # wp-cli passthrough
 lk env my-blog                          # eval-able exports: eval $(lk env my-blog)
+lk snapshot create my-blog              # point-in-time DB + wp-content copy
+lk snapshot restore my-blog <id> --yes  # roll back to one
 lk doctor                               # diagnose Docker / compose / data dir
 lk list --json                          # machine-readable output
 ```

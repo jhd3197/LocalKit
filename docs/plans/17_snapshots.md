@@ -1,6 +1,6 @@
 # 17 — Local site snapshots & one-click restore
 
-Status: ⬜ planned
+Status: ✅ shipped
 
 Point-in-time copies of a site (DB dump + `wp-content` archive) with
 one-click restore, taken automatically before every destructive operation
@@ -86,3 +86,37 @@ cheap "checkpoint before I try something" habit.
   serde round-trip.
 - `npm run dev:mock`: mock snapshots in `src/mock/data.ts` + `core.ts` so the
   tab renders without Docker.
+
+## As built — deviations from the plan above
+
+- **Commands take `(site_id, snapshot_id)`**, not a bare `snapshot_id`. The
+  snapshot id is a timestamp scoped to its site directory, and both frontends
+  always act inside a site context, so threading the site id beats inventing a
+  globally unique id or scanning every site's directory to find one.
+- **SiteDetail gets a Snapshots *section*, not a tab** — the page has no tab
+  bar, it is a column of sections (Site, Credentials, Database, wp-cli,
+  ServerKit sync, Logs). Adding one for a single feature would have been a
+  bigger change than the feature.
+- **The pre-delete snapshot is best effort, not blocking.** Blocking is right
+  for push/pull (the plan's "never mutate without a net" — those abort), but a
+  site whose Docker stack is broken must still be deletable; otherwise the
+  snapshot feature strands the user with a site they cannot remove. The
+  failure is reported through the event stream and the delete continues.
+- **The manifest also carries `site_name` / `site_slug`.** Deleting a site
+  keeps its snapshots, so the manifest is the only remaining record of what
+  the site was called — and it is what lets `lk snapshot list <site id>` still
+  answer after the delete.
+- **`wp_version` comes from the site row**, not `wp core version`: it needs no
+  running container, so snapshotting a stopped site stays cheap.
+- **Retention keys on the manifest kind only.** The plan's "newest 5 per site
+  per kind" is implemented as a pure function over the manifest list, so it is
+  unit-tested without touching the disk.
+
+### Fixed along the way
+
+Port allocation bind-probed `127.0.0.1` only, so a port already published by
+a running container (Docker's publisher uses SO_REUSEADDR) read as free and
+site creation died at `compose up`, *after* the image pull, with a raw Docker
+error. This is the same trap plan 16 documented for the router. `free_port`
+now consults the OS listener table via the new `router::listening_ports` and
+checks the DB port as well — only the site port was ever checked.
