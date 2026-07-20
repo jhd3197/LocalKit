@@ -105,6 +105,20 @@ impl Db {
                 )
                 .map_err(|e| format!("migration 4 failed: {e}"))?;
         }
+        if version < 5 {
+            // Plan 18: where a site came from. Set on sites created by an
+            // import; NULL on every hand-made site, which is why both columns
+            // are nullable rather than defaulted.
+            self.conn
+                .execute_batch(
+                    "
+                    ALTER TABLE sites ADD COLUMN connection_id  TEXT;
+                    ALTER TABLE sites ADD COLUMN remote_site_id INTEGER;
+                    PRAGMA user_version = 5;
+                    ",
+                )
+                .map_err(|e| format!("migration 5 failed: {e}"))?;
+        }
         Ok(())
     }
 
@@ -175,6 +189,8 @@ impl Db {
             admin_user: row.get("admin_user")?,
             admin_pass: row.get("admin_pass")?,
             created_at: row.get("created_at")?,
+            connection_id: row.get("connection_id")?,
+            remote_site_id: row.get("remote_site_id")?,
         })
     }
 
@@ -182,8 +198,9 @@ impl Db {
         self.conn
             .execute(
                 "INSERT INTO sites
-                 (id, name, slug, path, port, wp_version, php_version, status, admin_user, admin_pass, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 (id, name, slug, path, port, wp_version, php_version, status, admin_user, admin_pass,
+                  created_at, connection_id, remote_site_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     site.id,
                     site.name,
@@ -196,10 +213,36 @@ impl Db {
                     site.admin_user,
                     site.admin_pass,
                     site.created_at,
+                    site.connection_id,
+                    site.remote_site_id,
                 ],
             )
             .map_err(|e| format!("failed to insert site: {e}"))?;
         Ok(())
+    }
+
+    /// Sites imported from a given remote site (plan 18) — the `pre_import`
+    /// guard's "you already have a copy of this" check.
+    pub fn sites_from_remote(
+        &self,
+        connection_id: &str,
+        remote_site_id: i64,
+    ) -> Result<Vec<Site>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT * FROM sites WHERE connection_id = ?1 AND remote_site_id = ?2
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| format!("failed to look up imported sites: {e}"))?;
+        let rows = stmt
+            .query_map(params![connection_id, remote_site_id], Self::row_to_site)
+            .map_err(|e| format!("failed to look up imported sites: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("failed to read site row: {e}"))?);
+        }
+        Ok(out)
     }
 
     pub fn set_status(&self, id: &str, status: &str) -> Result<(), String> {
@@ -383,5 +426,123 @@ impl Db {
             out.push(row.map_err(|e| format!("failed to read sync row: {e}"))?);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!("localkit-dbtest-{}-{tag}", std::process::id()))
+            .join("localkit.db")
+    }
+
+    fn site(id: &str, slug: &str) -> Site {
+        Site {
+            id: id.into(),
+            name: slug.into(),
+            slug: slug.into(),
+            path: format!("/tmp/{slug}"),
+            port: 8081,
+            wp_version: "6.7".into(),
+            php_version: "8.3".into(),
+            status: "running".into(),
+            admin_user: "admin".into(),
+            admin_pass: "secret".into(),
+            created_at: "2026-07-20T00:00:00Z".into(),
+            connection_id: None,
+            remote_site_id: None,
+        }
+    }
+
+    /// The pre-plan-18 schema, verbatim: a database created by the shipped
+    /// app before migration 5 existed. Migrating this is the upgrade path
+    /// every existing user takes, so it is what the test actually exercises —
+    /// a freshly created database would prove nothing about ALTER TABLE.
+    fn seed_v4(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sites (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                slug        TEXT NOT NULL UNIQUE,
+                path        TEXT NOT NULL,
+                port        INTEGER NOT NULL,
+                wp_version  TEXT NOT NULL,
+                php_version TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'creating',
+                admin_user  TEXT NOT NULL DEFAULT '',
+                admin_pass  TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL
+            );
+            CREATE TABLE serverkit_connections (
+                id TEXT PRIMARY KEY, label TEXT NOT NULL, url TEXT NOT NULL,
+                api_key TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE sync_history (
+                id TEXT PRIMARY KEY, site_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+                direction TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+            );
+            CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO sites (id, name, slug, path, port, wp_version, php_version, status,
+                               admin_user, admin_pass, created_at)
+            VALUES ('old-1', 'Legacy', 'legacy', '/tmp/legacy', 8081, '6.7', '8.3', 'running',
+                    'admin', 'pw', '2026-01-01T00:00:00Z');
+            PRAGMA user_version = 4;
+            ",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_5_upgrades_a_v4_database_without_touching_existing_rows() {
+        let path = temp_db_path("v4");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        seed_v4(&path);
+
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+
+        // The pre-existing site survives and reads back with a NULL origin.
+        let legacy = db.get_site("old-1").unwrap();
+        assert_eq!(legacy.slug, "legacy");
+        assert_eq!(legacy.connection_id, None);
+        assert_eq!(legacy.remote_site_id, None);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn imported_sites_are_found_by_their_remote() {
+        let path = temp_db_path("origin");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let db = Db::open(&path).unwrap();
+
+        let mut imported = site("s-1", "client-blog");
+        imported.connection_id = Some("conn-a".into());
+        imported.remote_site_id = Some(7);
+        db.insert_site(&imported).unwrap();
+        db.insert_site(&site("s-2", "handmade")).unwrap();
+
+        let hits = db.sites_from_remote("conn-a", 7).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].slug, "client-blog");
+        assert_eq!(hits[0].remote_site_id, Some(7));
+
+        // A different remote, and a different connection, are both misses —
+        // the guard must not confuse "site #7 on prod" with "site #7 on staging".
+        assert!(db.sites_from_remote("conn-a", 8).unwrap().is_empty());
+        assert!(db.sites_from_remote("conn-b", 7).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

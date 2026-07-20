@@ -18,6 +18,11 @@ pub struct ServerKitConnection {
     pub created_at: String,
 }
 
+/// Extension capability names reported by `GET /pair` (plan 18). An older
+/// extension simply omits one, and the matching UI is disabled instead of
+/// failing halfway through an operation.
+pub const FEATURE_PULL_CODE: &str = "pull-code";
+
 /// Result of a successful connection test.
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerKitInfo {
@@ -29,6 +34,10 @@ pub struct ServerKitInfo {
     pub api_key_valid: bool,
     /// Whether the serverkit-localkit extension (M4 push/pull) is installed.
     pub localkit_extension: bool,
+    /// Capabilities the extension advertises. Empty for extensions predating
+    /// the `features` array — callers must treat "absent" as "unsupported",
+    /// never as "unknown, try anyway".
+    pub features: Vec<String>,
 }
 
 /// A remote WordPress site as listed by `GET /api/v1/wordpress/sites`.
@@ -39,15 +48,31 @@ pub struct RemoteWpSite {
     pub url: Option<String>,
     pub status: String,
     pub wp_version: Option<String>,
+    pub php_version: Option<String>,
+    /// Multisite installs are refused by the import flow — one local compose
+    /// project cannot represent a network of sites.
+    pub multisite: bool,
     pub environment_count: i64,
 }
 
 const USER_AGENT: &str = concat!("LocalKit/", env!("CARGO_PKG_VERSION"));
 
 fn client() -> Result<reqwest::Client, String> {
+    build_client(std::time::Duration::from_secs(15))
+}
+
+/// Client for archive/dump transfers. The 15 s probe timeout is a *total*
+/// request budget in reqwest, so it would abort any real push or pull the
+/// moment the payload outgrew a fast link — bulk transfers get their own
+/// generous ceiling instead.
+fn transfer_client() -> Result<reqwest::Client, String> {
+    build_client(std::time::Duration::from_secs(1800))
+}
+
+fn build_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))
 }
@@ -135,14 +160,11 @@ pub async fn test_connection(url: &str, api_key: &str) -> Result<ServerKitInfo, 
         code => return Err(format!("API key validation failed with HTTP {code}.")),
     }
 
-    // Step 3 (best-effort): is the serverkit-localkit extension installed?
-    let localkit_extension = http
-        .get(format!("{base}/api/v1/localkit/pair"))
-        .header("X-API-Key", api_key)
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
+    // Step 3 (best-effort): is the serverkit-localkit extension installed, and
+    // what can this build of it do?
+    let pair = pair(&base, api_key).await;
+    let localkit_extension = pair.is_some();
+    let features = pair.map(|p| p.features).unwrap_or_default();
 
     Ok(ServerKitInfo {
         status: health.status.unwrap_or_else(|| "unknown".into()),
@@ -152,7 +174,43 @@ pub async fn test_connection(url: &str, api_key: &str) -> Result<ServerKitInfo, 
         staging: health.staging,
         api_key_valid: true,
         localkit_extension,
+        features,
     })
+}
+
+#[derive(Deserialize)]
+struct PairResponse {
+    #[serde(default)]
+    features: Vec<String>,
+}
+
+/// `GET /pair` — extension presence probe. `None` means "not installed or
+/// unreachable"; the features list is empty on extensions predating plan 18.
+async fn pair(base: &str, api_key: &str) -> Option<PairResponse> {
+    let resp = client()
+        .ok()?
+        .get(format!("{base}/api/v1/localkit/pair"))
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    // A 200 without a parseable body still proves the extension is there.
+    Some(resp.json().await.unwrap_or(PairResponse { features: vec![] }))
+}
+
+/// Does this server's extension advertise `feature`?
+///
+/// Used to gate the Import flow: without `pull-code` there is no way to fetch
+/// the remote `wp-content`, and finding that out mid-import would leave a
+/// half-built local site behind.
+pub async fn has_feature(url: &str, api_key: &str, feature: &str) -> Result<bool, String> {
+    let base = normalize_base_url(url)?;
+    Ok(pair(&base, api_key)
+        .await
+        .is_some_and(|p| p.features.iter().any(|f| f == feature)))
 }
 
 #[derive(Deserialize)]
@@ -168,10 +226,18 @@ struct RawSite {
     name: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    /// Explicit alias of `url` added by the plan-18 extension; either may be
+    /// absent depending on the extension version.
+    #[serde(default)]
+    site_url: Option<String>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     wp_version: Option<String>,
+    #[serde(default)]
+    php_version: Option<String>,
+    #[serde(default)]
+    multisite: bool,
     #[serde(default)]
     environment_count: i64,
 }
@@ -220,9 +286,11 @@ pub async fn list_wp_sites(url: &str, api_key: &str) -> Result<Vec<RemoteWpSite>
         .map(|s| RemoteWpSite {
             id: s.id,
             name: s.name.unwrap_or_else(|| format!("site-{}", s.id)),
-            url: s.url,
+            url: s.url.or(s.site_url).filter(|u| !u.is_empty()),
             status: s.status.unwrap_or_else(|| "unknown".into()),
             wp_version: s.wp_version,
+            php_version: s.php_version,
+            multisite: s.multisite,
             environment_count: s.environment_count,
         })
         .collect())
@@ -247,7 +315,7 @@ async fn post_multipart(
     file_bytes: Vec<u8>,
 ) -> Result<serde_json::Value, String> {
     let base = normalize_base_url(url)?;
-    let http = client()?;
+    let http = transfer_client()?;
     let mut form = reqwest::multipart::Form::new();
     for (k, v) in fields {
         form = form.text((*k).to_string(), v.clone());
@@ -320,10 +388,35 @@ pub async fn push_db(
 
 /// Download a gzipped SQL dump of a remote site (`GET /api/v1/localkit/pull/db`).
 pub async fn pull_db(url: &str, api_key: &str, remote_site_id: i64) -> Result<Vec<u8>, String> {
+    download(url, api_key, "/api/v1/localkit/pull/db", remote_site_id, "database dump").await
+}
+
+/// Download a tar.gz of a remote site's `wp-content`
+/// (`GET /api/v1/localkit/pull/code`, plan 18).
+///
+/// Only available on extensions advertising the `pull-code` feature — callers
+/// should check `has_feature` first so the failure surfaces before any local
+/// site has been provisioned.
+pub async fn pull_code(url: &str, api_key: &str, remote_site_id: i64) -> Result<Vec<u8>, String> {
+    download(url, api_key, "/api/v1/localkit/pull/code", remote_site_id, "wp-content archive").await
+}
+
+/// Shared `GET <path>?site_id=` binary download against the extension.
+///
+/// Downloads are not bounded by the server's 100 MB upload limit, but they are
+/// still read fully into memory here — plan 19 (chunked sync) is what lifts
+/// that for genuinely large sites.
+async fn download(
+    url: &str,
+    api_key: &str,
+    path: &str,
+    remote_site_id: i64,
+    what: &str,
+) -> Result<Vec<u8>, String> {
     let base = normalize_base_url(url)?;
-    let http = client()?;
+    let http = transfer_client()?;
     let resp = http
-        .get(format!("{base}/api/v1/localkit/pull/db"))
+        .get(format!("{base}{path}"))
         .query(&[("site_id", remote_site_id.to_string())])
         .header("X-API-Key", api_key)
         .send()
@@ -345,7 +438,7 @@ pub async fn pull_db(url: &str, api_key: &str, remote_site_id: i64) -> Result<Ve
     resp.bytes()
         .await
         .map(|b| b.to_vec())
-        .map_err(|e| format!("failed to download database dump: {e}"))
+        .map_err(|e| format!("failed to download {what}: {e}"))
 }
 
 /// Provision a new remote WordPress site (`POST /api/v1/localkit/sites`).

@@ -29,6 +29,13 @@ pub struct Site {
     pub admin_user: String,
     pub admin_pass: String,
     pub created_at: String,
+    /// Plan 18 — where this site came from. Both are set together when a site
+    /// is imported from a ServerKit server, and `None` on hand-made sites;
+    /// they let a future pull default to the right remote.
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub remote_site_id: Option<i64>,
 }
 
 impl Site {
@@ -263,12 +270,20 @@ fn read_env_value(dir: &Path, key: &str) -> Option<String> {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-pub async fn create(
-    app: Option<&AppHandle>,
+/// Where a new site came from (plan 18): `None` for a hand-made site, or the
+/// connection + remote site id it was imported from.
+pub type Origin = Option<(String, i64)>;
+
+/// Reserve a site: validate versions, allocate a unique slug and free ports,
+/// and insert the `creating` row. Shared by `create` and `sync::import_site` —
+/// both need an identical reservation, and doing it in one place is what keeps
+/// slug/port allocation race-free across the two entry points.
+pub(crate) async fn reserve(
     state: &AppState,
     name: String,
     wp_version: String,
     php_version: String,
+    origin: Origin,
 ) -> Result<Site, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -284,6 +299,10 @@ pub async fn create(
     let slug = unique_slug(state, &slugify(&name))?;
     let port = free_port(state).await?;
     let dir = site_dir(&state.data_dir, &slug);
+    let (connection_id, remote_site_id) = match origin {
+        Some((c, r)) => (Some(c), Some(r)),
+        None => (None, None),
+    };
 
     let site = Site {
         id: Uuid::new_v4().to_string(),
@@ -297,11 +316,38 @@ pub async fn create(
         admin_user: DEFAULT_ADMIN_USER.into(),
         admin_pass: String::new(),
         created_at: chrono::Utc::now().to_rfc3339(),
+        connection_id,
+        remote_site_id,
     };
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.insert_site(&site)?;
     }
+    Ok(site)
+}
+
+/// Write a reserved site's project files: directory, compose file, `.env`, and
+/// the one-click-login MU plugin.
+pub(crate) fn write_project_files(site: &Site) -> Result<(), String> {
+    let dir = site.dir();
+    std::fs::create_dir_all(dir.join("wp-content"))
+        .map_err(|e| format!("failed to create site directory: {e}"))?;
+    let db_password = random_password(24);
+    std::fs::write(dir.join("docker-compose.yml"), render_compose(site))
+        .map_err(|e| format!("failed to write docker-compose.yml: {e}"))?;
+    std::fs::write(dir.join(".env"), render_env(site, &db_password))
+        .map_err(|e| format!("failed to write .env: {e}"))?;
+    wordpress::ensure_login_plugin(&dir)
+}
+
+pub async fn create(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    name: String,
+    wp_version: String,
+    php_version: String,
+) -> Result<Site, String> {
+    let site = reserve(state, name, wp_version, php_version, None).await?;
 
     match do_create(app, state, &site).await {
         Ok(site) => Ok(site),
@@ -317,14 +363,7 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
     let dir = site.dir();
 
     emit(app, &site.id, "files", "Writing project files...");
-    std::fs::create_dir_all(dir.join("wp-content"))
-        .map_err(|e| format!("failed to create site directory: {e}"))?;
-    let db_password = random_password(24);
-    std::fs::write(dir.join("docker-compose.yml"), render_compose(site))
-        .map_err(|e| format!("failed to write docker-compose.yml: {e}"))?;
-    std::fs::write(dir.join(".env"), render_env(site, &db_password))
-        .map_err(|e| format!("failed to write .env: {e}"))?;
-    wordpress::ensure_login_plugin(&dir)?;
+    write_project_files(site)?;
 
     emit(
         app,
@@ -371,7 +410,10 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
     Ok(site)
 }
 
-async fn cleanup(state: &AppState, site: &Site) -> Result<(), String> {
+/// Undo a partial creation: tear the compose project down, remove the files,
+/// and drop the DB row. Shared with the import flow — a failed import must not
+/// leave a half-built site on the dashboard.
+pub(crate) async fn cleanup(state: &AppState, site: &Site) -> Result<(), String> {
     let dir = site.dir();
     if dir.exists() {
         let _ = docker::compose_down(&dir, true).await;
@@ -382,7 +424,7 @@ async fn cleanup(state: &AppState, site: &Site) -> Result<(), String> {
 }
 
 /// Wait until something (Apache) accepts TCP connections on the site port.
-async fn wait_for_port(port: u16, timeout_secs: u64) -> Result<(), String> {
+pub(crate) async fn wait_for_port(port: u16, timeout_secs: u64) -> Result<(), String> {
     let addr = format!("127.0.0.1:{port}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {

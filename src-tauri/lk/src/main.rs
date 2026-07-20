@@ -929,6 +929,8 @@ mod tests {
             admin_user: "admin".into(),
             admin_pass: "secret".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            connection_id: None,
+            remote_site_id: None,
         }
     }
 
