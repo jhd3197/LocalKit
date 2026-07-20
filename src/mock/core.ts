@@ -17,11 +17,17 @@ function mockProbe(http: number, https: number): PortConflict[] {
     .map((port) => ({ port, process: data.heldPorts[port] }));
 }
 
-/** Mirror of `router::conflict_message` + the short-circuited status. */
-function mockConflict(conflicts: PortConflict[]): RouterStatus {
+/**
+ * Mirror of `router::conflict_message` + the short-circuited status.
+ * `keepEnabled` distinguishes the two real cases: a failed *enable* leaves the
+ * flag off (the backend never reaches `set_flag`), while a conflict found by a
+ * later status poll happens with domains already enabled.
+ */
+function mockConflict(conflicts: PortConflict[], keepEnabled = false): RouterStatus {
   const held = conflicts.map((c) => `port ${c.port} is held by ${c.process}`).join(", ");
   const onDefaults = data.routerStatus.http_port === 80 && data.routerStatus.https_port === 443;
   data.routerStatus.running = false;
+  if (!keepEnabled) data.routerStatus.enabled = false;
   data.routerStatus.conflicts = conflicts;
   data.routerStatus.error =
     `Local domains could not start: ${held}. ` +
@@ -43,6 +49,13 @@ function slugify(name: string): string {
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+// Mock-only escape hatch: lets the headless verification scripts put the fake
+// backend into states the UI alone can't reach (e.g. "the router died while
+// domains were enabled"). Never present in the real app.
+if (typeof window !== "undefined") {
+  (window as unknown as { __LOCALKIT_MOCK__?: typeof data }).__LOCALKIT_MOCK__ = data;
 }
 
 export async function invoke<T = unknown>(cmd: string, args: Args = {}): Promise<T> {
@@ -255,8 +268,18 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "list_sync_history":
       return data.syncHistory[String(a.siteId)] ?? [];
 
-    case "router_status":
-      return { ...data.routerStatus };
+    case "router_status": {
+      // Mirrors `router::status`: re-diagnose whenever domains are enabled but
+      // the router is down, so a conflict that appeared *after* enabling (the
+      // real hazard — LocalWP launched later, or won the boot race) keeps
+      // reporting its named cause.
+      const s = data.routerStatus;
+      if (s.enabled && !s.running) {
+        const conflicts = mockProbe(s.http_port, s.https_port);
+        if (conflicts.length > 0) return mockConflict(conflicts, true);
+      }
+      return { ...s };
+    }
 
     case "set_domains_enabled": {
       const enabled = Boolean(a.enabled);

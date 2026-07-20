@@ -9,7 +9,7 @@ import DomainsSettings from "../components/DomainsSettings";
 import KeyboardSettings from "../components/KeyboardSettings";
 import { CloseIcon, GlobeIcon, KeyboardIcon, ServerIcon, SlidersIcon, TerminalIcon } from "../components/icons";
 
-type SectionId = "general" | "terminal" | "keyboard" | "domains" | "serverkit";
+import type { SettingsSection as SectionId } from "../stores/nav";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "general", label: "General", icon: <SlidersIcon className="h-3.5 w-3.5" /> },
@@ -21,7 +21,9 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
 
 export default function Settings() {
   const setSettingsOpen = useNav((s) => s.setSettingsOpen);
-  const [active, setActive] = useState<SectionId>("general");
+  // Seeded from nav so callers can deep-link (e.g. the router-conflict banner
+  // on SiteDetail opens straight to Local domains).
+  const [active, setActive] = useState<SectionId>(useNav.getState().settingsSection);
   const { overlayProps, panelProps } = useDialog(() => setSettingsOpen(false));
 
   const activeLabel = SECTIONS.find((s) => s.id === active)?.label;

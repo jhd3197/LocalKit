@@ -221,10 +221,33 @@ fn port_conflict_hint(err: &str) -> String {
 /// Windows a program bound only to `127.0.0.1:80` still wins loopback traffic
 /// even though `0.0.0.0:80` binds fine, which is exactly the case that makes
 /// a site silently answer from the other app's router.
-fn port_free(port: u16) -> bool {
+///
+/// NOT sufficient on its own — see `probe_port`.
+fn bind_free(port: u16) -> bool {
     use std::net::{Ipv4Addr, TcpListener};
     TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok()
         && TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+/// Is `port` held by something else? Combines two independent signals,
+/// because neither is reliable alone:
+///
+/// - the OS listener table (`Get-NetTCPConnection` / `lsof`) — authoritative,
+///   and it names the owner;
+/// - a probe bind — catches listeners the query misses or can't see.
+///
+/// Bind-probing alone is a false-negative trap on Windows: a socket bound
+/// with SO_REUSEADDR (Docker's port publisher does exactly this) lets us bind
+/// the *same* address again, so a genuinely busy port reports free. Verified
+/// on a machine where a container published 8080: the wildcard bind succeeded
+/// while `netstat` showed it LISTENING.
+async fn probe_port(port: u16) -> Option<PortConflict> {
+    let process = identify_port_owner(port).await;
+    if process.is_some() || !bind_free(port) {
+        Some(PortConflict { port, process })
+    } else {
+        None
+    }
 }
 
 /// Best-effort process name holding `port` (`None` when we can't tell — the
@@ -270,11 +293,8 @@ async fn identify_port_owner(port: u16) -> Option<String> {
 pub async fn probe_ports(http: u16, https: u16) -> Vec<PortConflict> {
     let mut conflicts = Vec::new();
     for port in [http, https] {
-        if !port_free(port) {
-            conflicts.push(PortConflict {
-                port,
-                process: identify_port_owner(port).await,
-            });
+        if let Some(conflict) = probe_port(port).await {
+            conflicts.push(conflict);
         }
     }
     conflicts
@@ -938,19 +958,35 @@ mod tests {
     // --- plan 16: port pre-flight -----------------------------------------
 
     #[test]
-    fn port_free_reports_true_for_an_unbound_port() {
+    fn bind_free_reports_true_for_an_unbound_port() {
         // Bind an ephemeral port, learn its number, release it, then probe.
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        assert!(port_free(port));
+        assert!(bind_free(port));
     }
 
     #[test]
-    fn port_free_reports_false_while_a_port_is_held() {
+    fn bind_free_reports_false_while_a_port_is_held() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(!port_free(port), "a bound loopback port is not free");
+        assert!(!bind_free(port), "a bound loopback port is not free");
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn probe_catches_a_wildcard_listener_that_still_allows_rebinding() {
+        // The Windows SO_REUSEADDR trap: a wildcard listener can be re-bound,
+        // so `bind_free` alone reports the port free. The OS listener table
+        // is what actually catches it, so `probe_port` must still flag it.
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(
+            probe_port(port).await.is_some(),
+            "a port with a live wildcard listener must be reported as in use \
+             (bind_free said free={})",
+            bind_free(port)
+        );
         drop(listener);
     }
 

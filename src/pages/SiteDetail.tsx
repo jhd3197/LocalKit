@@ -9,6 +9,7 @@ import type { SiteDetail as SiteDetailData, WpUser } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
 import CopyButton from "../components/CopyButton";
 import PushPanel from "../components/PushPanel";
+import { describeConflicts } from "../components/DomainsSettings";
 
 export default function SiteDetail({ id }: { id: string }) {
   const navigate = useNav((s) => s.navigate);
@@ -153,6 +154,8 @@ export default function SiteDetail({ id }: { id: string }) {
           </button>
         </div>
       </div>
+
+      <RouterConflictBanner slug={detail.slug} port={detail.port} />
 
       <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* URL */}
@@ -315,6 +318,65 @@ export default function SiteDetail({ id }: { id: string }) {
           {logs || "No logs yet."}
         </pre>
       </section>
+    </div>
+  );
+}
+
+/**
+ * Plan 16: local domains are on but the router is blocked on its ports.
+ *
+ * This is the case where a toast is not enough — WordPress still has
+ * `home`/`siteurl` pointing at `<slug>.test`, so the user is most likely
+ * staring at the *other* program's "Site Not Found" page and has no way to
+ * know two apps are fighting over port 80. Dismissible, but it comes back if
+ * the conflict changes.
+ */
+function RouterConflictBanner({ slug, port }: { slug: string; port: number }) {
+  const status = useRouter((s) => s.status);
+  const refresh = useRouter((s) => s.refresh);
+  const openSettings = useNav((s) => s.openSettings);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+
+  // App.tsx only refreshes router status at startup, so a conflict that
+  // appears later (the other app launched while LocalKit was open) would go
+  // unreported on exactly the page where it matters. Re-check on arrival.
+  useEffect(() => {
+    void refresh();
+  }, [refresh, slug]);
+
+  const conflicts = status?.conflicts ?? [];
+  if (!status?.enabled || conflicts.length === 0) return null;
+
+  const key = conflicts.map((c) => `${c.port}:${c.process ?? "?"}`).join(",");
+  if (dismissed === key) return null;
+
+  return (
+    <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-900/60 bg-amber-950/40 p-4">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-amber-200">
+          Local domains are blocked — another program is using{" "}
+          {describeConflicts(conflicts)}
+        </p>
+        <p className="mt-1 text-xs text-amber-200/80">
+          <code className="font-mono">{slug}.test</code> currently reaches that program, not this
+          site — which is why you may be seeing someone else's “not found” page. This site is still
+          served directly at{" "}
+          <code className="font-mono">http://localhost:{port}</code>.
+        </p>
+        <button
+          onClick={() => openSettings("domains")}
+          className="mt-2.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
+        >
+          Fix in Settings
+        </button>
+      </div>
+      <button
+        onClick={() => setDismissed(key)}
+        aria-label="Dismiss"
+        className="shrink-0 rounded-md px-2 py-1 text-xs text-amber-200/70 hover:bg-amber-900/40 hover:text-amber-100"
+      >
+        Dismiss
+      </button>
     </div>
   );
 }

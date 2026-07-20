@@ -15,7 +15,7 @@
 //!   is required when not on a TTY.
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -446,10 +446,68 @@ async fn cmd_doctor(data_dir_override: Option<PathBuf>) -> Result<(), String> { 
     );
     ok &= writable;
 
+    ok &= doctor_router(&data_dir).await;
+
     if !ok {
         return Err("one or more checks failed".into());
     }
     Ok(())
+}
+
+/// Local-domains section of `doctor` (plan 16): active router mode + who owns
+/// the router ports, so "my .test sites show someone else's 404" has a
+/// copy-paste answer. Best-effort — a missing DB just means "not configured".
+async fn doctor_router(data_dir: &Path) -> bool {
+    let Ok(db) = Db::open(&data_dir.join("localkit.db")) else {
+        check_line(true, "local domains not configured yet (no database)");
+        return true;
+    };
+    let state = AppState {
+        db: Mutex::new(db),
+        data_dir: data_dir.to_path_buf(),
+        terminals: localkit_lib::terminal::PtyManager::new(),
+    };
+
+    let ports = router::router_ports(&state);
+    let mode = if ports.is_default() { "default" } else { "fallback" };
+    let Ok(status) = router::status(&state).await else {
+        check_line(false, "local domains status unavailable");
+        return false;
+    };
+
+    if !status.enabled {
+        check_line(true, "local domains disabled — sites use localhost:<port>");
+        return true;
+    }
+
+    check_line(
+        status.running,
+        &format!(
+            "local domains enabled — router on ports {}/{} ({mode}), {}",
+            ports.http,
+            ports.https,
+            if status.running { "running" } else { "NOT running" }
+        ),
+    );
+
+    if status.running {
+        // Our own Caddy owns the ports; say so rather than probing and
+        // reporting LocalKit as its own conflict.
+        eprintln!("  ports {}/{} held by LocalKit's router", ports.http, ports.https);
+        return true;
+    }
+
+    for c in router::probe_ports(ports.http, ports.https).await {
+        match c.process {
+            Some(p) => eprintln!("  port {} held by {p}", c.port),
+            None => eprintln!("  port {} in use by an unidentified process", c.port),
+        }
+    }
+    eprintln!(
+        "  {} quit the other program, or set fallback ports in Settings → Local domains",
+        info("→")
+    );
+    false
 }
 
 // ---------------------------------------------------------------------------
