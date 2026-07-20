@@ -1,11 +1,13 @@
-//! Push/pull orchestration between a local site and a ServerKit server (M4).
+//! Push/pull orchestration between a local site and a ServerKit server (M4),
+//! plus importing a remote site as a brand-new local one (plan 18).
 
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-use crate::{router, serverkit, site, snapshot, wordpress, AppState};
+use crate::{docker, router, serverkit, site, snapshot, wordpress, AppState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {
@@ -13,7 +15,7 @@ pub struct SyncRecord {
     pub site_id: String,
     pub connection_id: String,
     pub direction: String, // "push" | "pull"
-    pub kind: String,      // "code" | "db"
+    pub kind: String,      // "code" | "db" | "import"
     pub status: String,    // "success" | "error"
     pub message: String,
     pub created_at: String,
@@ -203,4 +205,570 @@ pub async fn pull_db(
 pub fn history(state: &AppState, site_id: &str) -> Result<Vec<SyncRecord>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_sync(site_id, 20)
+}
+
+// ---------------------------------------------------------------------------
+// Import a remote site as a new local site (plan 18)
+// ---------------------------------------------------------------------------
+
+/// Safe-extract policy for a downloaded `wp-content` archive — the client-side
+/// mirror of the server's `_safe_extract_tar_gz`.
+///
+/// The archive comes off a remote server we do not fully control, so it is
+/// treated as hostile input: an entry may only be a plain file or directory
+/// under `wp-content/`. Everything else is refused rather than sanitized,
+/// because every "clean it up and carry on" branch is a place a crafted
+/// archive could write outside the site directory.
+fn safe_entry_path(name: &Path) -> Result<PathBuf, String> {
+    let mut out = PathBuf::new();
+    for component in name.components() {
+        match component {
+            // `./foo` — GNU tar emits these; harmless, just drop them.
+            Component::CurDir => continue,
+            Component::Normal(part) => out.push(part),
+            // Absolute paths, `..`, and Windows drive/UNC prefixes all escape
+            // the destination directory.
+            Component::ParentDir => {
+                return Err(format!("archive entry escapes the site directory: {}", name.display()))
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("archive entry has an absolute path: {}", name.display()))
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err("archive contains an entry with an empty path".into());
+    }
+    if out.components().next() != Some(Component::Normal("wp-content".as_ref())) {
+        return Err(format!(
+            "archive entry is outside wp-content: {}",
+            name.display()
+        ));
+    }
+    Ok(out)
+}
+
+/// Unpack a `wp-content` tar.gz into `site_dir`, applying `safe_entry_path`.
+/// Returns the number of files written.
+///
+/// Entries are prefixed `wp-content/`, matching what `push_code` uploads and
+/// what a snapshot archives — one archive format in both directions.
+fn extract_wp_content(tgz: &[u8], site_dir: &Path) -> Result<usize, String> {
+    use tar::EntryType;
+
+    let dest = site_dir
+        .canonicalize()
+        .map_err(|e| format!("site directory is unusable: {e}"))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tgz));
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("the downloaded wp-content archive is unreadable: {e}"))?;
+
+    let mut files = 0usize;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("the downloaded wp-content archive is unreadable: {e}"))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("archive entry has an unreadable path: {e}"))?
+            .into_owned();
+        let rel = safe_entry_path(&path)?;
+        let target = dest.join(&rel);
+
+        match entry.header().entry_type() {
+            EntryType::Directory => {
+                std::fs::create_dir_all(&target)
+                    .map_err(|e| format!("failed to create {}: {e}", rel.display()))?;
+            }
+            EntryType::Regular | EntryType::Continuous => {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create {}: {e}", rel.display()))?;
+                }
+                let mut out = std::fs::File::create(&target)
+                    .map_err(|e| format!("failed to write {}: {e}", rel.display()))?;
+                std::io::copy(&mut entry, &mut out)
+                    .map_err(|e| format!("failed to write {}: {e}", rel.display()))?;
+                files += 1;
+            }
+            // Symlinks and hardlinks are the classic escape hatch: the path
+            // check above passes, then the *link target* points anywhere.
+            EntryType::Symlink | EntryType::Link => {
+                return Err(format!(
+                    "archive contains a link, which is not allowed: {}",
+                    rel.display()
+                ))
+            }
+            // GNU long-name/PAX metadata entries carry no payload of their own
+            // (the tar crate has already applied them to the real entry).
+            EntryType::GNULongName | EntryType::GNULongLink | EntryType::XHeader | EntryType::XGlobalHeader => {}
+            other => {
+                return Err(format!(
+                    "archive contains an unsupported entry type ({other:?}): {}",
+                    rel.display()
+                ))
+            }
+        }
+    }
+    if files == 0 {
+        return Err("the remote wp-content archive contained no files".into());
+    }
+    Ok(files)
+}
+
+/// Pick the local image version closest to what the remote reports.
+///
+/// Remote versions carry a patch level (`6.7.2`) that our image allowlist does
+/// not, so the match is on `major.minor`. Returns the chosen version and
+/// whether it was an exact match — an inexact one is surfaced as a warning
+/// rather than an error, because a small version gap almost always still runs.
+fn match_version(available: &[&str], remote: Option<&str>) -> (String, bool) {
+    let newest = available[0].to_string();
+    let Some(remote) = remote.map(str::trim).filter(|v| !v.is_empty()) else {
+        return (newest, false);
+    };
+    let major_minor: String = {
+        let mut parts = remote.split('.');
+        match (parts.next(), parts.next()) {
+            (Some(a), Some(b)) => format!("{a}.{b}"),
+            _ => remote.to_string(),
+        }
+    };
+    match available.iter().find(|v| **v == major_minor) {
+        Some(v) => (v.to_string(), true),
+        None => (newest, false),
+    }
+}
+
+/// Clone a remote ServerKit site into a brand-new local site.
+///
+/// Unlike `pull_db`, which overwrites an existing local site, this provisions
+/// one: fresh slug, ports and compose project, then the remote `wp-content`
+/// and database on top. `wp core install` is deliberately never run — the
+/// imported database *is* the site, and installing over it would replace the
+/// content the user came for.
+pub async fn import_site(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    connection_id: &str,
+    remote_site_id: i64,
+    local_name: Option<String>,
+) -> Result<site::Site, String> {
+    let conn = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.get_connection(connection_id)?
+    };
+
+    // Everything that can be known before provisioning is checked before
+    // provisioning: a failure here must leave no half-built site behind.
+    let remote = pre_import(state, &conn, remote_site_id).await?;
+    let name = local_name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| remote.name.clone());
+
+    let (wp_version, wp_exact) = match_version(site::WP_VERSIONS, remote.wp_version.as_deref());
+    let (php_version, php_exact) = match_version(site::PHP_VERSIONS, remote.php_version.as_deref());
+
+    let site = site::reserve(
+        state,
+        name,
+        wp_version.clone(),
+        php_version.clone(),
+        Some((conn.id.clone(), remote_site_id)),
+    )
+    .await?;
+
+    // From here on a failure owns cleanup — the site row and directory exist.
+    match do_import(app, state, &conn, &site, &remote, (wp_exact, php_exact)).await {
+        Ok(message) => {
+            emit(app, &site.id, "done", &message);
+            record(
+                state,
+                &SyncRecord {
+                    id: Uuid::new_v4().to_string(),
+                    site_id: site.id.clone(),
+                    connection_id: conn.id.clone(),
+                    direction: "pull".into(),
+                    kind: "import".into(),
+                    status: "success".into(),
+                    message,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+            site::get(state, &site.id)
+        }
+        Err(e) => {
+            emit(app, &site.id, "error", &format!("Import failed: {e}"));
+            // The sync record is keyed to a site that is about to disappear,
+            // so the failure is reported through the event stream only.
+            let _ = site::cleanup(state, &site).await;
+            Err(e)
+        }
+    }
+}
+
+/// Checks that must pass *before* a local site is provisioned: the extension
+/// can serve code, the remote site exists and is importable, and we are not
+/// about to make a second copy of something already imported.
+async fn pre_import(
+    state: &AppState,
+    conn: &serverkit::ServerKitConnection,
+    remote_site_id: i64,
+) -> Result<serverkit::RemoteWpSite, String> {
+    if !serverkit::has_feature(&conn.url, &conn.api_key, serverkit::FEATURE_PULL_CODE).await? {
+        return Err(format!(
+            "The serverkit-localkit extension on {} is too old to import sites \
+             (no pull/code endpoint). Update the extension on the server.",
+            conn.label
+        ));
+    }
+
+    let sites = serverkit::list_wp_sites(&conn.url, &conn.api_key).await?;
+    let remote = sites
+        .into_iter()
+        .find(|s| s.id == remote_site_id)
+        .ok_or_else(|| format!("Remote site #{remote_site_id} was not found on {}.", conn.label))?;
+
+    // A network of sites cannot be represented by one local compose project;
+    // refuse rather than produce a half-broken copy.
+    if remote.multisite {
+        return Err(format!(
+            "\"{}\" is a WordPress multisite install, which LocalKit cannot import.",
+            remote.name
+        ));
+    }
+
+    let existing = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.sites_from_remote(&conn.id, remote_site_id)?
+    };
+    if let Some(s) = existing.first() {
+        return Err(format!(
+            "\"{}\" was already imported from {} as the local site \"{}\". \
+             Pull its database into that site instead of importing a second copy.",
+            remote.name, conn.label, s.name
+        ));
+    }
+    Ok(remote)
+}
+
+/// The provisioning half of an import. Returns the success message.
+async fn do_import(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    conn: &serverkit::ServerKitConnection,
+    site: &site::Site,
+    remote: &serverkit::RemoteWpSite,
+    exact: (bool, bool),
+) -> Result<String, String> {
+    let dir = site.dir();
+    let id = site.id.as_str();
+    let (wp_exact, php_exact) = exact;
+
+    emit(app, id, "files", "Writing project files...");
+    site::write_project_files(site)?;
+    if !wp_exact || !php_exact {
+        emit(
+            app,
+            id,
+            "files",
+            &format!(
+                "Remote runs WordPress {} / PHP {}; importing onto WordPress {} / PHP {}.",
+                remote.wp_version.as_deref().unwrap_or("unknown"),
+                remote.php_version.as_deref().unwrap_or("unknown"),
+                site.wp_version,
+                site.php_version,
+            ),
+        );
+    }
+
+    emit(
+        app,
+        id,
+        "pulling",
+        "Downloading WordPress images (first run can take a few minutes)...",
+    );
+    docker::compose_pull(&dir, &["wordpress", "db", "wpcli"]).await?;
+
+    emit(app, id, "code", "Downloading remote wp-content...");
+    let tgz = serverkit::pull_code(&conn.url, &conn.api_key, remote.id).await?;
+    let size_mb = tgz.len() as f64 / 1_048_576.0;
+    emit(app, id, "code", &format!("Extracting wp-content ({size_mb:.1} MB)..."));
+    let files = extract_wp_content(&tgz, &dir)?;
+    drop(tgz);
+    // The archive may have brought its own mu-plugins directory over the one
+    // written a moment ago; one-click login must survive the import.
+    wordpress::ensure_login_plugin(&dir)?;
+
+    emit(app, id, "containers", "Starting Docker containers...");
+    docker::compose_up(&dir).await?;
+
+    emit(app, id, "waiting", "Waiting for WordPress to come online...");
+    site::wait_for_port(site.port, 180).await?;
+
+    emit(app, id, "install", "Downloading remote database...");
+    let gz = serverkit::pull_db(&conn.url, &conn.api_key, remote.id).await?;
+    let mut sql = Vec::new();
+    flate2::read::GzDecoder::new(&gz[..])
+        .read_to_end(&mut sql)
+        .map_err(|e| format!("failed to decompress remote dump: {e}"))?;
+    drop(gz);
+
+    // No `wp core install` anywhere in here: the imported database IS the
+    // site. Installing would overwrite the content this whole flow exists to
+    // bring down.
+    emit(app, id, "install", "Importing remote database...");
+    wordpress::import_db(&dir, &sql).await?;
+    drop(sql);
+
+    let local_url = router::site_public_url(state, site);
+    emit(app, id, "install", "Rewriting URLs remote -> local...");
+    wordpress::update_site_urls(&dir, &local_url).await?;
+    if let Some(remote_url) = remote.url.as_deref().filter(|u| !u.is_empty() && *u != local_url) {
+        wordpress::search_replace(&dir, remote_url, &local_url).await?;
+    }
+    // Permalinks are stored as rules tied to the old host; regenerate them or
+    // every imported page 404s. Best effort — a pretty-permalink failure must
+    // not throw away a successful import.
+    let _ = docker::compose_run(&dir, "wpcli", &["wp", "rewrite", "flush"]).await;
+    let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
+
+    // The local admin_user comes from the imported users table — the stock
+    // `admin` this site was reserved with does not exist in the remote data.
+    let admin_user = imported_admin(&dir).await.unwrap_or_else(|| site.admin_user.clone());
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_status(id, "running")?;
+        // No password: the remote's hash is unknown to us, and one-click login
+        // does not need one. Storing a fake would be worse than storing none.
+        db.update_credentials(id, &admin_user, "")?;
+    }
+    router::refresh_routes(state).await;
+    router::refresh_hosts(state).await;
+
+    Ok(format!(
+        "{} imported from {} ({files} files) — now running at {local_url}",
+        site.name, conn.label
+    ))
+}
+
+/// First administrator in the freshly imported database, for `admin_user`.
+async fn imported_admin(dir: &Path) -> Option<String> {
+    let out = docker::compose_run(
+        dir,
+        "wpcli",
+        &["wp", "user", "list", "--role=administrator", "--field=user_login"],
+    )
+    .await
+    .ok()?;
+    out.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // -- version matching ---------------------------------------------------
+
+    #[test]
+    fn version_match_ignores_the_remote_patch_level() {
+        let (v, exact) = match_version(site::WP_VERSIONS, Some("6.6.4"));
+        assert_eq!(v, "6.6");
+        assert!(exact);
+    }
+
+    #[test]
+    fn version_match_falls_back_to_the_newest_and_flags_it() {
+        // 6.2 predates the allowlist entirely.
+        let (v, exact) = match_version(site::WP_VERSIONS, Some("6.2.1"));
+        assert_eq!(v, site::WP_VERSIONS[0]);
+        assert!(!exact, "an unavailable remote version must not report as exact");
+    }
+
+    #[test]
+    fn version_match_handles_a_remote_that_reports_nothing() {
+        for missing in [None, Some(""), Some("  ")] {
+            let (v, exact) = match_version(site::PHP_VERSIONS, missing);
+            assert_eq!(v, site::PHP_VERSIONS[0]);
+            assert!(!exact);
+        }
+    }
+
+    #[test]
+    fn version_match_accepts_a_bare_major_minor() {
+        let (v, exact) = match_version(site::PHP_VERSIONS, Some("8.1"));
+        assert_eq!(v, "8.1");
+        assert!(exact);
+    }
+
+    // -- path policy --------------------------------------------------------
+
+    #[test]
+    fn entry_paths_under_wp_content_are_accepted() {
+        let ok = safe_entry_path(Path::new("wp-content/themes/twenty/style.css")).unwrap();
+        assert_eq!(ok, PathBuf::from("wp-content/themes/twenty/style.css"));
+    }
+
+    #[test]
+    fn leading_current_dir_is_stripped() {
+        let ok = safe_entry_path(Path::new("./wp-content/plugins/x.php")).unwrap();
+        assert_eq!(ok, PathBuf::from("wp-content/plugins/x.php"));
+    }
+
+    #[test]
+    fn traversal_is_rejected() {
+        for evil in [
+            "wp-content/../../etc/passwd",
+            "wp-content/themes/../../../x",
+            "../wp-content/x",
+        ] {
+            assert!(
+                safe_entry_path(Path::new(evil)).is_err(),
+                "traversal slipped through: {evil}"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_paths_are_rejected() {
+        assert!(safe_entry_path(Path::new("/etc/passwd")).is_err());
+        #[cfg(windows)]
+        assert!(safe_entry_path(Path::new(r"C:\Windows\system32\evil.dll")).is_err());
+    }
+
+    #[test]
+    fn entries_outside_wp_content_are_rejected() {
+        for evil in ["wp-config.php", "html/wp-content/x", "wp-contents/x"] {
+            assert!(
+                safe_entry_path(Path::new(evil)).is_err(),
+                "entry outside wp-content slipped through: {evil}"
+            );
+        }
+    }
+
+    // -- extraction against real archives -----------------------------------
+
+    /// Raw ustar entry writer.
+    ///
+    /// `tar::Builder` deliberately refuses to emit `..` paths — which is
+    /// precisely the archive this extractor exists to survive. So the hostile
+    /// fixtures are assembled header-byte by header-byte instead of through
+    /// the safe API, which is the only way to prove the check does anything.
+    fn raw_entry(out: &mut Vec<u8>, name: &str, kind: tar::EntryType, link: &str, body: &[u8]) {
+        let mut header = tar::Header::new_ustar();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_entry_type(kind);
+        {
+            // ustar layout: name at 0..100, linkname at 157..257.
+            let bytes = header.as_mut_bytes();
+            bytes[..name.len()].copy_from_slice(name.as_bytes());
+            bytes[157..157 + link.len()].copy_from_slice(link.as_bytes());
+        }
+        header.set_cksum();
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(body);
+        out.extend(std::iter::repeat(0u8).take((512 - body.len() % 512) % 512));
+    }
+
+    fn gz(build: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        build(&mut tar_bytes);
+        // Two zero blocks = end of archive.
+        tar_bytes.extend(std::iter::repeat(0u8).take(1024));
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&tar_bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn file_entry(out: &mut Vec<u8>, name: &str, body: &[u8]) {
+        raw_entry(out, name, tar::EntryType::Regular, "", body);
+    }
+
+    fn link_entry(out: &mut Vec<u8>, name: &str, target: &str) {
+        raw_entry(out, name, tar::EntryType::Symlink, target, &[]);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "localkit-extract-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn extracts_a_normal_archive() {
+        let dir = scratch("ok");
+        let tgz = gz(|b| {
+            file_entry(b, "wp-content/themes/mytheme/style.css", b"body{}");
+            file_entry(b, "wp-content/plugins/hello.php", b"<?php");
+        });
+
+        let files = extract_wp_content(&tgz, &dir).unwrap();
+        assert_eq!(files, 2);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("wp-content/themes/mytheme/style.css")).unwrap(),
+            "body{}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_an_archive_that_traverses_out() {
+        let dir = scratch("traversal");
+        let tgz = gz(|b| {
+            file_entry(b, "wp-content/ok.txt", b"fine");
+            file_entry(b, "wp-content/../../pwned.txt", b"pwned");
+        });
+
+        let err = extract_wp_content(&tgz, &dir).unwrap_err();
+        assert!(err.contains("escapes the site directory"), "unexpected: {err}");
+        // And nothing landed outside the destination.
+        assert!(!dir.parent().unwrap().join("pwned.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_an_archive_containing_links() {
+        let dir = scratch("symlink");
+        let tgz = gz(|b| {
+            file_entry(b, "wp-content/ok.txt", b"fine");
+            link_entry(b, "wp-content/escape", "/etc/passwd");
+        });
+
+        let err = extract_wp_content(&tgz, &dir).unwrap_err();
+        assert!(err.contains("link"), "unexpected: {err}");
+        assert!(!dir.join("wp-content/escape").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_an_archive_with_nothing_under_wp_content() {
+        let dir = scratch("outside");
+        let tgz = gz(|b| file_entry(b, "wp-config.php", b"<?php"));
+
+        let err = extract_wp_content(&tgz, &dir).unwrap_err();
+        assert!(err.contains("outside wp-content"), "unexpected: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_an_empty_archive() {
+        let dir = scratch("empty");
+        let tgz = gz(|_| {});
+        assert!(extract_wp_content(&tgz, &dir).unwrap_err().contains("no files"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
