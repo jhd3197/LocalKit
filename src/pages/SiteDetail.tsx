@@ -5,7 +5,7 @@ import { siteUrl } from "../lib/domains";
 import { useNav } from "../stores/nav";
 import { useRouter } from "../stores/router";
 import { useSites } from "../stores/sites";
-import type { SiteDetail as SiteDetailData } from "../lib/types";
+import type { SiteDetail as SiteDetailData, WpUser } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
 import CopyButton from "../components/CopyButton";
 import PushPanel from "../components/PushPanel";
@@ -25,6 +25,10 @@ export default function SiteDetail({ id }: { id: string }) {
 
   const [detail, setDetail] = useState<SiteDetailData | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [wpUsers, setWpUsers] = useState<WpUser[] | null>(null);
+  const [loginUserId, setLoginUserId] = useState<number | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement>(null);
 
   const loadDetail = useCallback(() => {
@@ -57,6 +61,18 @@ export default function SiteDetail({ id }: { id: string }) {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
 
+  // Load WP users for the WP Admin login picker (running sites only).
+  useEffect(() => {
+    setWpUsers(null);
+    setLoginUserId(null);
+    if (detail?.live_status === "running") {
+      ipc
+        .siteWpUsers(id)
+        .then(setWpUsers)
+        .catch(() => setWpUsers(null));
+    }
+  }, [id, detail?.live_status]);
+
   if (!detail) {
     return (
       <div className="p-8">
@@ -70,6 +86,24 @@ export default function SiteDetail({ id }: { id: string }) {
 
   const url = siteUrl(detail.slug, detail.port, router);
   const running = detail.live_status === "running";
+
+  // WP Admin one-click login: default to the install admin, picker overrides.
+  const defaultUserId =
+    wpUsers?.find((u) => u.login === detail.admin_user)?.id ?? wpUsers?.[0]?.id ?? null;
+  const selectedUserId = loginUserId ?? defaultUserId;
+
+  const wpAdminLogin = async () => {
+    setLoggingIn(true);
+    setLoginError(null);
+    try {
+      const loginUrl = await ipc.loginSite(id, selectedUserId ?? undefined);
+      await openUrl(loginUrl);
+    } catch (e) {
+      setLoginError(String(e));
+    } finally {
+      setLoggingIn(false);
+    }
+  };
 
   return (
     <div className="p-8">
@@ -101,6 +135,12 @@ export default function SiteDetail({ id }: { id: string }) {
             </button>
           )}
           <button
+            onClick={() => navigate({ name: "terminal", siteId: id })}
+            className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500"
+          >
+            Terminal
+          </button>
+          <button
             onClick={() => {
               if (window.confirm(`Delete "${detail.name}"? This removes its containers, database and files.`)) {
                 void remove(id).then(() => navigate({ name: "sites" }));
@@ -122,7 +162,7 @@ export default function SiteDetail({ id }: { id: string }) {
           <p className="mt-1 text-xs text-zinc-600">
             WordPress {detail.wp_version} · PHP {detail.php_version}
           </p>
-          <div className="mt-4 flex gap-2">
+          <div className="mt-4 flex flex-wrap items-center gap-2">
             <button
               onClick={() => void openUrl(url)}
               disabled={!running}
@@ -131,13 +171,29 @@ export default function SiteDetail({ id }: { id: string }) {
               Open site
             </button>
             <button
-              onClick={() => void openUrl(`${url}/wp-admin`)}
-              disabled={!running}
+              onClick={() => void wpAdminLogin()}
+              disabled={!running || loggingIn}
+              title={running ? "Log straight into wp-admin — no password needed" : "Start the site to log in"}
               className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
             >
-              WP Admin
+              {loggingIn ? "Logging in…" : "WP Admin"}
             </button>
+            {running && wpUsers && wpUsers.length > 1 && (
+              <select
+                value={selectedUserId ?? ""}
+                onChange={(e) => setLoginUserId(Number(e.target.value))}
+                title="User to log in as"
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-300"
+              >
+                {wpUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.login} ({u.roles})
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
+          {loginError && <p className="mt-2 text-xs text-red-400">{loginError}</p>}
         </section>
 
         {/* Credentials */}

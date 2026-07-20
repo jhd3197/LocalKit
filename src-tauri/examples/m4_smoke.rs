@@ -15,6 +15,7 @@ fn make_state() -> AppState {
     AppState {
         db: Mutex::new(db),
         data_dir,
+        terminals: localkit_lib::terminal::PtyManager::new(),
     }
 }
 

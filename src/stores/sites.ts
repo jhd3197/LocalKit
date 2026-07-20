@@ -1,13 +1,15 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
+import { errMsg, markEventError, toastError } from "../lib/errors";
+import { toast, useToast } from "./toast";
 import type { Site, SiteEvent, SiteWithStatus, WpInfo } from "../lib/types";
 
 interface SitesState {
   sites: SiteWithStatus[];
   loading: boolean;
-  error: string | null;
   creating: boolean;
   busyId: string | null;
+  /** Last site-event received (drives the progress toast + sync refreshes). */
   progress: SiteEvent | null;
   logs: Record<string, string>;
   wpInfo: Record<string, WpInfo | null>;
@@ -19,18 +21,19 @@ interface SitesState {
   fetchLogs: (id: string) => Promise<void>;
   fetchWpInfo: (id: string) => Promise<void>;
   handleEvent: (event: SiteEvent) => void;
-  dismissProgress: () => void;
-  clearError: () => void;
 }
 
-function errMsg(e: unknown): string {
-  return typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+// The pinned progress toast currently tracking site-event stages (create,
+// push/pull). One at a time, like the single `progress` state before it.
+let progressToastId: number | null = null;
+
+function siteName(sites: SiteWithStatus[], id: string): string | undefined {
+  return sites.find((s) => s.id === id)?.name;
 }
 
 export const useSites = create<SitesState>((set, get) => ({
   sites: [],
   loading: false,
-  error: null,
   creating: false,
   busyId: null,
   progress: null,
@@ -41,20 +44,21 @@ export const useSites = create<SitesState>((set, get) => ({
     set({ loading: true });
     try {
       const sites = await ipc.listSites();
-      set({ sites, error: null, loading: false });
+      set({ sites, loading: false });
     } catch (e) {
-      set({ error: errMsg(e), loading: false });
+      set({ loading: false });
+      toastError(e, "Refresh sites");
     }
   },
 
   createSite: async (name, wpVersion, phpVersion) => {
-    set({ creating: true, progress: null, error: null });
+    set({ creating: true, progress: null });
     try {
       const site = await ipc.createSite(name, wpVersion, phpVersion);
       await get().refresh();
       return site;
     } catch (e) {
-      set({ error: errMsg(e) });
+      toastError(e, "Create site");
       throw e;
     } finally {
       set({ creating: false });
@@ -62,36 +66,40 @@ export const useSites = create<SitesState>((set, get) => ({
   },
 
   start: async (id) => {
-    set({ busyId: id, error: null });
+    set({ busyId: id });
     try {
       await ipc.startSite(id);
       await get().refresh();
+      toast.success("Site started", siteName(get().sites, id));
     } catch (e) {
-      set({ error: errMsg(e) });
+      toastError(e, "Start site");
     } finally {
       set({ busyId: null });
     }
   },
 
   stop: async (id) => {
-    set({ busyId: id, error: null });
+    set({ busyId: id });
     try {
       await ipc.stopSite(id);
       await get().refresh();
+      toast.success("Site stopped", siteName(get().sites, id));
     } catch (e) {
-      set({ error: errMsg(e) });
+      toastError(e, "Stop site");
     } finally {
       set({ busyId: null });
     }
   },
 
   remove: async (id) => {
-    set({ busyId: id, error: null });
+    set({ busyId: id });
     try {
+      const name = siteName(get().sites, id);
       await ipc.deleteSite(id);
       await get().refresh();
+      toast.success("Site deleted", name);
     } catch (e) {
-      set({ error: errMsg(e) });
+      toastError(e, "Delete site");
     } finally {
       set({ busyId: null });
     }
@@ -118,10 +126,19 @@ export const useSites = create<SitesState>((set, get) => ({
   handleEvent: (event) => {
     set({ progress: event });
     if (event.stage === "done" || event.stage === "error") {
+      const kind = event.stage === "done" ? "success" : "error";
+      if (progressToastId != null) {
+        toast.resolve(progressToastId, kind, event.message);
+        progressToastId = null;
+      } else {
+        toast[kind](event.message);
+      }
+      if (kind === "error") markEventError(event.message);
       void get().refresh();
+    } else if (progressToastId != null) {
+      useToast.getState().update(progressToastId, { title: event.message });
+    } else {
+      progressToastId = toast.progress(event.message);
     }
   },
-
-  dismissProgress: () => set({ progress: null }),
-  clearError: () => set({ error: null }),
 }));

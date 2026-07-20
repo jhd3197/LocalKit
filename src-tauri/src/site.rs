@@ -72,7 +72,7 @@ pub struct SiteEvent {
 /// Emit a progress event to the frontend. `app` is optional so the lifecycle
 /// can also be driven from tests / example binaries / the `lk` CLI without a
 /// Tauri runtime; in that case progress is printed to stderr instead.
-fn emit(app: Option<&AppHandle>, id: &str, stage: &str, message: &str) {
+pub(crate) fn emit(app: Option<&AppHandle>, id: &str, stage: &str, message: &str) {
     match app {
         Some(app) => {
             let _ = app.emit(
@@ -311,20 +311,27 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
         .map_err(|e| format!("failed to write docker-compose.yml: {e}"))?;
     std::fs::write(dir.join(".env"), render_env(site, &db_password))
         .map_err(|e| format!("failed to write .env: {e}"))?;
+    wordpress::ensure_login_plugin(&dir)?;
+
+    emit(
+        app,
+        &site.id,
+        "pulling",
+        "Downloading WordPress images (first run can take a few minutes)...",
+    );
+    docker::compose_pull(&dir, &["wordpress", "db", "wpcli"]).await?;
 
     emit(
         app,
         &site.id,
         "containers",
-        "Starting Docker containers (first run pulls images, this can take a few minutes)...",
+        "Starting Docker containers...",
     );
     docker::compose_up(&dir).await?;
 
     emit(app, &site.id, "waiting", "Waiting for WordPress to come online...");
     wait_for_port(site.port, 180).await?;
 
-    emit(app, &site.id, "install", "Installing WordPress...");
-    let admin_pass = random_password(16);
     // Install at the site's local domain when the router is enabled (M6).
     let (domains_on, ca_trusted) = router::enabled_and_trusted(state);
     let install_url = if domains_on {
@@ -332,7 +339,8 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
     } else {
         format!("http://localhost:{}", site.port)
     };
-    wordpress::install(&dir, site, &admin_pass, &install_url).await?;
+    let admin_pass = random_password(16);
+    wordpress::install(&dir, site, &admin_pass, &install_url, app).await?;
 
     let mut site = site.clone();
     site.status = "running".into();

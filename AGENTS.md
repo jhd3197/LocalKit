@@ -13,11 +13,32 @@ Push/pull talks to the `serverkit-localkit` extension on the server
 src/                     React 18 + TS + Vite frontend
   lib/ipc.ts             typed wrappers for all Tauri commands (invoke + events)
   lib/types.ts           shared TS types mirroring Rust payloads
+  lib/terminalRegistry.ts  xterm.js instances living outside React (one PTY per
+                         site; scrollback survives page switches; attach/detach)
+  lib/termSuggest.ts       ghost-text history suggestions (plan 14): per-site MRU
+                         in localStorage, →/End accepts, frontend-only
+  lib/commands.tsx         single command registry (plan 15): static + per-site
+                         commands feeding the palette, shortcuts, cheat-sheet
+  lib/shortcuts.ts         keyCombo canonicalizer (mod = Ctrl/Cmd) + comboLabel
+  lib/keybindings.ts       shortcut override resolver over the settings KV
+                         (shortcut.<id>; absent = default, "none" = unbound)
+  lib/fuzzy.ts             fuzzy scorer for the command palette
+  hooks/                   useShortcuts.ts (global keydown dispatcher with
+                         editable-target guard), useDialog.ts (shared modal
+                         Escape/outside-click, topmost-only stack)
   stores/                Zustand stores (nav.ts = page state + settings modal +
-                         grid/list view pref, sites.ts = data/actions)
+                         palette/new-site/cheat-sheet dialog flags,
+                         settings.ts = unified prefs over the app_settings KV —
+                         seeded pre-paint from window.__LOCALKIT_SETTINGS__,
+                         sites.ts = data/actions, toast.ts = global toasts +
+                         module-level toast.* helpers)
   pages/                 Dashboard (grid/list site views), SiteDetail,
-                         Settings (modal, opened via sidebar gear — not a page)
+                         Terminal (one tab per site, shell in the wordpress
+                         container), Settings (modal, opened via sidebar gear —
+                         not a page)
   components/            Sidebar, StatusBadge, CopyButton, NewSiteDialog,
+                         CommandPalette, KeyboardSettings,
+                         KeyboardShortcutsDialog,
                          icons.tsx (inline SVGs, 1.75px rounded strokes)
   assets/logo.png        Vite-bundled brand logo (sidebar); master at assets/logo.png
   mock/                  in-browser mocks of @tauri-apps/* for `vite --mode mock`
@@ -37,9 +58,15 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          hosts-file block + elevated writer, CA trust, status
   src/tray.rs            M8 system tray: close-to-tray, tray menu with quick
                          site Open/Start/Stop, single-instance focus
+  src/terminal.rs        per-site interactive terminals: `portable-pty` PTY
+                         running `docker compose exec wordpress bash`; events
+                         `terminal://data` / `terminal://exit`
   src/serverkit.rs       ServerKit API client (X-API-Key) + connection model
   src/sync.rs            push/pull orchestration + SyncRecord (sync_history)
-  tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin
+  tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin;
+                         the main window is built in code (`lib.rs run()`), not
+                         from the config `windows` array, so the settings init
+                         script can attach pre-paint
 ```
 
 ## Build / test commands
@@ -52,6 +79,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   so the UI renders with fake data and no Tauri/Docker
 - `npm run shots` — regenerate README screenshots into `docs/screenshots/`
   (headless local Chrome/Edge via puppeteer-core; see docs/screenshots/CAPTURE.md)
+- `node scripts/verify-shortcuts.mjs` — headless runtime check of the plan-15
+  keyboard system against the mock server (palette, shortcuts, editable
+  guard, rebinding/conflicts/persistence)
 - `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
   uses a scratch data dir under the OS temp dir.
@@ -64,9 +94,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   smoke site; **interactive only** (hosts-file writes trigger UAC/elevation
   prompts twice). Run `smoke -- create` first, `smoke -- cleanup` after.
 - `cd src-tauri && cargo run -p lk -- <cmd>` — headless CLI (`lk list |
-  create | start | stop | restart | delete | info | logs | wp | env | doctor`);
-  shares the GUI's data dir, so use `--data-dir` (or `LOCALKIT_DATA_DIR`) for
-  throwaway tests. See docs/plans/7_cli.md.
+  create | start | stop | restart | delete | info | logs | wp | env | login |
+  doctor`); shares the GUI's data dir, so use `--data-dir` (or
+  `LOCALKIT_DATA_DIR`) for throwaway tests. See docs/plans/7_cli.md.
 - CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
   build`, `cargo check --workspace --all-targets`, `cargo test --workspace`
   (matches Faro's CI shape).
@@ -90,6 +120,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - **Docker:** always shell out to the `docker compose` CLI from Rust
   (`docker.rs`); never add a Docker API client (bollard etc.). All compose
   invocations run with `current_dir = <site dir>` so `.env` is picked up.
+  Every subprocess spawn (`Command::new`, any module) must go through
+  `docker::no_window` (CREATE_NO_WINDOW) so the installed GUI app never
+  flashes a console window on Windows.
 - **Errors:** commands return `Result<T, String>` with user-displayable
   messages; `docker::friendly_error` maps common "Docker not running" stderr.
 - **DB:** forward-only migrations only — bump `user_version` and add an
@@ -104,9 +137,33 @@ src-tauri/               Rust backend (also a cargo workspace root)
   always pass `wp` as the first argument (the cli image's `wp` CMD is replaced
   by run args, so omitting it makes the entrypoint exec `core` and fail).
 - **Events:** long operations emit `site-event` (`{id, stage, message}`);
-  stages: files → containers → waiting → install → done | error. When there
-  is no Tauri app handle (CLI, examples), `site::emit` prints
-  `[stage] message` to stderr instead of dropping the event.
+  create stages: files → pulling → containers → waiting → install (re-emitted
+  per attempt) → done | error. The `pulling` stage pre-pulls all images
+  including the profile-gated wpcli (`docker::compose_pull`) so first-run
+  downloads are a labeled stage, not a silent stall. When there is no Tauri
+  app handle (CLI, examples), `site::emit` prints `[stage] message` to stderr
+  instead of dropping the event. On the frontend, `sites.ts handleEvent`
+  renders these as a single pinned progress toast that resolves into
+  success/error on done/error.
+- **Settings store (plan 13):** all frontend preferences flow through
+  `stores/settings.ts` over the `app_settings` KV — reads seed synchronously
+  from `window.__LOCALKIT_SETTINGS__` (published by
+  `build_settings_init_script` in `lib.rs` via `WebviewWindowBuilder::
+  initialization_script`, before first paint — that's why the main window is
+  built in code), with an async `settings_get_all` fallback for mock mode.
+  Writes are optimistic + fire-and-forget `set_app_setting` and mirrored to
+  localStorage (`localkit.settings.*`) so pure-web mock/dev keeps prefs.
+  New prefs need zero new Tauri commands — add a typed accessor in
+  `settings.ts`; parsing (`"true"` → bool, numbers) lives there. The old
+  `localkit.siteView` localStorage key is one-time migrated on store creation.
+- **Toasts:** global feedback lives in `stores/toast.ts` — call
+  `toast.success/info/error(title, message?)` or `toast.progress`/`resolve`
+  from stores (never per-component plumbing); the viewport is
+  `components/Toasts.tsx` mounted once in `App.tsx`. For command failures use
+  `toastError(e, "Action name")` from `lib/errors.ts` — it unwraps the
+  `string` rejection and dedupes against the `error`-stage toast the
+  site-event stream already showed (create/push/pull both emit an error
+  event AND reject the promise).
 - **CLI (`lk`):** a thin workspace crate (`src-tauri/lk/`) over
   `localkit_lib` — never add logic to it that belongs in the library; keep
   both frontends (Tauri commands and the CLI) as thin wrappers. Conventions:
@@ -137,6 +194,64 @@ src-tauri/               Rust backend (also a cargo workspace root)
   Docker containers running on purpose. `tauri-plugin-single-instance`
   focuses the existing window on relaunch. Tray-driven start/stop spawn
   `tauri::async_runtime::spawn` so menu event handlers stay sync.
+- **Terminals:** `terminal.rs` (`PtyManager` on `AppState.terminals`) spawns a
+  real PTY via `portable-pty` (ConPTY on Windows) running `docker compose exec
+  wordpress bash` in the site dir — `terminal_open` first checks
+  `docker::compose_ps` that the wordpress container is running. Commands:
+  `terminal_open/write/resize/close`; output streams on `terminal://data`,
+  exit on `terminal://exit` (same event names as Faro, whose PtyManager this
+  mirrors). Frontend: xterm instances live in `lib/terminalRegistry.ts`
+  OUTSIDE React keyed by site id — pages only `attach`/`detach`, disposal is
+  explicit (`restartTerminal` after exit), so scrollback survives navigation.
+  Any `AppState` constructor (GUI, `lk`, examples) must pass
+  `terminal::PtyManager::new()`. Mock mode keeps fake shells in
+  `mock/core.ts` (`mockShells`); `terminal_resize` must be a no-op there (the
+  FitAddon fires one right after open).
+- **Terminal quick wins (plan 14):** the registry also loads
+  `@xterm/addon-web-links` (Ctrl-click URLs open via the opener plugin) and
+  copy-on-select (hardcoded on; empty selections never clobber the
+  clipboard). Ghost-text suggestions live in `lib/termSuggest.ts` — MRU
+  history per site in localStorage (`localkit.termHistory.<siteId>`), →/End
+  accepts, frontend-only (mock needs nothing). Two xterm-6 gotchas: the
+  XTerm options need `allowProposedApi: true` (decorations are still
+  proposed API), and the echo-check marker must be pinned when the input
+  line STARTS — v6 delivers input asynchronously, so at Enter the shell's
+  echo has often already moved the cursor off the command row. Settings →
+  Terminal exposes `terminalFontSize` (11–16, live-applied via a
+  `useSettings.subscribe` in the registry) and `terminalScrollback`
+  (1k/5k/10k, read at terminal creation only — noted in the UI).
+- **Command palette + shortcuts (plan 15):** `lib/commands.tsx` is the single
+  registry (`buildCommands()` reads stores via getState so the dispatcher
+  always sees fresh state; `useCommands()` is the reactive wrapper) — static
+  commands + per-site Open/Start|Stop/WP Admin/Terminal rebuilt from the
+  sites store. `hooks/useShortcuts.ts` is the one global keydown listener;
+  the editable-target guard means shortcuts never fire in
+  inputs/selects/contenteditable/xterm unless the combo has `mod`.
+  Combos are canonical (`lib/shortcuts.ts`: `mod` = Ctrl/Cmd, shifted
+  punctuation like `?` carries its own shift). Remappable bindings
+  (phase 3) live in the app_settings KV as `shortcut.<commandId>` —
+  absent = default, `"none"` = explicitly unbound — resolved by the one
+  `effectiveCombo()` in `lib/keybindings.ts` shared by dispatcher, palette,
+  cheat-sheet and Settings → Keyboard; resets go through the
+  `delete_app_setting` command (settings store `remove()`), not a sentinel.
+  Dialog flags (`paletteOpen`, `newSiteOpen`, `cheatsheetOpen`) live in
+  nav.ts and the dialogs render globally in App.tsx, so commands work from
+  any page. Modals share `hooks/useDialog.ts` (Escape closes the topmost
+  dialog only, via a module-level stack; outside-click; focus stays
+  declarative via `autoFocus`) — never hand-roll per-modal Escape
+  listeners.
+- **One-click login (plan 10):** `wordpress::login_url(dir, site, user,
+  base_url)` mints a one-time token (`wp option update localkit_login_token`
+  + `_exp`, ~120 s TTL) consumed by the MU plugin
+  `wp-content/mu-plugins/localkit-login.php` (`LOGIN_PLUGIN` const, written
+  idempotently by `ensure_login_plugin` at create and lazily on login — the
+  bind-mounted `wp-content` makes it a plain fs write). Base URL comes from
+  `router::site_public_url` (mirrors the frontend's `siteUrl`). Never log the
+  full login URL into events/history. Frontends: `login_site` /
+  `site_wp_users` Tauri commands (WP Admin button + user picker on
+  SiteDetail), `lk login [--user <id|login|email>] [--open]`. Default user =
+  the site's `admin_user`, falling back to the first administrator (pull DB
+  can overwrite local users).
 - **ServerKit (M3/M4):** client in `serverkit.rs` (reqwest rustls,
   `X-API-Key` header). `test_connection` = public `GET /api/v1/system/health`
   (no key sent — ServerKit 401s *any* request carrying an invalid key) + key

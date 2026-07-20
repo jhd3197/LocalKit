@@ -126,6 +126,24 @@ impl Db {
             })
     }
 
+    pub fn get_all_settings(&self) -> Result<std::collections::HashMap<String, String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM app_settings")
+            .map_err(|e| format!("failed to read settings: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("failed to read settings: {e}"))?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (k, v) = row.map_err(|e| format!("failed to read settings: {e}"))?;
+            map.insert(k, v);
+        }
+        Ok(map)
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -134,6 +152,13 @@ impl Db {
                 params![key, value],
             )
             .map_err(|e| format!("failed to write setting {key}: {e}"))?;
+        Ok(())
+    }
+
+    pub fn delete_setting(&self, key: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM app_settings WHERE key = ?1", params![key])
+            .map_err(|e| format!("failed to delete setting {key}: {e}"))?;
         Ok(())
     }
 

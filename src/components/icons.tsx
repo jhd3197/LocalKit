@@ -82,8 +82,17 @@ export function SlidersIcon(props: IconProps) {
   );
 }
 
-export function GlobeIcon(props: IconProps) {
+export function TerminalIcon(props: IconProps) {
   return (
+    <svg {...base(props)}>
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <path d="M7 9l3 3-3 3" />
+      <path d="M13 15h4" />
+    </svg>
+  );
+}
+
+export function GlobeIcon(props: IconProps) {  return (
     <svg {...base(props)}>
       <circle cx="12" cy="12" r="10" />
       <line x1="2" y1="12" x2="22" y2="12" />
@@ -99,6 +108,21 @@ export function ServerIcon(props: IconProps) {
       <rect x="2" y="14" width="20" height="8" rx="2" />
       <line x1="6" y1="6" x2="6.01" y2="6" />
       <line x1="6" y1="18" x2="6.01" y2="18" />
+    </svg>
+  );
+}
+
+export function KeyboardIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="2" y="5" width="20" height="14" rx="2.5" />
+      <line x1="6" y1="9" x2="6.01" y2="9" />
+      <line x1="10" y1="9" x2="10.01" y2="9" />
+      <line x1="14" y1="9" x2="14.01" y2="9" />
+      <line x1="18" y1="9" x2="18.01" y2="9" />
+      <line x1="6" y1="13" x2="6.01" y2="13" />
+      <line x1="18" y1="13" x2="18.01" y2="13" />
+      <line x1="9" y1="13" x2="15" y2="13" />
     </svg>
   );
 }

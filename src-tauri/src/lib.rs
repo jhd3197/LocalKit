@@ -4,6 +4,7 @@ pub mod router;
 pub mod serverkit;
 pub mod site;
 pub mod sync;
+pub mod terminal;
 pub mod tray;
 pub mod wordpress;
 
@@ -19,6 +20,7 @@ use site::{Site, SiteDetail, SiteWithStatus};
 pub struct AppState {
     pub db: Mutex<Db>,
     pub data_dir: PathBuf,
+    pub terminals: terminal::PtyManager,
 }
 
 #[derive(Serialize)]
@@ -97,6 +99,41 @@ async fn site_logs(state: State<'_, AppState>, id: String, tail: Option<u32>) ->
 async fn wp_cli_info(state: State<'_, AppState>, id: String) -> Result<wordpress::WpInfo, String> {
     let s = site::get(&state, &id)?;
     wordpress::info(&s.dir()).await
+}
+
+// ---------------------------------------------------------------------------
+// One-click WP Admin login (one-time token + MU plugin)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn login_site(
+    state: State<'_, AppState>,
+    id: String,
+    user_id: Option<u64>,
+) -> Result<String, String> {
+    let s = site::get(&state, &id)?;
+    let containers = docker::compose_ps(&s.dir()).await?;
+    if !containers
+        .iter()
+        .any(|c| c.service == "wordpress" && c.state == "running")
+    {
+        return Err(format!(
+            "\"{}\" is not running — start the site first.",
+            s.name
+        ));
+    }
+    let base = router::site_public_url(&state, &s);
+    let user = user_id.map(|n| n.to_string());
+    wordpress::login_url(&s.dir(), &s, user.as_deref(), &base).await
+}
+
+#[tauri::command]
+async fn site_wp_users(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<wordpress::WpUser>, String> {
+    let s = site::get(&state, &id)?;
+    wordpress::users(&s.dir()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -248,9 +285,84 @@ fn get_app_setting(state: State<AppState>, key: String) -> Result<Option<String>
 }
 
 #[tauri::command]
+fn settings_get_all(
+    state: State<AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_all_settings()
+}
+
+#[tauri::command]
 fn set_app_setting(state: State<AppState>, key: String, value: String) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.set_setting(&key, &value)
+}
+
+#[tauri::command]
+fn delete_app_setting(state: State<AppState>, key: String) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.delete_setting(&key)
+}
+
+// ---------------------------------------------------------------------------
+// Terminals (interactive shells inside site containers)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn terminal_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    site_id: String,
+    cols: Option<u32>,
+    rows: Option<u32>,
+) -> Result<String, String> {
+    let site = site::get(&state, &site_id)?;
+    let containers = docker::compose_ps(&site.dir()).await?;
+    let running = containers
+        .iter()
+        .any(|c| c.service == "wordpress" && c.state == "running");
+    if !running {
+        return Err(format!(
+            "\"{}\" is not running — start the site first.",
+            site.name
+        ));
+    }
+    state
+        .terminals
+        .open(&app, &site.dir(), cols.unwrap_or(80), rows.unwrap_or(24))
+}
+
+#[tauri::command]
+fn terminal_write(state: State<AppState>, terminal_id: String, data: String) -> Result<(), String> {
+    state.terminals.write(&terminal_id, &data)
+}
+
+#[tauri::command]
+fn terminal_resize(
+    state: State<AppState>,
+    terminal_id: String,
+    cols: u32,
+    rows: u32,
+) -> Result<(), String> {
+    state.terminals.resize(&terminal_id, cols, rows)
+}
+
+#[tauri::command]
+fn terminal_close(state: State<AppState>, terminal_id: String) -> Result<(), String> {
+    state.terminals.close(&terminal_id)
+}
+
+// ---------------------------------------------------------------------------
+// Pre-paint settings injection (plan 13)
+// ---------------------------------------------------------------------------
+
+/// JS run before any frontend code: publishes the app_settings KV as
+/// `window.__LOCALKIT_SETTINGS__` so the settings store seeds synchronously
+/// (no preference flash on cold start).
+fn build_settings_init_script(db: &Db) -> String {
+    let settings = db.get_all_settings().unwrap_or_default();
+    let json = serde_json::to_string(&settings).unwrap_or_else(|_| "{}".into());
+    format!("window.__LOCALKIT_SETTINGS__ = Object.freeze({json});")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -259,6 +371,7 @@ pub fn run() {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("LocalKit");
     let db = Db::open(&data_dir.join("localkit.db")).expect("failed to open LocalKit database");
+    let settings_init_script = build_settings_init_script(&db);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -269,8 +382,17 @@ pub fn run() {
         .manage(AppState {
             db: Mutex::new(db),
             data_dir,
+            terminals: terminal::PtyManager::new(),
         })
-        .setup(|app| {
+        .setup(move |app| {
+            // Main window is built in code (not tauri.conf.json) so the
+            // settings init script can attach before first paint.
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+                .title("LocalKit")
+                .inner_size(1200.0, 800.0)
+                .min_inner_size(900.0, 600.0)
+                .initialization_script(&settings_init_script)
+                .build()?;
             tray::setup(app.handle())?;
             Ok(())
         })
@@ -294,6 +416,8 @@ pub fn run() {
             delete_site,
             site_logs,
             wp_cli_info,
+            login_site,
+            site_wp_users,
             save_serverkit_connection,
             list_serverkit_connections,
             delete_serverkit_connection,
@@ -309,7 +433,33 @@ pub fn run() {
             trust_router_ca,
             get_app_setting,
             set_app_setting,
+            delete_app_setting,
+            settings_get_all,
+            terminal_open,
+            terminal_write,
+            terminal_resize,
+            terminal_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_init_script_publishes_kv() {
+        let dir = std::env::temp_dir().join(format!("localkit-test-{}", std::process::id()));
+        let db = Db::open(&dir.join("test.db")).unwrap();
+        db.set_setting("siteView", "list").unwrap();
+        db.set_setting("run_in_background", "true").unwrap();
+
+        let script = build_settings_init_script(&db);
+        assert!(script.starts_with("window.__LOCALKIT_SETTINGS__ = Object.freeze("));
+        assert!(script.contains("\"siteView\":\"list\""));
+        assert!(script.contains("\"run_in_background\":\"true\""));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

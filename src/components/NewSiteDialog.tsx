@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { useNav } from "../stores/nav";
 import { useSites } from "../stores/sites";
+import { useDialog } from "../hooks/useDialog";
 import type { AppInfo } from "../lib/types";
 
 export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   const createSite = useSites((s) => s.createSite);
   const creating = useSites((s) => s.creating);
   const navigate = useNav((s) => s.navigate);
+  const { overlayProps, panelProps } = useDialog(onClose);
 
   const [name, setName] = useState("");
   const [wpVersion, setWpVersion] = useState("");
@@ -42,10 +44,16 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div
+      {...overlayProps}
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60"
+    >
       <div
+        {...panelProps}
+        role="dialog"
+        aria-modal="true"
+        aria-label="New WordPress site"
         className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold text-white">New WordPress site</h2>
         <p className="mt-1 text-sm text-zinc-500">

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ipc } from "../lib/ipc";
+import { toastError } from "../lib/errors";
 import { useServerKit } from "../stores/serverkit";
 import { useSites } from "../stores/sites";
 import type { RemoteWpSite, SyncRecord } from "../lib/types";
@@ -50,13 +51,14 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
   const select =
     "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600";
 
-  const op = async (label: string, fn: () => Promise<void>) => {
+  const op = async (label: string, context: string, fn: () => Promise<void>) => {
     setBusy(label);
-    setError(null);
     try {
       await fn();
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      // Success/failure feedback comes from the site-event stream; this
+      // covers rejections the event stream didn't (deduped in toastError).
+      toastError(e, context);
       setBusy(null);
     }
   };
@@ -147,7 +149,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
       <div className="mt-4 flex flex-wrap gap-2">
         <button
           onClick={() =>
-            void op("code", () => ipc.pushSiteCode(connectionId, siteId, remoteSiteId as number))
+            void op("code", "Push code", () => ipc.pushSiteCode(connectionId, siteId, remoteSiteId as number))
           }
           disabled={busy !== null || !connectionId || !remoteSiteId}
           className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
@@ -156,7 +158,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
         </button>
         <button
           onClick={() =>
-            void op("pushdb", () => ipc.pushSiteDb(connectionId, siteId, remoteSiteId as number))
+            void op("pushdb", "Push DB", () => ipc.pushSiteDb(connectionId, siteId, remoteSiteId as number))
           }
           disabled={busy !== null || !connectionId || !remoteSiteId || !running}
           className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
@@ -165,7 +167,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
         </button>
         <button
           onClick={() =>
-            void op("pulldb", () =>
+            void op("pulldb", "Pull DB", () =>
               ipc.pullSiteDb(connectionId, siteId, remoteSiteId as number, selectedRemote?.url ?? null)
             )
           }

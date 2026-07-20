@@ -47,6 +47,17 @@ pub fn site_url(slug: &str, ca_trusted: bool) -> String {
     format!("{scheme}://{slug}.{TLD}")
 }
 
+/// The URL a site should be opened at (mirrors the frontend's `siteUrl`):
+/// its `*.test` domain when local domains are enabled, else `localhost:<port>`.
+pub fn site_public_url(state: &AppState, site: &Site) -> String {
+    let (domains_on, ca_trusted) = enabled_and_trusted(state);
+    if domains_on {
+        site_url(&site.slug, ca_trusted)
+    } else {
+        format!("http://localhost:{}", site.port)
+    }
+}
+
 fn render_compose() -> String {
     r#"name: localkit-router
 
@@ -231,10 +242,11 @@ async fn write_hosts_elevated(content: &str) -> Result<(), String> {
              }} catch {{ Write-Error $_; exit 1 }}",
             bat.display()
         );
-        let out = tokio::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps])
-            .output()
-            .await;
+        let out = docker::no_window(
+            tokio::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]),
+        )
+        .output()
+        .await;
         let _ = std::fs::remove_file(&bat);
         out
     };
@@ -548,8 +560,7 @@ async fn install_ca_cert(cert: &Path) -> Result<(), String> {
             ),
         ],
     );
-    let output = tokio::process::Command::new(program)
-        .args(&args)
+    let output = docker::no_window(tokio::process::Command::new(program).args(&args))
         .output()
         .await
         .map_err(|e| format!("failed to run {program}: {e}"))?;

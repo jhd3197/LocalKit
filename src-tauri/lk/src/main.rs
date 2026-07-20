@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use localkit_lib::{db::Db, docker, site, AppState};
+use localkit_lib::{db::Db, docker, router, site, wordpress, AppState};
 
 // ---------------------------------------------------------------------------
 // clap surface
@@ -127,6 +127,19 @@ enum Cmd {
         json: bool,
     },
 
+    /// Print a one-time URL that logs straight into the site's wp-admin.
+    /// The URL goes to stdout (scriptable); it expires after ~2 minutes and
+    /// works exactly once.
+    Login {
+        site: String,
+        /// User to log in as (id, login, or email); defaults to the site admin
+        #[arg(long)]
+        user: Option<String>,
+        /// Also open the URL in the default browser
+        #[arg(long)]
+        open: bool,
+    },
+
     /// Diagnose the local environment (Docker, compose, data dir).
     /// Exits non-zero while any check fails, so it can gate scripts.
     Doctor,
@@ -201,6 +214,7 @@ async fn run(cli: &Cli) -> Result<(), String> {
             Ok(())
         }
         Cmd::Env { site: q, shell, json } => cmd_env(&state, q, *shell, *json),
+        Cmd::Login { site: q, user, open } => cmd_login(&state, q, user.as_deref(), *open).await,
         Cmd::Doctor => unreachable!("handled above"),
     }
 }
@@ -374,8 +388,20 @@ fn cmd_env(state: &AppState, query: &str, shell: Shell, json: bool) -> Result<()
     Ok(())
 }
 
-async fn cmd_doctor(data_dir_override: Option<PathBuf>) -> Result<(), String> {
-    let mut ok = true;
+async fn cmd_login(state: &AppState, query: &str, user: Option<&str>, open: bool) -> Result<(), String> {
+    let s = resolve(state, query)?;
+    let base = router::site_public_url(state, &s);
+    // Thin wrapper: all logic lives in localkit_lib::wordpress.
+    let url = wordpress::login_url(&s.dir(), &s, user, &base).await?;
+    println!("{url}");
+    if open {
+        open::that(&url).map_err(|e| format!("failed to open the browser: {e}"))?;
+        eprintln!("{} opened one-time login URL in your browser", ok("✓"));
+    }
+    Ok(())
+}
+
+async fn cmd_doctor(data_dir_override: Option<PathBuf>) -> Result<(), String> {    let mut ok = true;
 
     let status = docker::check().await;
     match (&status.available, &status.version) {
@@ -437,6 +463,7 @@ fn make_state(cli: &Cli) -> Result<AppState, String> {
     Ok(AppState {
         db: Mutex::new(db),
         data_dir,
+        terminals: localkit_lib::terminal::PtyManager::new(),
     })
 }
 

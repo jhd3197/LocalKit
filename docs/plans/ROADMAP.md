@@ -16,6 +16,13 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 6 | `6_local-domains` | ✅ shipped | `http(s)://<slug>.test` via a shared Caddy router, managed hosts block, local CA trust. |
 | 7 | `7_cli` | ✅ shipped | Headless CLI companion (`lk`) — same data dir as the GUI, scriptable output. |
 | 8 | `8_system-tray` | ✅ shipped | Tray icon + close-to-tray so sites keep running while the window is closed. |
+| 9 | `9_windows-console-and-install-hang` | ✅ shipped | Bugfix: hide Windows console windows on subprocess spawns; make first-run install visible (pre-pull + per-attempt progress) so it never looks hung. |
+| 10 | `10_one-click-login` | ✅ shipped | One-click WP Admin login via one-time token MU plugin + user picker. |
+| 11 | `11_terminal` | ✅ shipped | Embedded per-site terminals: xterm.js + PTY shelling into each site's wordpress container (Faro's PtyManager pattern). |
+| 12 | `12_toasts` | ✅ | Global toast store + viewport (from Faro); success/error feedback for every action. |
+| 13 | `13_settings-store` | ✅ | Unified settings store on `app_settings` KV + pre-paint injection; substrate for terminal settings and themes. |
+| 14 | `14_terminal-quick-wins` | ✅ shipped | Web-links, copy-on-select, ghost-text history, terminal font/scrollback settings (needs 13). |
+| 15 | `15_command-palette-shortcuts` | ✅ shipped | Command registry + palette (mod+K), global shortcuts, remappable bindings in Settings (needs 13). |
 
 Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferred
 
@@ -25,6 +32,12 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 - ✅ Port allocation (site from 8081, DB = site + 10000)
 - ✅ wp-cli install via profile-gated `wpcli` service
 - ✅ Credentials, logs, container status in the UI
+- ✅ Embedded per-site terminals (plan 11): Terminal page with one tab per
+  site, xterm.js + PTY running `docker compose exec wordpress bash`
+- ✅ One-click WP Admin login via one-time-token MU plugin + user picker
+  (plan 10)
+- ✅ Windows polish: hide subprocess console windows, visible first-run
+  install progress (plan 9)
 - ⬜ Site duplication / clone (nice-to-have, unplanned)
 
 ## Track B — ServerKit (M3–M4)
@@ -62,3 +75,25 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 - ⬜ ServerKit from the CLI: `lk connection add/list`, `lk push`, `lk pull`
   (library calls already exist; future)
 - ⬜ Shell completions, self-update (future)
+
+## Track E — UX ports from Faro (M12–M14)
+
+Features ported from Faro's proven implementations (see the port survey;
+Faro paths referenced in each plan):
+
+- ✅ Toast notifications (plan 12): global toast store + viewport,
+  `toast.success/error` callable from stores — replaces the ad-hoc
+  progress/error toasts in `App.tsx`
+- ✅ Settings store (plan 13): unified frontend store over `app_settings`
+  KV, pre-paint injection via `initialization_script` — substrate for
+  terminal settings, themes, notification prefs
+- ✅ Terminal quick wins (plan 14): web-links addon, copy-on-select,
+  ghost-text per-site command history, font-size/scrollback settings
+- ✅ Command palette + shortcuts (plan 15): one command registry feeding a
+  fuzzy palette (mod+K), global shortcuts with editable-target guards,
+  remappable bindings in Settings → Keyboard, cheat-sheet, shared
+  `useDialog` for modals
+- ⬜ Later candidates from the survey (unplanned): OS desktop
+  notifications, auto-updater (Track C), context menus, structured
+  `{kind, message}` IPC errors, snippets, light theme (needs a CSS-var
+  token layer first)

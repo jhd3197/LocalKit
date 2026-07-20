@@ -7,6 +7,18 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::process::Command;
 
+/// Hide the console window Windows would otherwise allocate for a
+/// console-subsystem child of our GUI process. No-op on other OSes.
+/// Every subprocess spawn in the app must go through this.
+pub(crate) fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DockerStatus {
     pub available: bool,
@@ -23,8 +35,7 @@ pub struct ContainerInfo {
 
 /// Check that the Docker CLI exists and the daemon is reachable.
 pub async fn check() -> DockerStatus {
-    match Command::new("docker")
-        .args(["info", "--format", "{{.ServerVersion}}"])
+    match no_window(Command::new("docker").args(["info", "--format", "{{.ServerVersion}}"]))
         .output()
         .await
     {
@@ -74,10 +85,7 @@ async fn compose_output(dir: &Path, args: &[&str]) -> Result<std::process::Outpu
     if !dir.exists() {
         return Err(format!("site directory not found: {}", dir.display()));
     }
-    Command::new("docker")
-        .arg("compose")
-        .args(args)
-        .current_dir(dir)
+    no_window(Command::new("docker").arg("compose").args(args).current_dir(dir))
         .output()
         .await
         .map_err(|e| format!("failed to run docker compose: {e}"))
@@ -98,6 +106,15 @@ pub async fn compose_up(dir: &Path) -> Result<(), String> {
 
 pub async fn compose_restart(dir: &Path) -> Result<(), String> {
     compose(dir, &["restart"]).await.map(|_| ())
+}
+
+/// Pull the images for the given services. Named explicitly so profile-gated
+/// services (wpcli) are included — a plain `compose pull` skips them, and the
+/// first `compose run wpcli` would then pull blind for minutes.
+pub async fn compose_pull(dir: &Path, services: &[&str]) -> Result<(), String> {
+    let mut args: Vec<&str> = vec!["pull"];
+    args.extend_from_slice(services);
+    compose(dir, &args).await.map(|_| ())
 }
 
 pub async fn compose_down(dir: &Path, volumes: bool) -> Result<(), String> {
@@ -127,15 +144,17 @@ pub async fn compose_run_stdin(
     }
     let mut full: Vec<&str> = vec!["run", "--rm", "-T", service];
     full.extend_from_slice(args);
-    let mut child = Command::new("docker")
-        .arg("compose")
-        .args(&full)
-        .current_dir(dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to run docker compose: {e}"))?;
+    let mut child = no_window(
+        Command::new("docker")
+            .arg("compose")
+            .args(&full)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .spawn()
+    .map_err(|e| format!("failed to run docker compose: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input).await;
