@@ -6,6 +6,7 @@ pub mod site;
 pub mod snapshot;
 pub mod sync;
 pub mod terminal;
+pub mod transfer;
 pub mod tray;
 pub mod wordpress;
 
@@ -22,6 +23,8 @@ pub struct AppState {
     pub db: Mutex<Db>,
     pub data_dir: PathBuf,
     pub terminals: terminal::PtyManager,
+    /// Cancel flags for in-flight chunked syncs, keyed by site id (plan 19).
+    pub transfers: transfer::CancelRegistry,
 }
 
 #[derive(Serialize)]
@@ -478,6 +481,7 @@ pub fn run() {
             db: Mutex::new(db),
             data_dir,
             terminals: terminal::PtyManager::new(),
+            transfers: Default::default(),
         })
         .setup(move |app| {
             // Main window is built in code (not tauri.conf.json) so the

@@ -32,4 +32,5 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 tar = "0.4"
 flate2 = "1"
+sha2 = "0.10"
 portable-pty = "0.8"

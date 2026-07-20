@@ -779,6 +779,7 @@ async fn doctor_router(data_dir: &Path) -> bool {
         db: Mutex::new(db),
         data_dir: data_dir.to_path_buf(),
         terminals: localkit_lib::terminal::PtyManager::new(),
+        transfers: Default::default(),
     };
 
     let ports = router::router_ports(&state);
@@ -835,6 +836,7 @@ fn make_state(cli: &Cli) -> Result<AppState, String> {
         db: Mutex::new(db),
         data_dir,
         terminals: localkit_lib::terminal::PtyManager::new(),
+        transfers: Default::default(),
     })
 }
 
