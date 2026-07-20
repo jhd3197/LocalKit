@@ -172,6 +172,34 @@ async function main() {
     ok("the note is stored", table[0][3] === "verification run");
     ok("success is toasted", (await bodyText()).includes("Snapshot of Pixel Bakery taken"));
 
+    // 2b) The palette's per-site "Create snapshot" command takes one too.
+    //     Every site contributes one, so pick the row under the Pixel Bakery
+    //     group header rather than trusting fuzzy ranking — pressing Enter
+    //     would snapshot whichever site happens to rank first.
+    const countBeforePalette = (await rows()).length;
+    await page.keyboard.down("Control");
+    await page.keyboard.press("KeyK");
+    await page.keyboard.up("Control");
+    await sleep(400);
+    await page.keyboard.type("Create snapshot");
+    await sleep(500);
+    const paletteHit = await page.evaluate(() => {
+      const panel = document.querySelector('[aria-label="Command palette"]');
+      if (!panel) return false;
+      // Each row is a wrapper div holding an optional group header + button.
+      const wrapper = [...panel.querySelectorAll("div")].find(
+        (d) =>
+          d.querySelector("button[data-idx]") &&
+          d.textContent.trim() === "Pixel BakeryCreate snapshot"
+      );
+      if (!wrapper) return false;
+      wrapper.querySelector("button[data-idx]").click();
+      return true;
+    });
+    ok("palette offers Create snapshot per site", paletteHit);
+    await sleep(1200);
+    ok("palette command takes a snapshot", (await rows()).length === countBeforePalette + 1);
+
     // 3) Restore the newest snapshot — confirms, then snapshots first.
     await page.evaluate(() => {
       const heading = [...document.querySelectorAll("h2")].find(
@@ -185,7 +213,7 @@ async function main() {
     text = await bodyText();
     table = await rows();
     ok("restore reports back", text.includes("restored to the snapshot from"));
-    ok("restore snapshots the current state first", table.length === 5);
+    ok("restore snapshots the current state first", table.length === 6);
     ok("that snapshot is labelled Before restore", table[0][1] === "Before restore");
 
     // 4) Delete a snapshot.
