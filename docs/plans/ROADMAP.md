@@ -23,6 +23,17 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 13 | `13_settings-store` | ✅ | Unified settings store on `app_settings` KV + pre-paint injection; substrate for terminal settings and themes. |
 | 14 | `14_terminal-quick-wins` | ✅ shipped | Web-links, copy-on-select, ghost-text history, terminal font/scrollback settings (needs 13). |
 | 15 | `15_command-palette-shortcuts` | ✅ shipped | Command registry + palette (mod+K), global shortcuts, remappable bindings in Settings (needs 13). |
+| 16 | `16_router-coexistence` | ⬜ | Port-80/443 conflict pre-flight + configurable router ports so domains survive alongside LocalWP & co. |
+| 17 | `17_snapshots` | ⬜ | DB + wp-content snapshots with one-click restore; automatic before push/pull/delete. Safety net for 18–20. |
+| 18 | `18_import-remote-site` | ⬜ | Clone a ServerKit site down as a *new* local site (needs the extension's missing pull/code endpoint). |
+| 19 | `19_sync-v2-chunked` | ⬜ | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). |
+| 20 | `20_clone-and-blueprints` | ⬜ | One-click site clone + save-site-as-blueprint creation flows (needs 17). |
+| 21 | `21_cli-serverkit` | ⬜ | `lk connection/push/pull` + remote listing + shell completions (Track D). |
+| 22 | `22_multi-stack-core` | ⬜ | Kind/capability site model + bring-your-own-compose Docker apps — before 23–25 so new features are capability-aware from day one. |
+| 23 | `23_reconciliation` | ⬜ | Settle DB site status against Docker ground truth; recover half-created sites; Docker-health gating. |
+| 24 | `24_site-tools` | ⬜ | Tools tab: Adminer sidecar, serialization-safe search-replace, WP_DEBUG + log viewer, config editor. |
+| 25 | `25_release-polish-completion` | ⬜ | M5 remainder: update checker, OS keyring for API keys, OS notifications, real test suite. |
+| 26 | `26_php-laravel-stack` | ⬜ | Generated PHP/Laravel stack + per-kind ServerKit sync parity (needs 22, 17–19). |
 
 Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferred
 
@@ -38,7 +49,7 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   (plan 10)
 - ✅ Windows polish: hide subprocess console windows, visible first-run
   install progress (plan 9)
-- ⬜ Site duplication / clone (nice-to-have, unplanned)
+- ⬜ Site duplication / clone (plan 20, with blueprints)
 
 ## Track B — ServerKit (M3–M4)
 
@@ -48,15 +59,15 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 - ✅ Push code (in-memory tar.gz of `wp-content/`), push DB (`wp db export`),
   pull DB (download → `wp db import` → `wp search-replace`)
 - ✅ Sync history per site (migration 3)
-- ⬜ Pull a remote site down as a *new* local site (today pull targets an
-  existing local site)
+- ⬜ Pull a remote site down as a *new* local site (plan 18; today pull
+  targets an existing local site)
 
 ## Track C — Product (M5–M6)
 
 - ⬜ `npm run tauri build` installers per platform
-- ⬜ Auto-update (Tauri updater)
-- ⬜ OS keyring for ServerKit API keys (plaintext SQLite accepted for v1)
-- ⬜ Real test suite (today: `cargo check` + router hosts-block unit tests +
+- ⬜ Update awareness (plan 25 — checker first, Tauri updater if releases get signed)
+- ⬜ OS keyring for ServerKit API keys (plan 25; plaintext SQLite accepted for v1)
+- ⬜ Real test suite (plan 25; today: `cargo check` + router hosts-block unit tests +
   the `smoke` / `m4_smoke` / `m6_smoke` examples)
 - ✅ Local domains: `http(s)://<slug>.test` via a shared Caddy router +
   managed hosts block + local CA trust (plan 6), layered on top of the
@@ -73,8 +84,19 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 - ✅ `lk wp <site> <args...>` wp-cli passthrough, `lk env` (eval-able
   exports), `lk doctor`, `-o json` / `--quiet` / `--data-dir` global flags
 - ⬜ ServerKit from the CLI: `lk connection add/list`, `lk push`, `lk pull`
-  (library calls already exist; future)
-- ⬜ Shell completions, self-update (future)
+  (plan 21; library calls already exist)
+- ⬜ Shell completions (plan 21), self-update (future)
+
+## Track F — Multi-stack (M9)
+
+- ⬜ Kind/capability site model (`wordpress` | `docker`, `config_json`,
+  capability-gated features in both frontends) — plan 22, placed before the
+  remaining feature plans so they're capability-aware from day one
+- ⬜ Generic Docker apps: import an existing compose project → lifecycle,
+  logs, terminal, local domain, snapshots (plan 22)
+- ⬜ PHP/Laravel generated stack + engine-native DB sync + per-kind
+  ServerKit push/pull/import parity (plan 26)
+- 🅿️ Node/Python kinds (unplanned; same capability shape when there's demand)
 
 ## Track E — UX ports from Faro (M12–M14)
 
