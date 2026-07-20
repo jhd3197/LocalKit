@@ -289,6 +289,64 @@ async fn identify_port_owner(port: u16) -> Option<String> {
     Some(name).filter(|n| !n.is_empty())
 }
 
+/// Every TCP port in LISTEN state on the host, from one OS query.
+///
+/// `probe_port` answers "who holds *this* port" and costs a subprocess per
+/// call; port *allocation* needs the whole set at once (site.rs walks upward
+/// from 8081), so it gets this instead — one spawn, no owner lookup.
+///
+/// Same authority as `probe_port` and for the same reason: a bare bind test
+/// misses ports published by Docker (SO_REUSEADDR lets the wildcard address be
+/// re-bound), which would hand out a port that then fails at `compose up`.
+/// Best effort — an empty set on error just falls back to bind-only checks.
+pub async fn listening_ports() -> std::collections::HashSet<u16> {
+    #[cfg(target_os = "windows")]
+    let output = docker::no_window(tokio::process::Command::new("powershell").args([
+        "-NoProfile",
+        "-Command",
+        "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue \
+         | Select-Object -ExpandProperty LocalPort",
+    ]))
+    .output()
+    .await;
+    #[cfg(not(target_os = "windows"))]
+    let output = docker::no_window(tokio::process::Command::new("lsof").args([
+        "-nP",
+        "-iTCP",
+        "-sTCP:LISTEN",
+        "-F",
+        "n",
+    ]))
+    .output()
+    .await;
+
+    match output {
+        Ok(out) => parse_listening_ports(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => std::collections::HashSet::new(),
+    }
+}
+
+/// Parse the listener query output. Windows prints one bare port per line;
+/// `lsof -F n` prints `n<addr>:<port>` (addr may be `*`, IPv4, or a bracketed
+/// IPv6 literal), interleaved with other `-F` field lines we ignore.
+fn parse_listening_ports(stdout: &str) -> std::collections::HashSet<u16> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let candidate = match line.strip_prefix('n') {
+                // lsof: take everything after the last ':' (IPv6 has several).
+                Some(addr) => addr.rsplit(':').next()?,
+                None => line,
+            };
+            candidate.parse::<u16>().ok()
+        })
+        .collect()
+}
+
 /// Which of the router's ports are held by something else.
 pub async fn probe_ports(http: u16, https: u16) -> Vec<PortConflict> {
     let mut conflicts = Vec::new();
@@ -895,6 +953,30 @@ mod tests {
 
     fn slugs(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_the_windows_listener_table() {
+        // `Select-Object -ExpandProperty LocalPort`: one bare port per line.
+        let ports = parse_listening_ports("80\r\n443\r\n8081\r\n18081\r\n");
+        assert_eq!(ports.len(), 4);
+        assert!(ports.contains(&8081) && ports.contains(&18081));
+    }
+
+    #[test]
+    fn parses_lsof_listener_output() {
+        // `lsof -F n` interleaves `p<pid>` lines; IPv6 names carry extra colons.
+        let ports = parse_listening_ports("p123\nn*:8081\nn127.0.0.1:18081\np456\nn[::1]:443\n");
+        assert_eq!(ports.len(), 3);
+        assert!(ports.contains(&8081));
+        assert!(ports.contains(&18081));
+        assert!(ports.contains(&443), "IPv6 literal should not eat the port");
+    }
+
+    #[test]
+    fn listener_parsing_ignores_junk() {
+        let ports = parse_listening_ports("\nLocalPort\n-------\n\nnot-a-port\n99999999\n8082\n");
+        assert_eq!(ports, std::collections::HashSet::from([8082]));
     }
 
     const SAMPLE: &str = "# Copyright (c) Microsoft Corp.\r\n\
