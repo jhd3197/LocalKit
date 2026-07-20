@@ -129,7 +129,8 @@ async fn start(state: &AppState) -> Result<(), String> {
 async fn delete(state: &AppState) -> Result<(), String> {
     let s = find_site(state)?;
     let dir = s.dir();
-    site::delete(state, &s.id).await?;
+    // Keep the snapshots so `snapshot_smoke` can assert they survive the site.
+    site::delete(None, state, &s.id, false).await?;
     assert!(!dir.exists(), "site dir still exists after delete");
     let db = state.db.lock().map_err(|e| e.to_string())?;
     assert!(db.list_sites()?.is_empty(), "db rows left after delete");

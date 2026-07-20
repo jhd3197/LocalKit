@@ -3,6 +3,7 @@ pub mod docker;
 pub mod router;
 pub mod serverkit;
 pub mod site;
+pub mod snapshot;
 pub mod sync;
 pub mod terminal;
 pub mod tray;
@@ -84,8 +85,14 @@ async fn stop_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
 }
 
 #[tauri::command]
-async fn delete_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    site::delete(&state, &id).await?;
+async fn delete_site(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    delete_snapshots: Option<bool>,
+) -> Result<(), String> {
+    // Default: keep the snapshots (including the pre_delete one this takes).
+    site::delete(Some(&app), &state, &id, delete_snapshots.unwrap_or(false)).await?;
     tray::refresh(&app);
     Ok(())
 }
@@ -134,6 +141,69 @@ async fn site_wp_users(
 ) -> Result<Vec<wordpress::WpUser>, String> {
     let s = site::get(&state, &id)?;
     wordpress::users(&s.dir()).await
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots (plan 17) — point-in-time DB + wp-content copies with restore
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn list_snapshots(state: State<AppState>, site_id: String) -> Result<Vec<snapshot::Snapshot>, String> {
+    snapshot::list(&state, &site_id)
+}
+
+#[tauri::command]
+async fn create_snapshot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    site_id: String,
+    note: Option<String>,
+) -> Result<snapshot::Snapshot, String> {
+    // Standalone snapshots own their terminal event: `create` deliberately
+    // stays silent on done/error so it can nest inside push/pull/delete.
+    match snapshot::create(Some(&app), &state, &site_id, snapshot::KIND_MANUAL, note).await {
+        Ok(snap) => {
+            site::emit(
+                Some(&app),
+                &site_id,
+                "done",
+                &format!("Snapshot of {} taken", snap.site_name),
+            );
+            Ok(snap)
+        }
+        Err(e) => {
+            site::emit(Some(&app), &site_id, "error", &format!("Snapshot failed: {e}"));
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+async fn restore_snapshot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    site_id: String,
+    snapshot_id: String,
+) -> Result<(), String> {
+    let result = snapshot::restore(Some(&app), &state, &site_id, &snapshot_id).await;
+    // Restore can auto-start a stopped site, so the tray must be rebuilt
+    // either way (a failure may still have started it).
+    tray::refresh(&app);
+    match result {
+        Ok(message) => {
+            site::emit(Some(&app), &site_id, "done", &message);
+            Ok(())
+        }
+        Err(e) => {
+            site::emit(Some(&app), &site_id, "error", &format!("Restore failed: {e}"));
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+fn delete_snapshot(state: State<AppState>, site_id: String, snapshot_id: String) -> Result<(), String> {
+    snapshot::delete(&state, &site_id, &snapshot_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +498,10 @@ pub fn run() {
             wp_cli_info,
             login_site,
             site_wp_users,
+            list_snapshots,
+            create_snapshot,
+            restore_snapshot,
+            delete_snapshot,
             save_serverkit_connection,
             list_serverkit_connections,
             delete_serverkit_connection,

@@ -2,11 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::path::Path;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-use crate::{router, serverkit, site, wordpress, AppState};
+use crate::{router, serverkit, site, snapshot, wordpress, AppState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {
@@ -44,26 +43,6 @@ fn load(state: &AppState, connection_id: &str, site_id: &str) -> Result<(serverk
     let conn = db.get_connection(connection_id)?;
     let site = db.get_site(site_id)?;
     Ok((conn, site))
-}
-
-/// Bundle the site's wp-content directory as a tar.gz in memory.
-fn build_wp_content_tgz(site_dir: &Path) -> Result<Vec<u8>, String> {
-    let wp_content = site_dir.join("wp-content");
-    if !wp_content.is_dir() {
-        return Err("wp-content directory not found in the local site".into());
-    }
-    let mut buf = Vec::new();
-    {
-        let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
-        let mut builder = tar::Builder::new(enc);
-        builder
-            .append_dir_all("wp-content", &wp_content)
-            .map_err(|e| format!("failed to bundle wp-content: {e}"))?;
-        builder
-            .finish()
-            .map_err(|e| format!("failed to finalize archive: {e}"))?;
-    }
-    Ok(buf)
 }
 
 async fn run(
@@ -122,7 +101,7 @@ pub async fn push_code(
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
     emit(app, site_id, "push", "Bundling wp-content...");
-    let tgz = build_wp_content_tgz(&site.dir())?;
+    let tgz = snapshot::build_wp_content_tgz(&site.dir())?;
     let size_mb = tgz.len() as f64 / 1_048_576.0;
     emit(app, site_id, "push", &format!("Uploading wp-content ({size_mb:.1} MB)..."));
     run(app, state, connection_id, site_id, "push", "code", async move {
@@ -130,6 +109,26 @@ pub async fn push_code(
         Ok(format!("{} code pushed to remote site #{remote_site_id}", site.name))
     })
     .await
+}
+
+/// Local safety net before a sync mutates something (plan 17).
+///
+/// A failure here aborts the sync: never mutate without a net. The note
+/// records which connection/remote the operation was aimed at, so the
+/// snapshot list reads as a history of "what did I sync, and against what".
+async fn pre_sync_snapshot(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    site_id: &str,
+    kind: &str,
+    conn: &serverkit::ServerKitConnection,
+    remote_site_id: i64,
+) -> Result<(), String> {
+    let note = format!("{} (#{remote_site_id} on {})", conn.label, conn.url);
+    snapshot::create(app, state, site_id, kind, Some(note))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("pre-sync snapshot failed, nothing was synced: {e}"))
 }
 
 pub async fn push_db(
@@ -140,6 +139,7 @@ pub async fn push_db(
     remote_site_id: i64,
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
+    pre_sync_snapshot(app, state, site_id, snapshot::KIND_PRE_PUSH, &conn, remote_site_id).await?;
     emit(app, site_id, "push", "Exporting local database...");
     let dump_path = std::env::temp_dir().join(format!("localkit-dump-{}.sql", site.slug));
     wordpress::export_db(&site.dir(), &dump_path).await?;
@@ -172,6 +172,7 @@ pub async fn pull_db(
     remote_url: Option<String>,
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
+    pre_sync_snapshot(app, state, site_id, snapshot::KIND_PRE_PULL, &conn, remote_site_id).await?;
     emit(app, site_id, "pull", "Downloading remote database dump...");
     let gz = serverkit::pull_db(&conn.url, &conn.api_key, remote_site_id).await?;
 

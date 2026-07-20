@@ -119,16 +119,29 @@ fn unique_slug(state: &AppState, base: &str) -> Result<String, String> {
     Err("could not generate a unique slug".into())
 }
 
-/// Pick a free host port starting at BASE_PORT: not used by another site and
-/// not already bound on the host.
-fn free_port(state: &AppState) -> Result<u16, String> {
+/// Pick a free host port starting at BASE_PORT: not used by another site, and
+/// with neither it nor its DB port already held on the host.
+///
+/// The host check consults the OS listener table, not just a trial bind. A
+/// bind-only test is the plan-16 SO_REUSEADDR trap all over again: Docker's
+/// port publisher binds the wildcard address with SO_REUSEADDR, so binding
+/// 127.0.0.1:8081 still succeeds while a container is published on 8081 — we
+/// would hand out that port and creation would die at `compose up`, after the
+/// image pull, with a raw Docker error. Both ports matter: only the site port
+/// was ever checked, so a free site port with a taken DB port failed the same
+/// way.
+async fn free_port(state: &AppState) -> Result<u16, String> {
     let used = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.used_ports()?
     };
+    let listening = router::listening_ports().await;
+    let free = |port: u16| -> bool {
+        !listening.contains(&port) && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    };
     let mut port = BASE_PORT;
     loop {
-        if !used.contains(&port) && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if !used.contains(&port) && free(port) && free(port + DB_PORT_OFFSET) {
             return Ok(port);
         }
         port += 1;
@@ -269,7 +282,7 @@ pub async fn create(
     }
 
     let slug = unique_slug(state, &slugify(&name))?;
-    let port = free_port(state)?;
+    let port = free_port(state).await?;
     let dir = site_dir(&state.data_dir, &slug);
 
     let site = Site {
@@ -423,13 +436,50 @@ pub async fn stop(state: &AppState, id: &str) -> Result<Site, String> {
     get(state, id)
 }
 
-pub async fn delete(state: &AppState, id: &str) -> Result<(), String> {
+/// Delete a site. Unless `delete_snapshots` is set, a `pre_delete` snapshot is
+/// taken first and the site's snapshot directory survives the deletion — the
+/// only copy of the data once the containers, volumes and files are gone
+/// (plan 17; also the groundwork for a future "restore deleted site").
+///
+/// The snapshot is best effort: a site whose Docker stack is broken must still
+/// be deletable, so a snapshot failure is reported through the event stream
+/// rather than blocking the delete.
+pub async fn delete(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: &str,
+    delete_snapshots: bool,
+) -> Result<(), String> {
     let site = get(state, id)?;
     let dir = site.dir();
+
+    if !delete_snapshots && dir.exists() {
+        emit(app, id, "snapshot", "Taking a snapshot before deleting...");
+        if let Err(e) = crate::snapshot::create(
+            app,
+            state,
+            id,
+            crate::snapshot::KIND_PRE_DELETE,
+            Some(format!("before deleting {}", site.name)),
+        )
+        .await
+        {
+            emit(
+                app,
+                id,
+                "snapshot",
+                &format!("Could not snapshot before deleting ({e}) — deleting anyway"),
+            );
+        }
+    }
+
     if dir.exists() {
         // Best effort: even if Docker is down we still remove local state.
         let _ = docker::compose_down(&dir, true).await;
         std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to remove site directory: {e}"))?;
+    }
+    if delete_snapshots {
+        let _ = crate::snapshot::delete_all(&state.data_dir, id);
     }
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
