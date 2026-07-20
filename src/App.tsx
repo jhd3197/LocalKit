@@ -3,8 +3,11 @@ import { onSiteEvent } from "./lib/ipc";
 import { useNav } from "./stores/nav";
 import { useRouter } from "./stores/router";
 import { useSites } from "./stores/sites";
+import { useShortcuts } from "./hooks/useShortcuts";
 import Sidebar from "./components/Sidebar";
 import Toasts from "./components/Toasts";
+import CommandPalette from "./components/CommandPalette";
+import NewSiteDialog from "./components/NewSiteDialog";
 import Dashboard from "./pages/Dashboard";
 import SiteDetail from "./pages/SiteDetail";
 import TerminalPage from "./pages/Terminal";
@@ -13,7 +16,10 @@ import Settings from "./pages/Settings";
 export default function App() {
   const page = useNav((s) => s.page);
   const settingsOpen = useNav((s) => s.settingsOpen);
+  const newSiteOpen = useNav((s) => s.newSiteOpen);
+  const setNewSiteOpen = useNav((s) => s.setNewSiteOpen);
   const handleEvent = useSites((s) => s.handleEvent);
+  useShortcuts();
 
   useEffect(() => {
     void useSites.getState().refresh();
@@ -34,6 +40,8 @@ export default function App() {
       </main>
 
       {settingsOpen && <Settings />}
+      {newSiteOpen && <NewSiteDialog onClose={() => setNewSiteOpen(false)} />}
+      <CommandPalette />
 
       <Toasts />
     </div>

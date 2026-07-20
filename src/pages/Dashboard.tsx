@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { siteUrl } from "../lib/domains";
 import { useNav } from "../stores/nav";
@@ -7,14 +6,13 @@ import { useRouter } from "../stores/router";
 import { useSites } from "../stores/sites";
 import type { SiteWithStatus } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
-import NewSiteDialog from "../components/NewSiteDialog";
 import { GridIcon, ListIcon, PlusIcon } from "../components/icons";
 
 export default function Dashboard() {
   const sites = useSites((s) => s.sites);
   const loading = useSites((s) => s.loading);
   const [siteView, setSiteView] = useSiteView();
-  const [showDialog, setShowDialog] = useState(false);
+  const setNewSiteOpen = useNav((s) => s.setNewSiteOpen);
 
   return (
     <div className="p-6">
@@ -43,7 +41,7 @@ export default function Dashboard() {
           ))}
         </div>
         <button
-          onClick={() => setShowDialog(true)}
+          onClick={() => setNewSiteOpen(true)}
           className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-violet-500"
         >
           <PlusIcon className="h-4 w-4" />
@@ -56,7 +54,7 @@ export default function Dashboard() {
           <p className="text-zinc-400">No sites yet.</p>
           <p className="mt-1 text-sm text-zinc-600">Create your first local WordPress site in one click.</p>
           <button
-            onClick={() => setShowDialog(true)}
+            onClick={() => setNewSiteOpen(true)}
             className="mt-4 flex items-center gap-1.5 rounded-md bg-violet-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-violet-500"
           >
             <PlusIcon className="h-4 w-4" />
@@ -68,8 +66,6 @@ export default function Dashboard() {
       ) : (
         <ListView sites={sites} />
       )}
-
-      {showDialog && <NewSiteDialog onClose={() => setShowDialog(false)} />}
     </div>
   );
 }
