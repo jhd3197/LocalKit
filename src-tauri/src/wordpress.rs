@@ -273,6 +273,29 @@ pub async fn install(
     Err(format!("WordPress install failed: {last_err}"))
 }
 
+/// Wait until wp-cli can see the site's `wp-config.php`.
+///
+/// `site::wait_for_port` is not a sufficient readiness signal on its own:
+/// Docker publishes the host port as soon as the container is *created*, so a
+/// TCP connect succeeds while the wordpress image's entrypoint is still
+/// unpacking core and writing wp-config.php. `install` happens to survive this
+/// because it retries for a minute; anything else that shells into wp-cli
+/// straight after `compose up` has to wait explicitly, or it fails with a bare
+/// "'wp-config.php' not found".
+pub async fn wait_for_config(dir: &Path, attempts: u32) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match wp(dir, &["config", "path"]).await {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e,
+        }
+        if attempt < attempts {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
+    Err(format!("WordPress did not finish initializing: {last}"))
+}
+
 /// Read-only info for the UI: core version + plugin list.
 pub async fn info(dir: &Path) -> Result<WpInfo, String> {
     let core_version = wp(dir, &["core", "version"]).await?.trim().to_string();

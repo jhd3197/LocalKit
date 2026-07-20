@@ -1,13 +1,19 @@
 //! M4 end-to-end smoke: real local Docker site <-> mock serverkit-localkit ext.
 //! Prereq: the `smoke` example's site exists (`cargo run --example smoke -- create`).
 //! Usage: cargo run --example m4_smoke
+//!
+//! Covers push code / push DB / pull DB (M4) and, since plan 18, importing a
+//! remote site as a brand-new local site — which provisions real containers
+//! and tears them down again at the end.
 
 use std::sync::Mutex;
 
-use localkit_lib::{db::Db, docker, serverkit::ServerKitConnection, sync, AppState};
+use localkit_lib::{db::Db, docker, serverkit::ServerKitConnection, site, sync, AppState};
 
 const MOCK_URL: &str = "http://127.0.0.1:9872";
 const REMOTE_URL: &str = "https://blog.example.com";
+/// Canary file the mock extension puts in the wp-content it serves.
+const CANARY: &str = "wp-content/themes/remote-theme/style.css";
 
 fn make_state() -> AppState {
     let data_dir = std::env::temp_dir().join("localkit-smoke");
@@ -85,5 +91,98 @@ async fn main() {
     }
     assert!(history.iter().filter(|h| h.status == "success").count() >= 3);
 
+    // 6) Import remote site #1 as a brand-new local site (plan 18).
+    import_smoke(&state).await;
+
     println!("M4 SMOKE OK");
+}
+
+/// Plan 18: clone remote site #1 down as a new local site, assert the remote
+/// wp-content and database actually landed, then delete it again.
+///
+/// The imported site is always removed at the end (including on assertion
+/// failure paths that run after creation) so repeat runs start clean — a
+/// leftover would collide on the slug and mask a real regression.
+async fn import_smoke(state: &AppState) {
+    // A stale import from a previous run would trip the "already imported"
+    // guard, so clear it first.
+    let stale: Vec<String> = {
+        let db = state.db.lock().unwrap();
+        db.sites_from_remote("mock-conn", 1)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    };
+    for id in stale {
+        println!("removing stale imported site {id}");
+        site::delete(None, state, &id, true).await.expect("cleanup stale import");
+    }
+
+    // Multisite must be refused *before* anything is provisioned.
+    let before = { state.db.lock().unwrap().list_sites().unwrap().len() };
+    let err = sync::import_site(None, state, "mock-conn", 3, None)
+        .await
+        .expect_err("importing a multisite must fail");
+    assert!(err.contains("multisite"), "unexpected error: {err}");
+    let after = { state.db.lock().unwrap().list_sites().unwrap().len() };
+    assert_eq!(before, after, "a refused import left a site row behind");
+    println!("IMPORT REFUSES MULTISITE OK");
+
+    let imported = sync::import_site(None, state, "mock-conn", 1, Some("Imported Blog".into()))
+        .await
+        .expect("import_site failed");
+    println!("imported: {} on port {}", imported.slug, imported.port);
+
+    let result = verify_import(state, &imported).await;
+
+    // Always tear the imported site down, then report.
+    site::delete(None, state, &imported.id, true)
+        .await
+        .expect("failed to delete the imported site");
+    println!("imported site deleted");
+    result.expect("import verification failed");
+    println!("IMPORT OK");
+}
+
+async fn verify_import(state: &AppState, imported: &site::Site) -> Result<(), String> {
+    // Origin recorded, so a future pull knows which remote to default to.
+    if imported.connection_id.as_deref() != Some("mock-conn") || imported.remote_site_id != Some(1) {
+        return Err(format!(
+            "origin not recorded: {:?} / {:?}",
+            imported.connection_id, imported.remote_site_id
+        ));
+    }
+
+    // The remote wp-content actually landed on disk.
+    let canary = imported.dir().join(CANARY);
+    let body = std::fs::read_to_string(&canary)
+        .map_err(|e| format!("remote wp-content missing at {}: {e}", canary.display()))?;
+    if !body.contains("pulled from the remote site") {
+        return Err(format!("canary file has unexpected content: {body}"));
+    }
+    println!("remote wp-content extracted OK");
+
+    // The one-click login plugin survived the archive landing on top of it.
+    if !imported.dir().join("wp-content/mu-plugins/localkit-login.php").exists() {
+        return Err("the login MU plugin did not survive the import".into());
+    }
+
+    // The imported database is live and rewritten to the local URL.
+    let siteurl = docker::compose_run(&imported.dir(), "wpcli", &["wp", "option", "get", "siteurl"])
+        .await
+        .map_err(|e| format!("wp option get siteurl failed: {e}"))?;
+    let siteurl = siteurl.trim();
+    let expected = format!("http://localhost:{}", imported.port);
+    if siteurl != expected {
+        return Err(format!("siteurl is {siteurl}, expected {expected}"));
+    }
+    println!("imported siteurl: {siteurl}");
+
+    // The import is recorded in the new site's sync history.
+    let history = sync::history(state, &imported.id)?;
+    if !history.iter().any(|h| h.kind == "import" && h.status == "success") {
+        return Err("no successful import row in sync history".into());
+    }
+    Ok(())
 }

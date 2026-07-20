@@ -505,6 +505,10 @@ async fn do_import(
 
     emit(app, id, "waiting", "Waiting for WordPress to come online...");
     site::wait_for_port(site.port, 180).await?;
+    // The port answering is not the same as WordPress being ready — see
+    // `wait_for_config`. Without this the first wp-cli call below dies with
+    // "'wp-config.php' not found".
+    wordpress::wait_for_config(&dir, 24).await?;
 
     emit(app, id, "install", "Downloading remote database...");
     let gz = serverkit::pull_db(&conn.url, &conn.api_key, remote.id).await?;

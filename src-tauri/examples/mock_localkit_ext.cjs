@@ -9,8 +9,48 @@ const zlib = require("zlib");
 const GOOD_KEY = "good-key";
 const LOCAL_URL = "http://localhost:8081";
 const REMOTE_URL = "https://blog.example.com";
+// Capabilities of the real extension (plan 18); LocalKit gates Import on this.
+const FEATURES = ["sites", "push-code", "push-db", "pull-db", "pull-code"];
+// Canary file the import E2E looks for after extracting the remote wp-content.
+const CANARY_PATH = "wp-content/themes/remote-theme/style.css";
+const CANARY_BODY = "/* pulled from the remote site */\n";
 let storedSql = null;
 let receivedTgz = null;
+
+// --- minimal tar writer ----------------------------------------------------
+// Node ships zlib but no tar, and the archive shape is the contract under
+// test, so the 512-byte ustar blocks are written out by hand.
+function tarEntry(name, body) {
+  const header = Buffer.alloc(512);
+  const write = (text, offset, len) => header.write(text.slice(0, len), offset, "ascii");
+  const octal = (n, offset, len) => write(n.toString(8).padStart(len - 1, "0") + "\0", offset, len);
+  write(name, 0, 100);
+  octal(0o644, 100, 8); // mode
+  octal(0, 108, 8); // uid
+  octal(0, 116, 8); // gid
+  octal(body.length, 124, 12);
+  octal(0, 136, 12); // mtime
+  header.write("        ", 148, 8, "ascii"); // checksum placeholder (spaces)
+  write("0", 156, 1); // typeflag: regular file
+  write("ustar\0", 257, 6);
+  write("00", 263, 2);
+  let sum = 0;
+  for (const b of header) sum += b;
+  // Checksum is the odd one out: 6 octal digits then NUL then space, not the
+  // (len-1)-digits-then-NUL every other numeric field uses.
+  header.write(sum.toString(8).padStart(6, "0") + "\0 ", 148, 8, "ascii");
+  const pad = Buffer.alloc((512 - (body.length % 512)) % 512);
+  return Buffer.concat([header, body, pad]);
+}
+
+function remoteWpContentTgz() {
+  const tar = Buffer.concat([
+    tarEntry(CANARY_PATH, Buffer.from(CANARY_BODY)),
+    tarEntry("wp-content/plugins/remote-plugin/remote-plugin.php", Buffer.from("<?php // remote\n")),
+    Buffer.alloc(1024), // end of archive
+  ]);
+  return zlib.gzipSync(tar);
+}
 
 function parseMultipart(body, boundary) {
   // Minimal parser (latin1 = byte-preserving): { fields: {name: value}, file: {filename, data} }
@@ -43,13 +83,15 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://x");
 
   if (url.pathname === "/api/v1/localkit/pair") {
-    return json(200, { status: "ok", service: "serverkit-localkit", panel: "ServerKit", version: "1.7.0", user: "admin", canonical_domain: "panel.example.com", canonical_origin: "https://panel.example.com" });
+    return json(200, { status: "ok", service: "serverkit-localkit", panel: "ServerKit", version: "1.7.0", user: "admin", canonical_domain: "panel.example.com", canonical_origin: "https://panel.example.com", features: FEATURES });
   }
 
   if (url.pathname === "/api/v1/localkit/sites" && req.method === "GET") {
     return json(200, { sites: [
-      { id: 1, name: "client-blog", url: REMOTE_URL, status: "running", wp_version: "6.7.2", environment_count: 0 },
-      { id: 2, name: "woo-store", url: null, status: "stopped", wp_version: "6.6.4", environment_count: 1 },
+      { id: 1, name: "client-blog", url: REMOTE_URL, site_url: REMOTE_URL, status: "running", wp_version: "6.7.2", php_version: "8.3", multisite: false, environment_count: 0 },
+      { id: 2, name: "woo-store", url: null, site_url: null, status: "stopped", wp_version: "6.6.4", php_version: "8.1", multisite: false, environment_count: 1 },
+      // Refused by the import flow — one compose project cannot be a network.
+      { id: 3, name: "network-hq", url: "https://network.example.com", status: "running", wp_version: "6.7.2", php_version: "8.2", multisite: true, environment_count: 0 },
     ]});
   }
 
@@ -88,6 +130,14 @@ const server = http.createServer((req, res) => {
       storedSql = file.data.toString();
       json(200, { success: true, message: "Database imported", remote_url: REMOTE_URL, search_replace: true });
     });
+    return;
+  }
+
+  if (url.pathname === "/api/v1/localkit/pull/code" && req.method === "GET") {
+    if (!url.searchParams.get("site_id")) return json(400, { error: "site_id is required" });
+    const gz = remoteWpContentTgz();
+    res.writeHead(200, { "Content-Type": "application/gzip" });
+    res.end(gz);
     return;
   }
 
