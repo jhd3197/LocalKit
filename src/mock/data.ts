@@ -40,6 +40,8 @@ export const sites: MockSite[] = [
     admin_pass: "cr0iss4nt-velvet-42",
     created_at: "2026-07-02T09:14:00Z",
     db_password: "m4ri4-pix3l-9917",
+    connection_id: null,
+    remote_site_id: null,
   },
   {
     id: "site-acme-corporate",
@@ -55,6 +57,10 @@ export const sites: MockSite[] = [
     admin_pass: "acme-roadrunner-88",
     created_at: "2026-06-18T15:40:00Z",
     db_password: "m4ri4-acm3-5542",
+    // Imported from the Production connection (plan 18) — drives the link
+    // badge on the dashboard.
+    connection_id: "conn-prod",
+    remote_site_id: 12,
   },
   {
     id: "site-hiking-blog",
@@ -70,6 +76,8 @@ export const sites: MockSite[] = [
     admin_pass: "summit-trail-2026",
     created_at: "2026-05-30T11:02:00Z",
     db_password: "m4ri4-h1k3-3308",
+    connection_id: null,
+    remote_site_id: null,
   },
   {
     id: "site-client-demo",
@@ -85,6 +93,8 @@ export const sites: MockSite[] = [
     admin_pass: "d3mo-spr1ng-7741",
     created_at: "2026-07-19T01:58:00Z",
     db_password: "m4ri4-d3m0-1120",
+    connection_id: null,
+    remote_site_id: null,
   },
 ];
 
@@ -178,6 +188,8 @@ export const remoteSites: Record<string, RemoteWpSite[]> = {
       url: "https://acme-corporate.example",
       status: "running",
       wp_version: "6.5",
+      php_version: "8.1",
+      multisite: false,
       environment_count: 2,
     },
     {
@@ -186,6 +198,8 @@ export const remoteSites: Record<string, RemoteWpSite[]> = {
       url: "https://pixelbakery.example",
       status: "running",
       wp_version: "6.7",
+      php_version: "8.3",
+      multisite: false,
       environment_count: 3,
     },
     {
@@ -194,7 +208,31 @@ export const remoteSites: Record<string, RemoteWpSite[]> = {
       url: null,
       status: "stopped",
       wp_version: "6.6",
+      php_version: "8.2",
+      multisite: false,
       environment_count: 1,
+    },
+    // Exercises the two Import-blocked states: a multisite (never importable)
+    // and a version pair with no exact local image (importable, with a warning).
+    {
+      id: 44,
+      name: "agency-network",
+      url: "https://network.agency.example",
+      status: "running",
+      wp_version: "6.7",
+      php_version: "8.2",
+      multisite: true,
+      environment_count: 0,
+    },
+    {
+      id: 51,
+      name: "legacy-shop",
+      url: "https://legacy-shop.example",
+      status: "running",
+      wp_version: "6.2",
+      php_version: "7.4",
+      multisite: false,
+      environment_count: 0,
     },
   ],
 };

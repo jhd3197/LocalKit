@@ -9,6 +9,7 @@ import Toasts from "./components/Toasts";
 import CommandPalette from "./components/CommandPalette";
 import KeyboardShortcutsDialog from "./components/KeyboardShortcutsDialog";
 import NewSiteDialog from "./components/NewSiteDialog";
+import ImportSiteDialog from "./components/ImportSiteDialog";
 import Dashboard from "./pages/Dashboard";
 import SiteDetail from "./pages/SiteDetail";
 import TerminalPage from "./pages/Terminal";
@@ -42,6 +43,9 @@ export default function App() {
 
       {settingsOpen && <Settings />}
       {newSiteOpen && <NewSiteDialog onClose={() => setNewSiteOpen(false)} />}
+      {/* Opened from Settings → ServerKit, but rendered here so the import
+          keeps running (and the dialog keeps reporting) if Settings closes. */}
+      <ImportSiteDialog />
       <CommandPalette />
       <KeyboardShortcutsDialog />
 

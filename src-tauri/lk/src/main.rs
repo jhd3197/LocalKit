@@ -101,6 +101,22 @@ enum Cmd {
     #[command(subcommand)]
     Snapshot(SnapshotCmd),
 
+    /// Clone a site from a ServerKit server down as a NEW local site.
+    /// Downloads its wp-content and database, rewrites URLs to the local one,
+    /// and leaves the site running. Prints the new site's URL on stdout.
+    Import {
+        /// ServerKit connection (exact id, or case-insensitive label)
+        connection: String,
+        /// Remote site (numeric id from the server, or its case-insensitive name)
+        site: String,
+        /// Name for the new local site (defaults to the remote site's name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Output the created site as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show site details, including DB credentials
     Info {
         site: String,
@@ -254,6 +270,12 @@ async fn run(cli: &Cli) -> Result<(), String> {
             delete_snapshots,
         } => cmd_delete(&state, q, *yes, *delete_snapshots).await,
         Cmd::Snapshot(sub) => cmd_snapshot(&state, sub).await,
+        Cmd::Import {
+            connection,
+            site: remote,
+            name,
+            json,
+        } => cmd_import(&state, connection, remote, name.clone(), *json).await,
         Cmd::Info { site: q, json } => cmd_info(&state, q, *json),
         Cmd::Logs { site: q, tail } => {
             let s = resolve(&state, q)?;
@@ -522,6 +544,102 @@ async fn cmd_snapshot(state: &AppState, cmd: &SnapshotCmd) -> Result<(), String>
             eprintln!("{} snapshot {id} deleted", ok("✓"));
             Ok(())
         }
+    }
+}
+
+/// `lk import` — thin wrapper over `sync::import_site`; all orchestration
+/// lives in the library. Progress reaches the terminal on its own: with no
+/// Tauri app handle `site::emit` prints each stage to stderr.
+async fn cmd_import(
+    state: &AppState,
+    connection: &str,
+    remote: &str,
+    name: Option<String>,
+    json: bool,
+) -> Result<(), String> {
+    let conn = resolve_connection(state, connection)?;
+    let remote_id = resolve_remote_site(&conn, remote).await?;
+
+    let site = localkit_lib::sync::import_site(None, state, &conn.id, remote_id, name).await?;
+    if json {
+        print_json(&site)?;
+    } else {
+        // stdout carries the URL (scriptable); chrome stays on stderr.
+        println!("{}", site_url(&site));
+    }
+    eprintln!(
+        "{} {} imported from {} and running",
+        ok("✓"),
+        bold(&site.name),
+        conn.label
+    );
+    eprintln!(
+        "{} log in with `lk login {}` — the imported database keeps the remote's accounts",
+        info("→"),
+        site.slug
+    );
+    Ok(())
+}
+
+/// Exact connection id wins, then case-insensitive label — the same shape as
+/// site resolution, so the two feel identical from the terminal.
+fn resolve_connection(
+    state: &AppState,
+    query: &str,
+) -> Result<localkit_lib::serverkit::ServerKitConnection, String> {
+    let conns = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.list_connections()?
+    };
+    if conns.is_empty() {
+        return Err(
+            "no ServerKit connections yet — add one in the LocalKit app under Settings → ServerKit."
+                .into(),
+        );
+    }
+    if let Some(c) = conns.iter().find(|c| c.id == query) {
+        return Ok(c.clone());
+    }
+    let q = query.to_lowercase();
+    let hits: Vec<_> = conns.iter().filter(|c| c.label.to_lowercase() == q).collect();
+    match hits.len() {
+        1 => Ok(hits[0].clone()),
+        0 => Err(format!(
+            "no ServerKit connection named `{query}`. available: {}",
+            conns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>().join(", ")
+        )),
+        _ => Err(format!(
+            "`{query}` matches more than one connection. pass the exact id."
+        )),
+    }
+}
+
+/// A remote site is addressed by its numeric server id, or by name — in which
+/// case the server is listed to look it up.
+async fn resolve_remote_site(
+    conn: &localkit_lib::serverkit::ServerKitConnection,
+    query: &str,
+) -> Result<i64, String> {
+    if let Ok(id) = query.parse::<i64>() {
+        return Ok(id);
+    }
+    let sites = localkit_lib::serverkit::list_wp_sites(&conn.url, &conn.api_key).await?;
+    let q = query.to_lowercase();
+    let hits: Vec<_> = sites.iter().filter(|s| s.name.to_lowercase() == q).collect();
+    match hits.len() {
+        1 => Ok(hits[0].id),
+        0 => Err(format!(
+            "no site named `{query}` on {}. available: {}",
+            conn.label,
+            sites
+                .iter()
+                .map(|s| format!("{} (#{})", s.name, s.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        _ => Err(format!(
+            "`{query}` matches more than one remote site. pass the numeric id."
+        )),
     }
 }
 

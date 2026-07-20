@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use uuid::Uuid;
 
 use crate::{docker, router, serverkit, site, snapshot, wordpress, AppState};
@@ -21,17 +21,11 @@ pub struct SyncRecord {
     pub created_at: String,
 }
 
+/// Sync progress goes through the same emitter as the site lifecycle, so that
+/// with no Tauri app handle (the `lk` CLI, examples) stages print to stderr
+/// instead of vanishing — a multi-minute import must not look like a hang.
 fn emit(app: Option<&AppHandle>, id: &str, stage: &str, message: &str) {
-    if let Some(app) = app {
-        let _ = app.emit(
-            "site-event",
-            site::SiteEvent {
-                id: id.to_string(),
-                stage: stage.to_string(),
-                message: message.to_string(),
-            },
-        );
-    }
+    site::emit(app, id, stage, message);
 }
 
 fn record(state: &AppState, rec: &SyncRecord) {
@@ -534,8 +528,8 @@ async fn do_import(
     // Permalinks are stored as rules tied to the old host; regenerate them or
     // every imported page 404s. Best effort — a pretty-permalink failure must
     // not throw away a successful import.
-    let _ = docker::compose_run(&dir, "wpcli", &["wp", "rewrite", "flush"]).await;
-    let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
+    optional(docker::compose_run(&dir, "wpcli", &["wp", "rewrite", "flush"])).await;
+    optional(docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"])).await;
 
     // The local admin_user comes from the imported users table — the stock
     // `admin` this site was reserved with does not exist in the remote data.
@@ -556,15 +550,28 @@ async fn do_import(
     ))
 }
 
+/// How long an optional post-import wp-cli call may take before it is given up
+/// on. These run *after* the site's data is already in place, so hanging on one
+/// would throw away a completed import — and `docker compose run` can hang
+/// indefinitely if the daemon leaves a container in a bad state (observed with
+/// a container Docker reported as "Up" that had no processes left inside).
+const OPTIONAL_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Run a best-effort step, discarding both failures and hangs.
+async fn optional<T>(op: impl std::future::Future<Output = Result<T, String>>) -> Option<T> {
+    tokio::time::timeout(OPTIONAL_STEP_TIMEOUT, op).await.ok()?.ok()
+}
+
 /// First administrator in the freshly imported database, for `admin_user`.
+/// Optional: falling back to the reserved `admin` is better than failing an
+/// import whose data already landed.
 async fn imported_admin(dir: &Path) -> Option<String> {
-    let out = docker::compose_run(
+    let out = optional(docker::compose_run(
         dir,
         "wpcli",
         &["wp", "user", "list", "--role=administrator", "--field=user_login"],
-    )
-    .await
-    .ok()?;
+    ))
+    .await?;
     out.lines()
         .map(str::trim)
         .find(|l| !l.is_empty())

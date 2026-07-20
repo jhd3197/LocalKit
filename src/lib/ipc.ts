@@ -57,6 +57,8 @@ export const ipc = {
     invoke<void>("push_site_db", { connectionId, siteId, remoteSiteId }),
   pullSiteDb: (connectionId: string, siteId: string, remoteSiteId: number, remoteUrl: string | null) =>
     invoke<void>("pull_site_db", { connectionId, siteId, remoteSiteId, remoteUrl }),
+  importRemoteSite: (connectionId: string, remoteSiteId: number, name?: string) =>
+    invoke<Site>("import_remote_site", { connectionId, remoteSiteId, name }),
   listSyncHistory: (siteId: string) => invoke<SyncRecord[]>("list_sync_history", { siteId }),
   routerStatus: () => invoke<RouterStatus>("router_status"),
   setDomainsEnabled: (enabled: boolean) =>

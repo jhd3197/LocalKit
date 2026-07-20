@@ -1,18 +1,27 @@
+import { useEffect } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { siteUrl } from "../lib/domains";
 import { useNav } from "../stores/nav";
 import { useSiteView } from "../stores/settings";
 import { useRouter } from "../stores/router";
+import { useServerKit } from "../stores/serverkit";
 import { useSites } from "../stores/sites";
 import type { SiteWithStatus } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
-import { GridIcon, ListIcon, PlusIcon } from "../components/icons";
+import { GridIcon, LinkIcon, ListIcon, PlusIcon } from "../components/icons";
 
 export default function Dashboard() {
   const sites = useSites((s) => s.sites);
   const loading = useSites((s) => s.loading);
   const [siteView, setSiteView] = useSiteView();
   const setNewSiteOpen = useNav((s) => s.setNewSiteOpen);
+  const refreshConnections = useServerKit((s) => s.refresh);
+
+  // Imported sites name their origin connection, so the labels have to be
+  // loaded even if the user never opens Settings → ServerKit.
+  useEffect(() => {
+    void refreshConnections();
+  }, [refreshConnections]);
 
   return (
     <div className="p-6">
@@ -97,6 +106,27 @@ function useSiteActions(site: SiteWithStatus) {
 
 const ghostBtn =
   "rounded-md border border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 disabled:opacity-50";
+
+/**
+ * Subtle marker on sites that came from a ServerKit server (plan 18). Renders
+ * nothing for hand-made sites, and falls back to the raw connection id if the
+ * connection has since been deleted — a site's origin is a fact about the
+ * site, not a live lookup.
+ */
+function ImportedBadge({ site }: { site: SiteWithStatus }) {
+  const connections = useServerKit((s) => s.connections);
+  if (!site.connection_id) return null;
+  const label = connections.find((c) => c.id === site.connection_id)?.label ?? site.connection_id;
+  return (
+    <span
+      title={`Imported from ${label} (remote site #${site.remote_site_id})`}
+      className="inline-flex shrink-0 items-center gap-1 text-xs text-zinc-600"
+    >
+      <LinkIcon className="h-3.5 w-3.5" />
+      <span className="max-w-[9rem] truncate">{label}</span>
+    </span>
+  );
+}
 const dangerBtn =
   "rounded-md border border-red-900 px-2.5 py-1 text-xs font-medium text-red-400 hover:border-red-700 disabled:opacity-50";
 
@@ -125,9 +155,12 @@ function GridCard({ site }: { site: SiteWithStatus }) {
         <StatusBadge status={site.live_status} />
       </div>
       <p className="mt-1 font-mono text-xs text-zinc-500">{a.url}</p>
-      <p className="mt-1 text-xs text-zinc-600">
-        WordPress {site.wp_version} · PHP {site.php_version}
-      </p>
+      <div className="mt-1 flex items-center gap-2 text-xs text-zinc-600">
+        <span>
+          WordPress {site.wp_version} · PHP {site.php_version}
+        </span>
+        <ImportedBadge site={site} />
+      </div>
 
       <div className="mt-3.5 flex flex-wrap gap-1.5">
         {running && (
@@ -182,12 +215,15 @@ function ListRow({ site }: { site: SiteWithStatus }) {
   return (
     <tr className="border-b border-zinc-800/60 transition-colors last:border-0 hover:bg-zinc-900">
       <td className="px-4 py-2.5">
-        <button
-          onClick={a.details}
-          className="font-medium tracking-tight text-white hover:text-violet-400"
-        >
-          {site.name}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={a.details}
+            className="font-medium tracking-tight text-white hover:text-violet-400"
+          >
+            {site.name}
+          </button>
+          <ImportedBadge site={site} />
+        </div>
       </td>
       <td className="px-4 py-2.5 font-mono text-xs text-zinc-500">{a.url}</td>
       <td className="px-4 py-2.5 text-xs text-zinc-500">

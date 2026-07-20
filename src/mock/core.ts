@@ -144,6 +144,8 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         admin_user: "admin",
         admin_pass: "generated-demo-pass",
         created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
       };
       data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-n3w-0000" });
       // Flip to running once the fake install finishes.
@@ -301,6 +303,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         staging: false,
         api_key_valid: true,
         localkit_extension: true,
+        features: ["sites", "push-code", "push-db", "pull-db", "pull-code"],
       };
       return info;
     }
@@ -316,10 +319,86 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         url: `https://${slugify(String(a.name))}.example`,
         status: "running",
         wp_version: "6.7",
+        php_version: "8.3",
+        multisite: false,
         environment_count: 1,
       };
       list.push(site);
       data.remoteSites[String(a.connectionId)] = list;
+      return site;
+    }
+
+    case "import_remote_site": {
+      const connectionId = String(a.connectionId);
+      const remoteId = Number(a.remoteSiteId);
+      const remote = (data.remoteSites[connectionId] ?? []).find((s) => s.id === remoteId);
+      if (!remote) throw `Remote site #${remoteId} was not found.`;
+      if (remote.multisite) {
+        throw `"${remote.name}" is a WordPress multisite install, which LocalKit cannot import.`;
+      }
+      if (data.sites.some((s) => s.connection_id === connectionId && s.remote_site_id === remoteId)) {
+        throw `"${remote.name}" was already imported. Pull its database into that site instead.`;
+      }
+
+      const name = String(a.name ?? "").trim() || remote.name;
+      const slug = slugify(name);
+      const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
+      const id = `site-${slug}`;
+      const conn = data.connections.find((c) => c.id === connectionId);
+      // Same stages the Rust import emits, so the progress toast reads the same.
+      const stages: Array<[string, string]> = [
+        ["files", "Writing project files…"],
+        ["pulling", "Downloading WordPress images (first run can take a few minutes)…"],
+        ["code", "Downloading remote wp-content…"],
+        ["code", "Extracting wp-content (48.2 MB)…"],
+        ["containers", "Starting Docker containers…"],
+        ["waiting", "Waiting for WordPress to come online…"],
+        ["install", "Downloading remote database…"],
+        ["install", "Importing remote database…"],
+        ["install", "Rewriting URLs remote -> local…"],
+        ["done", `${name} imported from ${conn?.label ?? "server"} — now running at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        const s = data.sites.find((x) => x.id === id);
+        if (s) s.status = s.live_status = "running";
+      })();
+
+      const site: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: data.appInfo.wp_versions.includes(remote.wp_version ?? "")
+          ? String(remote.wp_version)
+          : data.appInfo.wp_versions[0],
+        php_version: data.appInfo.php_versions.includes(remote.php_version ?? "")
+          ? String(remote.php_version)
+          : data.appInfo.php_versions[0],
+        status: "creating",
+        // The imported database keeps the remote's accounts, and no password
+        // of ours — mirrors what the backend records.
+        admin_user: "admin",
+        admin_pass: "",
+        created_at: new Date().toISOString(),
+        connection_id: connectionId,
+        remote_site_id: remoteId,
+      };
+      data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-imp0rt-0001" });
+      (data.syncHistory[id] ??= []).unshift({
+        id: `sync-${Date.now()}`,
+        site_id: id,
+        connection_id: connectionId,
+        direction: "pull",
+        kind: "import",
+        status: "success",
+        message: `${name} imported from ${conn?.label ?? "server"} via mock.`,
+        created_at: new Date().toISOString(),
+      });
       return site;
     }
 

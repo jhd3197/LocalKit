@@ -10,6 +10,9 @@ export interface Site {
   admin_user: string;
   admin_pass: string;
   created_at: string;
+  /** Plan 18 — set together on sites imported from a ServerKit server. */
+  connection_id: string | null;
+  remote_site_id: number | null;
 }
 
 export interface SiteWithStatus extends Site {
@@ -79,7 +82,12 @@ export interface ServerKitInfo {
   staging: boolean;
   api_key_valid: boolean;
   localkit_extension: boolean;
+  /** Extension capabilities (plan 18). Absent name = unsupported, not unknown. */
+  features: string[];
 }
+
+/** Capability names reported by the extension's `GET /pair`. */
+export const FEATURE_PULL_CODE = "pull-code";
 
 export interface RemoteWpSite {
   id: number;
@@ -87,6 +95,9 @@ export interface RemoteWpSite {
   url: string | null;
   status: string;
   wp_version: string | null;
+  php_version: string | null;
+  /** Multisite installs cannot be imported — one compose project, one site. */
+  multisite: boolean;
   environment_count: number;
 }
 

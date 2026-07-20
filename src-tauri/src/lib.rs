@@ -322,6 +322,21 @@ fn list_sync_history(state: State<AppState>, site_id: String) -> Result<Vec<sync
     sync::history(&state, &site_id)
 }
 
+/// Clone a remote ServerKit site down as a brand-new local site (plan 18).
+#[tauri::command]
+async fn import_remote_site(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+    remote_site_id: i64,
+    name: Option<String>,
+) -> Result<Site, String> {
+    let site = sync::import_site(Some(&app), &state, &connection_id, remote_site_id, name).await?;
+    // A new running site has to reach the tray menu like any other.
+    tray::refresh(&app);
+    Ok(site)
+}
+
 // ---------------------------------------------------------------------------
 // Local domains (M6) — shared Caddy router on ports 80/443 (configurable
 // since plan 16, for coexistence with LocalWP & other port-80 owners)
@@ -511,6 +526,7 @@ pub fn run() {
             push_site_code,
             push_site_db,
             pull_site_db,
+            import_remote_site,
             list_sync_history,
             router_status,
             set_domains_enabled,
