@@ -52,6 +52,8 @@ export const ipc = {
   routerStatus: () => invoke<RouterStatus>("router_status"),
   setDomainsEnabled: (enabled: boolean) =>
     invoke<RouterStatus>("set_domains_enabled", { enabled }),
+  setRouterPorts: (http: number, https: number) =>
+    invoke<RouterStatus>("set_router_ports", { http, https }),
   trustRouterCa: () => invoke<RouterStatus>("trust_router_ca"),
   getAppSetting: (key: string) => invoke<string | null>("get_app_setting", { key }),
   setAppSetting: (key: string, value: string) =>

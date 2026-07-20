@@ -99,14 +99,10 @@ fn sites(app: &AppHandle) -> Vec<site::Site> {
 }
 
 /// URL a site's "Open in browser" should hit: `<slug>.test` when local
-/// domains are on, otherwise the always-working `localhost:<port>`.
+/// domains are on (port-aware in fallback mode), otherwise the always-working
+/// `localhost:<port>`.
 fn site_url(state: &AppState, site: &site::Site) -> String {
-    let (domains_on, trusted) = router::enabled_and_trusted(state);
-    if domains_on {
-        router::site_url(&site.slug, trusted)
-    } else {
-        format!("http://localhost:{}", site.port)
-    }
+    router::site_public_url(state, site)
 }
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {

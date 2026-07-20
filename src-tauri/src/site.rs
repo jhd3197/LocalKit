@@ -332,13 +332,9 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
     emit(app, &site.id, "waiting", "Waiting for WordPress to come online...");
     wait_for_port(site.port, 180).await?;
 
-    // Install at the site's local domain when the router is enabled (M6).
-    let (domains_on, ca_trusted) = router::enabled_and_trusted(state);
-    let install_url = if domains_on {
-        router::site_url(&site.slug, ca_trusted)
-    } else {
-        format!("http://localhost:{}", site.port)
-    };
+    // Install at the site's local domain when the router is enabled (M6),
+    // including the `:port` suffix in fallback mode (plan 16).
+    let install_url = router::site_public_url(state, site);
     let admin_pass = random_password(16);
     wordpress::install(&dir, site, &admin_pass, &install_url, app).await?;
 

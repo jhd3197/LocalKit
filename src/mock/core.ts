@@ -4,11 +4,33 @@
 // delete / create behave naturally while previewing.
 import * as data from "./data";
 import { emit } from "./event";
-import type { ServerKitInfo, Site, SiteEvent } from "../lib/types";
+import type { PortConflict, RouterStatus, ServerKitInfo, Site, SiteEvent } from "../lib/types";
 
 type Args = Record<string, unknown>;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Plan 16 pre-flight, mocked: which router ports the fake LocalWP holds. */
+function mockProbe(http: number, https: number): PortConflict[] {
+  return [http, https]
+    .filter((p) => p in data.heldPorts)
+    .map((port) => ({ port, process: data.heldPorts[port] }));
+}
+
+/** Mirror of `router::conflict_message` + the short-circuited status. */
+function mockConflict(conflicts: PortConflict[]): RouterStatus {
+  const held = conflicts.map((c) => `port ${c.port} is held by ${c.process}`).join(", ");
+  const onDefaults = data.routerStatus.http_port === 80 && data.routerStatus.https_port === 443;
+  data.routerStatus.running = false;
+  data.routerStatus.conflicts = conflicts;
+  data.routerStatus.error =
+    `Local domains could not start: ${held}. ` +
+    (onDefaults
+      ? "Quit the other program (LocalWP's router, IIS, Skype, or another web server), " +
+        "or switch LocalKit to fallback ports (8080/8443) in Settings → Domains."
+      : "Quit whatever is holding those ports, or pick different router ports in Settings → Domains.");
+  return { ...data.routerStatus };
+}
 
 // Fake interactive shells for the Terminal page (terminal_open/write/close).
 const mockShells = new Map<string, { slug: string; buffer: string }>();
@@ -238,9 +260,31 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
 
     case "set_domains_enabled": {
       const enabled = Boolean(a.enabled);
+      if (enabled) {
+        const conflicts = mockProbe(data.routerStatus.http_port, data.routerStatus.https_port);
+        if (conflicts.length > 0) return mockConflict(conflicts);
+      }
       data.routerStatus.enabled = enabled;
       data.routerStatus.running = enabled;
       data.routerStatus.error = null;
+      data.routerStatus.conflicts = [];
+      return { ...data.routerStatus };
+    }
+
+    case "set_router_ports": {
+      const http = Number(a.http);
+      const https = Number(a.https);
+      if (!http || !https) throw "Router ports must be between 1 and 65535.";
+      if (http === https) throw "The HTTP and HTTPS router ports must be different.";
+      if (data.routerStatus.enabled) {
+        const conflicts = mockProbe(http, https);
+        if (conflicts.length > 0) return mockConflict(conflicts);
+        data.routerStatus.running = true;
+      }
+      data.routerStatus.http_port = http;
+      data.routerStatus.https_port = https;
+      data.routerStatus.error = null;
+      data.routerStatus.conflicts = [];
       return { ...data.routerStatus };
     }
 

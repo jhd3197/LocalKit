@@ -113,6 +113,9 @@ export interface RouterStatus {
   ca_trusted: boolean;
   error: string | null;
   conflicts: PortConflict[];
+  /** Router host ports; 80/443 = clean-URL mode, anything else = fallback. */
+  http_port: number;
+  https_port: number;
 }
 
 export interface TerminalDataEvent {

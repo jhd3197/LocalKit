@@ -144,7 +144,17 @@ export const routerStatus: RouterStatus = {
   ca_trusted: false,
   error: null,
   conflicts: [],
+  http_port: 80,
+  https_port: 443,
 };
+
+/**
+ * Plan 16: a fictional LocalWP-style router holding 80/443, so the conflict UX
+ * is exercisable in mock mode. The router starts *already running*, so the
+ * default screenshots are unaffected — toggle domains off then on to hit it,
+ * and "Use fallback ports" resolves it (8080/8443 are free here).
+ */
+export const heldPorts: Record<number, string> = { 80: "httpd.exe", 443: "httpd.exe" };
 
 /** In-memory app_settings KV (e.g. run_in_background for the tray toggle). */
 export const appSettings: Record<string, string> = {};

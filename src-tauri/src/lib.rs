@@ -253,12 +253,22 @@ fn list_sync_history(state: State<AppState>, site_id: String) -> Result<Vec<sync
 }
 
 // ---------------------------------------------------------------------------
-// Local domains (M6) — shared Caddy router on ports 80/443
+// Local domains (M6) — shared Caddy router on ports 80/443 (configurable
+// since plan 16, for coexistence with LocalWP & other port-80 owners)
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
 async fn router_status(state: State<'_, AppState>) -> Result<router::RouterStatus, String> {
     router::status(&state).await
+}
+
+#[tauri::command]
+async fn set_router_ports(
+    state: State<'_, AppState>,
+    http: u16,
+    https: u16,
+) -> Result<router::RouterStatus, String> {
+    router::set_ports(&state, http, https).await
 }
 
 #[tauri::command]
@@ -430,6 +440,7 @@ pub fn run() {
             list_sync_history,
             router_status,
             set_domains_enabled,
+            set_router_ports,
             trust_router_ca,
             get_app_setting,
             set_app_setting,

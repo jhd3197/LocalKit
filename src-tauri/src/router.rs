@@ -26,6 +26,11 @@ const KEY_LAST_ERROR: &str = "router_last_error";
 /// Default router host ports (the clean-URL mode).
 pub const DEFAULT_HTTP_PORT: u16 = 80;
 pub const DEFAULT_HTTPS_PORT: u16 = 443;
+/// Suggested fallback pair when another program owns 80/443.
+pub const FALLBACK_HTTP_PORT: u16 = 8080;
+pub const FALLBACK_HTTPS_PORT: u16 = 8443;
+const KEY_HTTP_PORT: &str = "router_http_port";
+const KEY_HTTPS_PORT: &str = "router_https_port";
 /// Path of Caddy's local-CA root cert inside the container.
 const CA_CERT_CONTAINER_PATH: &str = "/data/caddy/pki/authorities/local/root.crt";
 /// Managed-block markers in the OS hosts file.
@@ -41,6 +46,8 @@ pub struct RouterStatus {
     /// Router ports another program is holding (empty = free, or the router
     /// itself is up and holding them legitimately).
     pub conflicts: Vec<PortConflict>,
+    pub http_port: u16,
+    pub https_port: u16,
 }
 
 /// A router port held by some other program, with a best-effort owner name.
@@ -50,37 +57,83 @@ pub struct PortConflict {
     pub process: Option<String>,
 }
 
+/// Host ports the Caddy router publishes on. Container ports are always
+/// 80/443 — only the host side moves, so the Caddyfile is port-blind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RouterPorts {
+    pub http: u16,
+    pub https: u16,
+}
+
+impl Default for RouterPorts {
+    fn default() -> Self {
+        Self { http: DEFAULT_HTTP_PORT, https: DEFAULT_HTTPS_PORT }
+    }
+}
+
+impl RouterPorts {
+    /// Clean-URL mode: browsers imply 80/443, so no `:port` suffix is needed.
+    pub fn is_default(&self) -> bool {
+        self.http == DEFAULT_HTTP_PORT && self.https == DEFAULT_HTTPS_PORT
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for port in [self.http, self.https] {
+            if port == 0 {
+                return Err("Router ports must be between 1 and 65535.".into());
+            }
+        }
+        if self.http == self.https {
+            return Err("The HTTP and HTTPS router ports must be different.".into());
+        }
+        Ok(())
+    }
+}
+
 pub fn router_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("router")
 }
 
 /// The URL a site is reachable at through the router.
-pub fn site_url(slug: &str, ca_trusted: bool) -> String {
+///
+/// On the default ports this is the clean `http(s)://<slug>.test`. On fallback
+/// ports the browser needs the port spelled out, and we deliberately stay on
+/// http: a non-standard https port would prompt for a second certificate
+/// exception even after the CA is trusted.
+pub fn site_url(slug: &str, ca_trusted: bool, ports: RouterPorts) -> String {
+    if !ports.is_default() {
+        return format!("http://{slug}.{TLD}:{}", ports.http);
+    }
     let scheme = if ca_trusted { "https" } else { "http" };
     format!("{scheme}://{slug}.{TLD}")
 }
 
 /// The URL a site should be opened at (mirrors the frontend's `siteUrl`):
 /// its `*.test` domain when local domains are enabled, else `localhost:<port>`.
+/// The single source of truth for "where does this site live" — tray menu,
+/// one-click login, WP install URL and the CLI all funnel through here.
 pub fn site_public_url(state: &AppState, site: &Site) -> String {
     let (domains_on, ca_trusted) = enabled_and_trusted(state);
     if domains_on {
-        site_url(&site.slug, ca_trusted)
+        site_url(&site.slug, ca_trusted, router_ports(state))
     } else {
         format!("http://localhost:{}", site.port)
     }
 }
 
-fn render_compose() -> String {
-    r#"name: localkit-router
+fn render_compose(ports: RouterPorts) -> String {
+    // Container ports stay 80/443 — only the host mapping moves, so the
+    // Caddyfile (and the hosts block) are unaffected by fallback mode.
+    format!(
+        r#"name: localkit-router
 
 services:
   caddy:
     image: caddy:2
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "{http}:80"
+      - "{https}:443"
     # Route to sites via their published host ports — no shared network,
     # no changes to per-site compose projects.
     extra_hosts:
@@ -91,8 +144,10 @@ services:
 
 volumes:
   caddy-data:
-"#
-    .to_string()
+"#,
+        http = ports.http,
+        https = ports.https,
+    )
 }
 
 fn render_caddyfile(sites: &[Site]) -> String {
@@ -109,10 +164,10 @@ fn render_caddyfile(sites: &[Site]) -> String {
 }
 
 /// Write the router compose project + Caddyfile for the given sites.
-fn write_files(data_dir: &Path, sites: &[Site]) -> Result<PathBuf, String> {
+fn write_files(data_dir: &Path, sites: &[Site], ports: RouterPorts) -> Result<PathBuf, String> {
     let dir = router_dir(data_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create router directory: {e}"))?;
-    std::fs::write(dir.join("docker-compose.yml"), render_compose())
+    std::fs::write(dir.join("docker-compose.yml"), render_compose(ports))
         .map_err(|e| format!("failed to write router docker-compose.yml: {e}"))?;
     std::fs::write(dir.join("Caddyfile"), render_caddyfile(sites))
         .map_err(|e| format!("failed to write Caddyfile: {e}"))?;
@@ -460,9 +515,29 @@ fn list_sites(state: &AppState) -> Result<Vec<Site>, String> {
     db.list_sites()
 }
 
+/// Configured router host ports (`app_settings` KV — no migration). Never
+/// fails: unset or unparseable values fall back to 80/443.
+pub fn router_ports(state: &AppState) -> RouterPorts {
+    let Ok(db) = state.db.lock() else {
+        return RouterPorts::default();
+    };
+    let read = |key: &str, fallback: u16| -> u16 {
+        db.get_setting(key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|p| *p > 0)
+            .unwrap_or(fallback)
+    };
+    RouterPorts {
+        http: read(KEY_HTTP_PORT, DEFAULT_HTTP_PORT),
+        https: read(KEY_HTTPS_PORT, DEFAULT_HTTPS_PORT),
+    }
+}
+
 /// (domains_enabled, ca_trusted) — used by site creation to pick the
 /// WordPress install URL. Never fails; defaults to (false, false).
-pub fn enabled_and_trusted(state: &AppState) -> (bool, bool) {
+fn enabled_and_trusted(state: &AppState) -> (bool, bool) {
     let Ok(db) = state.db.lock() else {
         return (false, false);
     };
@@ -486,11 +561,12 @@ pub async fn status(state: &AppState) -> Result<RouterStatus, String> {
         )
     };
     let running = is_running(state).await;
+    let ports = router_ports(state);
     // Diagnose a persistent conflict on every status read, so reopening the
     // app while LocalWP still holds 80/443 shows the same named cause instead
     // of a bare "router is not running".
     let conflicts = if enabled && !running {
-        probe_ports(DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT).await
+        probe_ports(ports.http, ports.https).await
     } else {
         Vec::new()
     };
@@ -500,6 +576,8 @@ pub async fn status(state: &AppState) -> Result<RouterStatus, String> {
         ca_trusted,
         error: last_error,
         conflicts,
+        http_port: ports.http,
+        https_port: ports.https,
     })
 }
 
@@ -522,11 +600,12 @@ async fn is_running(state: &AppState) -> bool {
 /// Returns messages for the sites that failed (never fails the caller).
 async fn rewrite_site_urls(state: &AppState, to_domains: bool) -> Vec<String> {
     let ca_trusted = get_flag(state, KEY_CA_TRUSTED).unwrap_or(false);
+    let ports = router_ports(state);
     let sites = list_sites(state).unwrap_or_default();
     let mut failures = Vec::new();
     for site in sites.iter().filter(|s| s.status == "running") {
         let url = if to_domains {
-            site_url(&site.slug, ca_trusted)
+            site_url(&site.slug, ca_trusted, ports)
         } else {
             format!("http://localhost:{}", site.port)
         };
@@ -543,10 +622,11 @@ pub async fn set_enabled(state: &AppState, enabled: bool) -> Result<RouterStatus
         // <slug>.test` while another program owns port 80 would point every
         // site at that program's router (LocalWP answers unknown hosts with
         // its own 404), which looks like LocalKit is broken.
+        let ports = router_ports(state);
         if !is_running(state).await {
-            let conflicts = probe_ports(DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT).await;
+            let conflicts = probe_ports(ports.http, ports.https).await;
             if !conflicts.is_empty() {
-                let msg = conflict_message(&conflicts, true);
+                let msg = conflict_message(&conflicts, ports.is_default());
                 set_last_error(state, Some(&msg));
                 let mut st = status(state).await?;
                 st.error = Some(msg);
@@ -555,7 +635,7 @@ pub async fn set_enabled(state: &AppState, enabled: bool) -> Result<RouterStatus
             }
         }
         let sites = list_sites(state)?;
-        let dir = write_files(&state.data_dir, &sites)?;
+        let dir = write_files(&state.data_dir, &sites, ports)?;
         // Hosts entries first: if the user declines elevation, nothing else
         // changes and the flag stays off.
         if let Err(e) = sync_hosts(&site_slugs(state)).await {
@@ -635,8 +715,76 @@ pub async fn refresh_routes(state: &AppState) {
         return;
     }
     let Ok(sites) = list_sites(state) else { return };
-    let Ok(dir) = write_files(&state.data_dir, &sites) else { return };
+    let ports = router_ports(state);
+    let Ok(dir) = write_files(&state.data_dir, &sites, ports) else { return };
     let _ = reload(&dir).await;
+}
+
+/// Change the router's host ports (fallback mode). Validates, pre-flights the
+/// *new* ports, regenerates compose, restarts the router on them, and rewrites
+/// running sites' WordPress URLs — the same path the enable toggle uses, so
+/// `home`/`siteurl` never drift from where the site is actually served.
+pub async fn set_ports(state: &AppState, http: u16, https: u16) -> Result<RouterStatus, String> {
+    let ports = RouterPorts { http, https };
+    ports.validate()?;
+    if ports == router_ports(state) {
+        return status(state).await;
+    }
+
+    let enabled = get_flag(state, KEY_ENABLED).unwrap_or(false);
+    let dir = router_dir(&state.data_dir);
+    // Free the old ports before probing the new ones — otherwise a swap that
+    // reuses one of them would see our own container as the conflict.
+    if enabled && dir.join("docker-compose.yml").exists() {
+        let _ = docker::compose_down(&dir, false).await;
+    }
+    if enabled {
+        let conflicts = probe_ports(ports.http, ports.https).await;
+        if !conflicts.is_empty() {
+            // Leave the old ports in settings: the router is down either way,
+            // but the user's previous working config is worth preserving.
+            let msg = conflict_message(&conflicts, ports.is_default());
+            set_last_error(state, Some(&msg));
+            let mut st = status(state).await?;
+            st.error = Some(msg);
+            st.conflicts = conflicts;
+            return Ok(st);
+        }
+    }
+
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_setting(KEY_HTTP_PORT, &ports.http.to_string())?;
+        db.set_setting(KEY_HTTPS_PORT, &ports.https.to_string())?;
+    }
+
+    if !enabled {
+        // Ports are recorded; the router starts on them at the next enable.
+        return status(state).await;
+    }
+
+    let sites = list_sites(state)?;
+    let dir = write_files(&state.data_dir, &sites, ports)?;
+    if let Err(e) = docker::compose_up(&dir).await {
+        let msg = port_conflict_hint(&e);
+        set_last_error(state, Some(&msg));
+        let mut st = status(state).await?;
+        st.error = Some(msg);
+        return Ok(st);
+    }
+    set_last_error(state, None);
+    let _ = reload(&dir).await;
+    let failures = rewrite_site_urls(state, true).await;
+    let mut st = status(state).await?;
+    if !failures.is_empty() {
+        st.error = Some(format!(
+            "Router restarted on ports {}/{}, but the WordPress URL rewrite failed for: {}",
+            ports.http,
+            ports.https,
+            failures.join("; ")
+        ));
+    }
+    Ok(st)
 }
 
 /// Reconcile the managed hosts block after site create/delete (the slug set
@@ -828,6 +976,58 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].port, taken);
         drop(held);
+    }
+
+    // --- plan 16: configurable ports --------------------------------------
+
+    #[test]
+    fn site_url_is_clean_on_default_ports() {
+        let d = RouterPorts::default();
+        assert_eq!(site_url("acme", false, d), "http://acme.test");
+        assert_eq!(site_url("acme", true, d), "https://acme.test");
+    }
+
+    #[test]
+    fn site_url_carries_the_port_in_fallback_mode() {
+        let fb = RouterPorts { http: FALLBACK_HTTP_PORT, https: FALLBACK_HTTPS_PORT };
+        assert_eq!(site_url("acme", false, fb), "http://acme.test:8080");
+        // Even with a trusted CA we stay on http: a non-standard https port
+        // would prompt for a second certificate exception.
+        assert_eq!(site_url("acme", true, fb), "http://acme.test:8080");
+    }
+
+    #[test]
+    fn render_compose_maps_host_ports_to_container_80_443() {
+        let yml = render_compose(RouterPorts { http: 8080, https: 8443 });
+        assert!(yml.contains("\"8080:80\""), "{yml}");
+        assert!(yml.contains("\"8443:443\""), "{yml}");
+        // The default render is unchanged from the M6 template.
+        let default_yml = render_compose(RouterPorts::default());
+        assert!(default_yml.contains("\"80:80\""));
+        assert!(default_yml.contains("\"443:443\""));
+    }
+
+    #[test]
+    fn caddyfile_is_port_blind() {
+        // Only the host mapping moves — the Caddyfile never mentions host ports.
+        let sites: Vec<Site> = Vec::new();
+        assert_eq!(render_caddyfile(&sites), render_caddyfile(&sites));
+        assert!(!render_caddyfile(&sites).contains("8080"));
+    }
+
+    #[test]
+    fn port_validation_rejects_zero_and_duplicates() {
+        assert!(RouterPorts::default().validate().is_ok());
+        assert!(RouterPorts { http: 0, https: 443 }.validate().is_err());
+        assert!(RouterPorts { http: 8080, https: 8080 }.validate().is_err());
+        assert!(RouterPorts { http: 8080, https: 8443 }.validate().is_ok());
+    }
+
+    #[test]
+    fn is_default_only_for_80_443() {
+        assert!(RouterPorts::default().is_default());
+        assert!(!RouterPorts { http: 8080, https: 443 }.is_default());
+        assert!(!RouterPorts { http: 80, https: 8443 }.is_default());
     }
 
     #[test]
