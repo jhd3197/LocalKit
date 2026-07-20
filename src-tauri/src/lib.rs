@@ -298,6 +298,12 @@ fn set_app_setting(state: State<AppState>, key: String, value: String) -> Result
     db.set_setting(&key, &value)
 }
 
+#[tauri::command]
+fn delete_app_setting(state: State<AppState>, key: String) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.delete_setting(&key)
+}
+
 // ---------------------------------------------------------------------------
 // Terminals (interactive shells inside site containers)
 // ---------------------------------------------------------------------------
@@ -427,6 +433,7 @@ pub fn run() {
             trust_router_ca,
             get_app_setting,
             set_app_setting,
+            delete_app_setting,
             settings_get_all,
             terminal_open,
             terminal_write,

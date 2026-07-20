@@ -255,6 +255,10 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       data.appSettings[String(a.key)] = String(a.value);
       return null;
 
+    case "delete_app_setting":
+      delete data.appSettings[String(a.key)];
+      return null;
+
     case "settings_get_all":
       return { ...data.appSettings };
 

@@ -3,15 +3,18 @@ import { ipc } from "../lib/ipc";
 import type { AppInfo, DockerStatus } from "../lib/types";
 import { useNav } from "../stores/nav";
 import { useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
+import { useDialog } from "../hooks/useDialog";
 import ServerKitSettings from "../components/ServerKitSettings";
 import DomainsSettings from "../components/DomainsSettings";
-import { CloseIcon, GlobeIcon, ServerIcon, SlidersIcon, TerminalIcon } from "../components/icons";
+import KeyboardSettings from "../components/KeyboardSettings";
+import { CloseIcon, GlobeIcon, KeyboardIcon, ServerIcon, SlidersIcon, TerminalIcon } from "../components/icons";
 
-type SectionId = "general" | "terminal" | "domains" | "serverkit";
+type SectionId = "general" | "terminal" | "keyboard" | "domains" | "serverkit";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "general", label: "General", icon: <SlidersIcon className="h-3.5 w-3.5" /> },
   { id: "terminal", label: "Terminal", icon: <TerminalIcon className="h-3.5 w-3.5" /> },
+  { id: "keyboard", label: "Keyboard", icon: <KeyboardIcon className="h-3.5 w-3.5" /> },
   { id: "domains", label: "Local domains", icon: <GlobeIcon className="h-3.5 w-3.5" /> },
   { id: "serverkit", label: "ServerKit", icon: <ServerIcon className="h-3.5 w-3.5" /> },
 ];
@@ -19,27 +22,20 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
 export default function Settings() {
   const setSettingsOpen = useNav((s) => s.setSettingsOpen);
   const [active, setActive] = useState<SectionId>("general");
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSettingsOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [setSettingsOpen]);
+  const { overlayProps, panelProps } = useDialog(() => setSettingsOpen(false));
 
   const activeLabel = SECTIONS.find((s) => s.id === active)?.label;
 
   return (
     <div
+      {...overlayProps}
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={() => setSettingsOpen(false)}
     >
       <div
+        {...panelProps}
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        onClick={(e) => e.stopPropagation()}
         className="flex h-[32rem] max-h-[88vh] w-[48rem] max-w-[94vw] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-panel"
       >
         {/* Left section rail — Faro-style */}
@@ -84,6 +80,7 @@ export default function Settings() {
           <div className="flex-1 overflow-y-auto px-5 py-4">
             {active === "general" && <GeneralSection />}
             {active === "terminal" && <TerminalSection />}
+            {active === "keyboard" && <KeyboardSettings />}
             {active === "domains" && <DomainsSettings />}
             {active === "serverkit" && <ServerKitSettings />}
           </div>

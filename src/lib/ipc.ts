@@ -56,6 +56,7 @@ export const ipc = {
   getAppSetting: (key: string) => invoke<string | null>("get_app_setting", { key }),
   setAppSetting: (key: string, value: string) =>
     invoke<void>("set_app_setting", { key, value }),
+  deleteAppSetting: (key: string) => invoke<void>("delete_app_setting", { key }),
   settingsGetAll: () => invoke<Record<string, string>>("settings_get_all"),
   terminalOpen: (siteId: string, cols: number, rows: number) =>
     invoke<string>("terminal_open", { siteId, cols, rows }),

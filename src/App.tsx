@@ -7,6 +7,7 @@ import { useShortcuts } from "./hooks/useShortcuts";
 import Sidebar from "./components/Sidebar";
 import Toasts from "./components/Toasts";
 import CommandPalette from "./components/CommandPalette";
+import KeyboardShortcutsDialog from "./components/KeyboardShortcutsDialog";
 import NewSiteDialog from "./components/NewSiteDialog";
 import Dashboard from "./pages/Dashboard";
 import SiteDetail from "./pages/SiteDetail";
@@ -42,6 +43,7 @@ export default function App() {
       {settingsOpen && <Settings />}
       {newSiteOpen && <NewSiteDialog onClose={() => setNewSiteOpen(false)} />}
       <CommandPalette />
+      <KeyboardShortcutsDialog />
 
       <Toasts />
     </div>

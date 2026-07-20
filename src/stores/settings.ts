@@ -25,6 +25,8 @@ const LEGACY_SITEVIEW_KEY = "localkit.siteView";
 interface SettingsState {
   values: Record<string, string>;
   set: (key: string, value: string) => void;
+  /** Delete a key entirely (back to the accessor's default — plan 15 resets). */
+  remove: (key: string) => void;
 }
 
 function lsMirror(): Record<string, string> {
@@ -80,6 +82,19 @@ export const useSettings = create<SettingsState>((set) => {
         /* ignore */
       }
       void ipc.setAppSetting(key, value).catch(() => {});
+    },
+    remove: (key) => {
+      set((s) => {
+        const values = { ...s.values };
+        delete values[key];
+        return { values };
+      });
+      try {
+        localStorage.removeItem(LS_PREFIX + key);
+      } catch {
+        /* ignore */
+      }
+      void ipc.deleteAppSetting(key).catch(() => {});
     },
   };
 });

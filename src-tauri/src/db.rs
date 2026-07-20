@@ -155,6 +155,13 @@ impl Db {
         Ok(())
     }
 
+    pub fn delete_setting(&self, key: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM app_settings WHERE key = ?1", params![key])
+            .map_err(|e| format!("failed to delete setting {key}: {e}"))?;
+        Ok(())
+    }
+
     fn row_to_site(row: &Row) -> rusqlite::Result<Site> {
         Ok(Site {
             id: row.get("id")?,

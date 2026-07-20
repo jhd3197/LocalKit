@@ -111,3 +111,18 @@ export function ServerIcon(props: IconProps) {
     </svg>
   );
 }
+
+export function KeyboardIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="2" y="5" width="20" height="14" rx="2.5" />
+      <line x1="6" y1="9" x2="6.01" y2="9" />
+      <line x1="10" y1="9" x2="10.01" y2="9" />
+      <line x1="14" y1="9" x2="14.01" y2="9" />
+      <line x1="18" y1="9" x2="18.01" y2="9" />
+      <line x1="6" y1="13" x2="6.01" y2="13" />
+      <line x1="18" y1="13" x2="18.01" y2="13" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+    </svg>
+  );
+}
