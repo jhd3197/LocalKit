@@ -17,7 +17,7 @@ interface SitesState {
   createSite: (name: string, wpVersion: string, phpVersion: string) => Promise<Site>;
   start: (id: string) => Promise<void>;
   stop: (id: string) => Promise<void>;
-  remove: (id: string) => Promise<void>;
+  remove: (id: string, deleteSnapshots?: boolean) => Promise<void>;
   fetchLogs: (id: string) => Promise<void>;
   fetchWpInfo: (id: string) => Promise<void>;
   handleEvent: (event: SiteEvent) => void;
@@ -91,13 +91,18 @@ export const useSites = create<SitesState>((set, get) => ({
     }
   },
 
-  remove: async (id) => {
+  remove: async (id, deleteSnapshots = false) => {
     set({ busyId: id });
     try {
       const name = siteName(get().sites, id);
-      await ipc.deleteSite(id);
+      await ipc.deleteSite(id, deleteSnapshots);
       await get().refresh();
-      toast.success("Site deleted", name);
+      toast.success(
+        "Site deleted",
+        // The kept snapshot is the whole point of plan 17 — say so, or the
+        // user has no reason to believe the delete was reversible.
+        deleteSnapshots ? name : name && `${name} — a snapshot was kept`
+      );
     } catch (e) {
       toastError(e, "Delete site");
     } finally {

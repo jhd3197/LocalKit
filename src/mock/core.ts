@@ -4,7 +4,15 @@
 // delete / create behave naturally while previewing.
 import * as data from "./data";
 import { emit } from "./event";
-import type { PortConflict, RouterStatus, ServerKitInfo, Site, SiteEvent } from "../lib/types";
+import type {
+  PortConflict,
+  RouterStatus,
+  ServerKitInfo,
+  Site,
+  SiteEvent,
+  Snapshot,
+  SnapshotKind,
+} from "../lib/types";
 
 type Args = Record<string, unknown>;
 
@@ -42,6 +50,27 @@ function mockConflict(conflicts: PortConflict[], keepEnabled = false): RouterSta
 const mockShells = new Map<string, { slug: string; buffer: string }>();
 const prompt = (slug: string) =>
   `\x1b[35mroot\x1b[0m@\x1b[34m${slug}\x1b[0m:\x1b[36m/var/www/html\x1b[0m# `;
+
+/** Add a snapshot to the fake store, newest first (mirrors the real listing). */
+function pushSnapshot(siteId: string, kind: SnapshotKind, note: string): Snapshot {
+  const site = data.sites.find((s) => s.id === siteId);
+  const now = new Date();
+  const snap: Snapshot = {
+    // Same shape as the Rust id: a sortable timestamp.
+    id: now.toISOString().replace(/[-:T]/g, "").slice(0, 14) + `-${now.getMilliseconds()}`,
+    site_id: siteId,
+    site_name: site?.name ?? siteId,
+    site_slug: site?.slug ?? siteId,
+    created_at: now.toISOString(),
+    kind,
+    note,
+    db_bytes: 2_000_000 + Math.floor(Math.random() * 3_000_000),
+    code_bytes: 40_000_000 + Math.floor(Math.random() * 200_000_000),
+    wp_version: site?.wp_version ?? "6.7",
+  };
+  (data.snapshots[siteId] ??= []).unshift(snap);
+  return snap;
+}
 
 function slugify(name: string): string {
   return name
@@ -144,8 +173,72 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     }
 
     case "delete_site": {
-      const i = data.sites.findIndex((s) => s.id === a.id);
-      if (i >= 0) data.sites.splice(i, 1);
+      const siteId = String(a.id);
+      const i = data.sites.findIndex((s) => s.id === siteId);
+      if (i >= 0) {
+        // Mirrors site::delete — a pre_delete snapshot first, and the
+        // snapshots outlive the site unless the caller opted out.
+        if (a.deleteSnapshots) {
+          delete data.snapshots[siteId];
+        } else {
+          pushSnapshot(siteId, "pre_delete", `before deleting ${data.sites[i].name}`);
+        }
+        data.sites.splice(i, 1);
+      }
+      return null;
+    }
+
+    case "list_snapshots":
+      return data.snapshots[String(a.siteId)] ?? [];
+
+    case "create_snapshot": {
+      const siteId = String(a.siteId);
+      const site = data.sites.find((s) => s.id === siteId);
+      if (!site) throw `site not found: ${siteId}`;
+      const snap = pushSnapshot(siteId, "manual", String(a.note ?? ""));
+      emit("site-event", {
+        id: siteId,
+        stage: "done",
+        message: `Snapshot of ${site.name} taken`,
+      } satisfies SiteEvent);
+      return snap;
+    }
+
+    case "restore_snapshot": {
+      const siteId = String(a.siteId);
+      const site = data.sites.find((s) => s.id === siteId);
+      if (!site) throw `site not found: ${siteId}`;
+      const snap = (data.snapshots[siteId] ?? []).find((s) => s.id === a.snapshotId);
+      if (!snap) throw `snapshot \`${a.snapshotId}\` not found`;
+      // Restoring is destructive, so the real backend snapshots first.
+      pushSnapshot(siteId, "pre_restore", `before restoring ${snap.created_at}`);
+      const started = site.live_status !== "running";
+      site.status = site.live_status = "running";
+      void (async () => {
+        for (const message of [
+          "Taking a pre-restore snapshot…",
+          "Importing database…",
+          "Restoring wp-content…",
+        ]) {
+          emit("site-event", { id: siteId, stage: "restore", message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        emit("site-event", {
+          id: siteId,
+          stage: "done",
+          message: started
+            ? `${site.name} restored to the snapshot from ${snap.created_at} (the site was stopped, so it was started)`
+            : `${site.name} restored to the snapshot from ${snap.created_at}`,
+        } satisfies SiteEvent);
+      })();
+      return null;
+    }
+
+    case "delete_snapshot": {
+      const list = data.snapshots[String(a.siteId)] ?? [];
+      const i = list.findIndex((s) => s.id === a.snapshotId);
+      if (i < 0) throw `snapshot \`${a.snapshotId}\` not found`;
+      list.splice(i, 1);
       return null;
     }
 
@@ -238,6 +331,15 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       const siteId = String(a.siteId);
       const site = data.sites.find((s) => s.id === siteId);
       const id = `sync-${Date.now()}`;
+      // Plan 17: DB syncs overwrite a database, so they snapshot first.
+      if (kind === "db") {
+        const conn = data.connections.find((c) => c.id === a.connectionId);
+        pushSnapshot(
+          siteId,
+          direction === "push" ? "pre_push" : "pre_pull",
+          `${conn?.label ?? "server"} (#${a.remoteSiteId} on ${conn?.url ?? "?"})`
+        );
+      }
       void (async () => {
         emit("site-event", {
           id: siteId,

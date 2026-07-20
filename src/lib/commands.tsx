@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "./ipc";
 import { toastError } from "./errors";
+import { toast } from "../stores/toast";
 import { useNav } from "../stores/nav";
 import { useSettings } from "../stores/settings";
 import { useSites } from "../stores/sites";
@@ -124,6 +125,17 @@ function siteCommands(site: SiteWithStatus): Command[] {
       run: () => nav.navigate({ name: "terminal", siteId: site.id }),
     },
   ];
+  cmds.push({
+    id: `site.${site.id}.snapshot`,
+    title: "Create snapshot",
+    group: site.name,
+    run: () => {
+      void ipc
+        .createSnapshot(site.id)
+        .then(() => toast.success("Snapshot taken", site.name))
+        .catch((e) => toastError(e, "Create snapshot"));
+    },
+  });
   if (running) {
     cmds.push({
       id: `site.${site.id}.wp-admin`,

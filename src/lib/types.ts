@@ -101,6 +101,28 @@ export interface SyncRecord {
   created_at: string;
 }
 
+/** Snapshot kinds (plan 17); everything but `manual` is taken automatically. */
+export type SnapshotKind =
+  | "manual"
+  | "pre_push"
+  | "pre_pull"
+  | "pre_delete"
+  | "pre_restore";
+
+/** A point-in-time copy of a site: DB dump + wp-content archive on disk. */
+export interface Snapshot {
+  id: string;
+  site_id: string;
+  site_name: string;
+  site_slug: string;
+  created_at: string;
+  kind: SnapshotKind;
+  note: string;
+  db_bytes: number;
+  code_bytes: number;
+  wp_version: string;
+}
+
 /** A router port held by another program (plan 16 pre-flight probe). */
 export interface PortConflict {
   port: number;

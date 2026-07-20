@@ -9,6 +9,8 @@ import type { SiteDetail as SiteDetailData, WpUser } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
 import CopyButton from "../components/CopyButton";
 import PushPanel from "../components/PushPanel";
+import SnapshotsPanel from "../components/SnapshotsPanel";
+import DeleteSiteDialog from "../components/DeleteSiteDialog";
 import { describeConflicts } from "../components/DomainsSettings";
 
 export default function SiteDetail({ id }: { id: string }) {
@@ -30,6 +32,7 @@ export default function SiteDetail({ id }: { id: string }) {
   const [loginUserId, setLoginUserId] = useState<number | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
   const loadDetail = useCallback(() => {
@@ -142,11 +145,7 @@ export default function SiteDetail({ id }: { id: string }) {
             Terminal
           </button>
           <button
-            onClick={() => {
-              if (window.confirm(`Delete "${detail.name}"? This removes its containers, database and files.`)) {
-                void remove(id).then(() => navigate({ name: "sites" }));
-              }
-            }}
+            onClick={() => setConfirmDelete(true)}
             disabled={busyId === id}
             className="rounded-md border border-red-900 px-4 py-2 text-sm text-red-400 hover:border-red-700 disabled:opacity-50"
           >
@@ -154,6 +153,18 @@ export default function SiteDetail({ id }: { id: string }) {
           </button>
         </div>
       </div>
+
+      {confirmDelete && (
+        <DeleteSiteDialog
+          siteName={detail.name}
+          busy={busyId === id}
+          onClose={() => setConfirmDelete(false)}
+          onConfirm={(deleteSnapshots) => {
+            setConfirmDelete(false);
+            void remove(id, deleteSnapshots).then(() => navigate({ name: "sites" }));
+          }}
+        />
+      )}
 
       <RouterConflictBanner slug={detail.slug} port={detail.port} />
 
@@ -285,6 +296,11 @@ export default function SiteDetail({ id }: { id: string }) {
             </>
           )}
         </section>
+      </div>
+
+      {/* Snapshots + one-click restore (plan 17) */}
+      <div className="mt-4">
+        <SnapshotsPanel siteId={id} />
       </div>
 
       {/* ServerKit push/pull (M4) */}

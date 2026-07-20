@@ -11,6 +11,7 @@ import type {
   SiteDetail,
   SiteEvent,
   SiteWithStatus,
+  Snapshot,
   SyncRecord,
   TerminalDataEvent,
   TerminalExitEvent,
@@ -28,11 +29,19 @@ export const ipc = {
     invoke<Site>("create_site", { name, wpVersion, phpVersion }),
   startSite: (id: string) => invoke<Site>("start_site", { id }),
   stopSite: (id: string) => invoke<Site>("stop_site", { id }),
-  deleteSite: (id: string) => invoke<void>("delete_site", { id }),
+  deleteSite: (id: string, deleteSnapshots = false) =>
+    invoke<void>("delete_site", { id, deleteSnapshots }),
   siteLogs: (id: string, tail = 200) => invoke<string>("site_logs", { id, tail }),
   wpCliInfo: (id: string) => invoke<WpInfo>("wp_cli_info", { id }),
   loginSite: (id: string, userId?: number) => invoke<string>("login_site", { id, userId }),
   siteWpUsers: (id: string) => invoke<WpUser[]>("site_wp_users", { id }),
+  listSnapshots: (siteId: string) => invoke<Snapshot[]>("list_snapshots", { siteId }),
+  createSnapshot: (siteId: string, note?: string) =>
+    invoke<Snapshot>("create_snapshot", { siteId, note }),
+  restoreSnapshot: (siteId: string, snapshotId: string) =>
+    invoke<void>("restore_snapshot", { siteId, snapshotId }),
+  deleteSnapshot: (siteId: string, snapshotId: string) =>
+    invoke<void>("delete_snapshot", { siteId, snapshotId }),
   saveServerkitConnection: (label: string, url: string, apiKey: string) =>
     invoke<ServerKitConnection>("save_serverkit_connection", { label, url, apiKey }),
   listServerkitConnections: () => invoke<ServerKitConnection[]>("list_serverkit_connections"),

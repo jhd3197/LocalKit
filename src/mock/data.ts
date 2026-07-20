@@ -8,6 +8,7 @@ import type {
   ServerKitConnection,
   SiteDetail,
   SiteWithStatus,
+  Snapshot,
   SyncRecord,
   WpInfo,
 } from "../lib/types";
@@ -194,6 +195,67 @@ export const remoteSites: Record<string, RemoteWpSite[]> = {
       status: "stopped",
       wp_version: "6.6",
       environment_count: 1,
+    },
+  ],
+};
+
+/**
+ * Plan 17 snapshots. Pixel Bakery shows the full mix — a manual one plus the
+ * automatic ones push/pull/delete leave behind — so the kind badges and the
+ * retention story are visible without Docker. Hiking Blog has none, which is
+ * the empty state.
+ */
+export const snapshots: Record<string, Snapshot[]> = {
+  "site-pixel-bakery": [
+    {
+      id: "20260719-084500-120",
+      site_id: "site-pixel-bakery",
+      site_name: "Pixel Bakery",
+      site_slug: "pixel-bakery",
+      created_at: "2026-07-19T08:45:00Z",
+      kind: "pre_pull",
+      note: "Production (#27 on https://panel.acme-hosting.example)",
+      db_bytes: 4_312_770,
+      code_bytes: 224_512_900,
+      wp_version: "6.7",
+    },
+    {
+      id: "20260718-142200-880",
+      site_id: "site-pixel-bakery",
+      site_name: "Pixel Bakery",
+      site_slug: "pixel-bakery",
+      created_at: "2026-07-18T14:22:00Z",
+      kind: "manual",
+      note: "before the checkout rewrite",
+      db_bytes: 4_298_115,
+      code_bytes: 223_998_042,
+      wp_version: "6.7",
+    },
+    {
+      id: "20260715-135500-410",
+      site_id: "site-pixel-bakery",
+      site_name: "Pixel Bakery",
+      site_slug: "pixel-bakery",
+      created_at: "2026-07-15T13:55:00Z",
+      kind: "pre_push",
+      note: "Production (#27 on https://panel.acme-hosting.example)",
+      db_bytes: 4_105_663,
+      code_bytes: 219_774_301,
+      wp_version: "6.7",
+    },
+  ],
+  "site-acme-corporate": [
+    {
+      id: "20260716-101200-005",
+      site_id: "site-acme-corporate",
+      site_name: "Acme Corporate",
+      site_slug: "acme-corporate",
+      created_at: "2026-07-16T10:12:00Z",
+      kind: "manual",
+      note: "",
+      db_bytes: 1_884_204,
+      code_bytes: 48_220_118,
+      wp_version: "6.5",
     },
   ],
 };
