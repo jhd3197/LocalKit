@@ -36,13 +36,32 @@ const downloadSessions = new Map();
 
 const stats = newStats();
 function newStats() {
-  return { inits: 0, resumedInits: 0, chunkPuts: 0, chunkBytes: 0, duplicates: 0, finishes: 0, rangeGets: 0 };
+  return {
+    inits: 0,
+    resumedInits: 0,
+    chunkPuts: 0,
+    chunkBytes: 0,
+    duplicates: 0,
+    finishes: 0,
+    rangeGets: 0,
+    // Chunks the most recently finished transfer needed in total. The resume
+    // assertion is `chunkPuts === totalChunks - <what landed before the kill>`,
+    // and that needs the total from the server's own arithmetic.
+    lastTotalChunks: 0,
+    v1Pushes: 0,
+  };
 }
 function resetStats() {
   for (const k of Object.keys(stats)) stats[k] = 0;
 }
-/** Fault injection: once `failChunksAfter` chunks have landed, refuse the rest. */
-const control = { failChunksAfter: null, chunksSinceControl: 0 };
+/**
+ * Test knobs:
+ * - failChunksAfter: once N chunks have landed, refuse the rest (stands in for
+ *   the client's connection dying mid-upload).
+ * - syncV2: drop "sync-v2" from /pair, so a v2-capable client is forced down
+ *   the v1 path — that is how the fallback gets exercised.
+ */
+const control = { failChunksAfter: null, chunksSinceControl: 0, syncV2: true };
 
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
@@ -108,6 +127,11 @@ function readBody(req) {
     req.on("end", () => resolve(Buffer.concat(chunks)));
   });
 }
+
+// The panel's MAX_CONTENT_LENGTH. Mirrored here because it is the wall sync
+// v2 exists to get over: a v1 multipart push of a real site hits it, while a
+// v2 chunk request is 8 MiB no matter how large the payload is.
+const MAX_BODY = 100 * 1024 * 1024;
 
 /** Apply the v1 processing rules to an assembled code payload. */
 function acceptCodeArchive(buf) {
@@ -182,13 +206,15 @@ const server = http.createServer(async (req, res) => {
     const cfg = body.length ? JSON.parse(body.toString()) : {};
     control.failChunksAfter = cfg.failChunksAfter ?? null;
     control.chunksSinceControl = 0;
+    if (cfg.syncV2 !== undefined) control.syncV2 = cfg.syncV2;
     if (cfg.resetStats) resetStats();
     if (cfg.forgetTransfers) transfers.clear();
     return json(200, { ok: true, ...control });
   }
 
   if (url.pathname === "/api/v1/localkit/pair") {
-    return json(200, { status: "ok", service: "serverkit-localkit", panel: "ServerKit", version: "1.7.0", user: "admin", canonical_domain: "panel.example.com", canonical_origin: "https://panel.example.com", features: FEATURES });
+    const features = control.syncV2 ? FEATURES : FEATURES.filter((f) => f !== "sync-v2");
+    return json(200, { status: "ok", service: "serverkit-localkit", panel: "ServerKit", version: "1.7.0", user: "admin", canonical_domain: "panel.example.com", canonical_origin: "https://panel.example.com", features });
   }
 
   if (url.pathname === "/api/v1/localkit/sites" && req.method === "GET") {
@@ -309,6 +335,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     stats.finishes += 1;
+    stats.lastTotalChunks = Math.ceil(t.total / t.chunkSize);
     if (kind === "code") {
       const bad = acceptCodeArchive(t.buf);
       if (bad) return json(400, bad);
@@ -324,9 +351,11 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/v1/localkit/push/code" && req.method === "POST") {
     const body = await readBody(req);
+    if (body.length > MAX_BODY) return json(413, { error: "Request Entity Too Large" });
     const boundary = /boundary=(.+)$/.exec(req.headers["content-type"])[1];
     const { fields, file } = parseMultipart(body, boundary);
     if (!fields.site_id || !file) return json(400, { error: "site_id and file required" });
+    stats.v1Pushes += 1;
     const bad = acceptCodeArchive(file.data);
     if (bad) return json(400, bad);
     return json(200, { success: true, message: "wp-content pushed to the site" });
@@ -334,9 +363,11 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/v1/localkit/push/db" && req.method === "POST") {
     const body = await readBody(req);
+    if (body.length > MAX_BODY) return json(413, { error: "Request Entity Too Large" });
     const boundary = /boundary=(.+)$/.exec(req.headers["content-type"])[1];
     const { fields, file } = parseMultipart(body, boundary);
     if (!fields.site_id || !file) return json(400, { error: "site_id and file required" });
+    stats.v1Pushes += 1;
     storedSql = file.data.toString();
     return json(200, { success: true, message: "Database imported", remote_url: REMOTE_URL, search_replace: true });
   }
