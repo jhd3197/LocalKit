@@ -23,6 +23,9 @@ pub const TLD: &str = "test";
 const KEY_ENABLED: &str = "domains_enabled";
 const KEY_CA_TRUSTED: &str = "router_ca_trusted";
 const KEY_LAST_ERROR: &str = "router_last_error";
+/// Default router host ports (the clean-URL mode).
+pub const DEFAULT_HTTP_PORT: u16 = 80;
+pub const DEFAULT_HTTPS_PORT: u16 = 443;
 /// Path of Caddy's local-CA root cert inside the container.
 const CA_CERT_CONTAINER_PATH: &str = "/data/caddy/pki/authorities/local/root.crt";
 /// Managed-block markers in the OS hosts file.
@@ -35,6 +38,16 @@ pub struct RouterStatus {
     pub running: bool,
     pub ca_trusted: bool,
     pub error: Option<String>,
+    /// Router ports another program is holding (empty = free, or the router
+    /// itself is up and holding them legitimately).
+    pub conflicts: Vec<PortConflict>,
+}
+
+/// A router port held by some other program, with a best-effort owner name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PortConflict {
+    pub port: u16,
+    pub process: Option<String>,
 }
 
 pub fn router_dir(data_dir: &Path) -> PathBuf {
@@ -117,7 +130,9 @@ async fn reload(dir: &Path) -> Result<(), String> {
     docker::compose_restart(dir).await
 }
 
-/// Add a "what's probably holding the port" hint to bind failures.
+/// Add a "what's probably holding the port" hint to bind failures. Used only
+/// as a backstop — the pre-flight probe (`probe_ports`) catches the common
+/// case *before* we touch the hosts file or Docker.
 fn port_conflict_hint(err: &str) -> String {
     let lower = err.to_lowercase();
     if lower.contains("port is already allocated")
@@ -126,13 +141,109 @@ fn port_conflict_hint(err: &str) -> String {
         || lower.contains("permission denied") && lower.contains("80")
     {
         format!(
-            "Could not start the local-domains router: ports 80/443 appear to be in use \
+            "Could not start the local-domains router: its ports appear to be in use \
              by another program (LocalWP's router, IIS, Skype, or another web server). \
-             Stop whatever is bound to port 80/443 and try again.\n\nDetails: {err}"
+             Stop it, or switch LocalKit to fallback ports in Settings → Domains.\
+             \n\nDetails: {err}"
         )
     } else {
         format!("Could not start the local-domains router: {err}")
     }
+}
+
+// ---------------------------------------------------------------------------
+// Port pre-flight (plan 16)
+//
+// LocalWP's nginx router is the canonical conflict: it binds 80/443
+// machine-wide and answers *every* unknown local host with its own "Site Not
+// Found" page, so without this probe a LocalKit site at `http://x.test/`
+// silently hits Local's router while LocalKit's Caddy is down. Probing with a
+// plain `TcpListener::bind` costs nothing and runs before any hosts-file or
+// Docker mutation, so it can never race our own containers.
+// ---------------------------------------------------------------------------
+
+/// Can we bind `port`? Checks both the wildcard and the loopback address: on
+/// Windows a program bound only to `127.0.0.1:80` still wins loopback traffic
+/// even though `0.0.0.0:80` binds fine, which is exactly the case that makes
+/// a site silently answer from the other app's router.
+fn port_free(port: u16) -> bool {
+    use std::net::{Ipv4Addr, TcpListener};
+    TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok()
+        && TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+/// Best-effort process name holding `port` (`None` when we can't tell — the
+/// message then falls back to the generic "another web server" hint).
+async fn identify_port_owner(port: u16) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let output = {
+        let ps = format!(
+            "$c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue \
+             | Select-Object -First 1; \
+             if ($c) {{ (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue).ProcessName }}"
+        );
+        docker::no_window(
+            tokio::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]),
+        )
+        .output()
+        .await
+    };
+    #[cfg(not(target_os = "windows"))]
+    let output = docker::no_window(tokio::process::Command::new("lsof").args([
+        "-nP",
+        &format!("-iTCP:{port}"),
+        "-sTCP:LISTEN",
+        "-F",
+        "c",
+    ]))
+    .output()
+    .await;
+
+    let out = output.ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let name = stdout
+        .lines()
+        // `lsof -F c` prefixes the command name with 'c'; PowerShell prints it bare.
+        .filter_map(|l| Some(l.trim()).filter(|l| !l.is_empty()))
+        .map(|l| l.strip_prefix('c').unwrap_or(l))
+        .next()?
+        .to_string();
+    Some(name).filter(|n| !n.is_empty())
+}
+
+/// Which of the router's ports are held by something else.
+pub async fn probe_ports(http: u16, https: u16) -> Vec<PortConflict> {
+    let mut conflicts = Vec::new();
+    for port in [http, https] {
+        if !port_free(port) {
+            conflicts.push(PortConflict {
+                port,
+                process: identify_port_owner(port).await,
+            });
+        }
+    }
+    conflicts
+}
+
+/// User-facing explanation of a port conflict. Pure (unit-tested); the
+/// remediation half depends on whether the user is already on fallback ports.
+fn conflict_message(conflicts: &[PortConflict], on_default_ports: bool) -> String {
+    let held = conflicts
+        .iter()
+        .map(|c| match &c.process {
+            Some(p) => format!("port {} is held by {p}", c.port),
+            None => format!("port {} is in use", c.port),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let fix = if on_default_ports {
+        "Quit the other program (LocalWP's router, IIS, Skype, or another web server), \
+         or switch LocalKit to fallback ports (8080/8443) in Settings → Domains."
+    } else {
+        "Quit whatever is holding those ports, or pick different router ports in \
+         Settings → Domains."
+    };
+    format!("Local domains could not start: {held}. {fix}")
 }
 
 // ---------------------------------------------------------------------------
@@ -374,23 +485,37 @@ pub async fn status(state: &AppState) -> Result<RouterStatus, String> {
             db.get_setting(KEY_LAST_ERROR)?.filter(|s| !s.is_empty()),
         )
     };
-    let dir = router_dir(&state.data_dir);
-    let running = if dir.join("docker-compose.yml").exists() {
-        match docker::compose_ps(&dir).await {
-            Ok(containers) => containers
-                .iter()
-                .any(|c| c.service == "caddy" && c.state == "running"),
-            Err(_) => false,
-        }
+    let running = is_running(state).await;
+    // Diagnose a persistent conflict on every status read, so reopening the
+    // app while LocalWP still holds 80/443 shows the same named cause instead
+    // of a bare "router is not running".
+    let conflicts = if enabled && !running {
+        probe_ports(DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT).await
     } else {
-        false
+        Vec::new()
     };
     Ok(RouterStatus {
         enabled,
         running,
         ca_trusted,
         error: last_error,
+        conflicts,
     })
+}
+
+/// Is our own Caddy container up? (Distinguishes "port 80 is busy because the
+/// router owns it" from a real foreign conflict.)
+async fn is_running(state: &AppState) -> bool {
+    let dir = router_dir(&state.data_dir);
+    if !dir.join("docker-compose.yml").exists() {
+        return false;
+    }
+    match docker::compose_ps(&dir).await {
+        Ok(containers) => containers
+            .iter()
+            .any(|c| c.service == "caddy" && c.state == "running"),
+        Err(_) => false,
+    }
 }
 
 /// Best-effort rewrite of `home`/`siteurl` for every running site.
@@ -414,6 +539,21 @@ async fn rewrite_site_urls(state: &AppState, to_domains: bool) -> Vec<String> {
 
 pub async fn set_enabled(state: &AppState, enabled: bool) -> Result<RouterStatus, String> {
     if enabled {
+        // Pre-flight BEFORE touching the hosts file: writing `127.0.0.1
+        // <slug>.test` while another program owns port 80 would point every
+        // site at that program's router (LocalWP answers unknown hosts with
+        // its own 404), which looks like LocalKit is broken.
+        if !is_running(state).await {
+            let conflicts = probe_ports(DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT).await;
+            if !conflicts.is_empty() {
+                let msg = conflict_message(&conflicts, true);
+                set_last_error(state, Some(&msg));
+                let mut st = status(state).await?;
+                st.error = Some(msg);
+                st.conflicts = conflicts;
+                return Ok(st);
+            }
+        }
         let sites = list_sites(state)?;
         let dir = write_files(&state.data_dir, &sites)?;
         // Hosts entries first: if the user declines elevation, nothing else
@@ -645,6 +785,82 @@ mod tests {
         let out = update_hosts_content(lf, &slugs(&["x"]));
         assert!(!out.contains("\r\n"));
         assert!(out.contains("127.0.0.1  x.test"));
+    }
+
+    // --- plan 16: port pre-flight -----------------------------------------
+
+    #[test]
+    fn port_free_reports_true_for_an_unbound_port() {
+        // Bind an ephemeral port, learn its number, release it, then probe.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(port_free(port));
+    }
+
+    #[test]
+    fn port_free_reports_false_while_a_port_is_held() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!port_free(port), "a bound loopback port is not free");
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn probe_returns_empty_when_ports_are_free() {
+        let a = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let b = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (pa, pb) = (a.local_addr().unwrap().port(), b.local_addr().unwrap().port());
+        drop(a);
+        drop(b);
+        assert_eq!(probe_ports(pa, pb).await, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn probe_reports_the_held_port_only() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let taken = held.local_addr().unwrap().port();
+        let free_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free = free_listener.local_addr().unwrap().port();
+        drop(free_listener);
+
+        let conflicts = probe_ports(taken, free).await;
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].port, taken);
+        drop(held);
+    }
+
+    #[test]
+    fn conflict_message_names_the_process_and_offers_fallback() {
+        let msg = conflict_message(
+            &[PortConflict { port: 80, process: Some("httpd.exe".into()) }],
+            true,
+        );
+        assert!(msg.contains("port 80 is held by httpd.exe"), "{msg}");
+        assert!(msg.contains("fallback ports (8080/8443)"), "{msg}");
+    }
+
+    #[test]
+    fn conflict_message_falls_back_when_the_owner_is_unknown() {
+        let msg = conflict_message(
+            &[
+                PortConflict { port: 80, process: None },
+                PortConflict { port: 443, process: None },
+            ],
+            true,
+        );
+        assert!(msg.contains("port 80 is in use"), "{msg}");
+        assert!(msg.contains("port 443 is in use"), "{msg}");
+    }
+
+    #[test]
+    fn conflict_message_on_fallback_ports_does_not_suggest_fallback_again() {
+        let msg = conflict_message(
+            &[PortConflict { port: 8080, process: Some("node".into()) }],
+            false,
+        );
+        assert!(msg.contains("port 8080 is held by node"), "{msg}");
+        assert!(!msg.contains("8080/8443"), "must not loop the same advice: {msg}");
     }
 
     #[test]

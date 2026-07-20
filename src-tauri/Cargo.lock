@@ -2194,7 +2194,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "dirs 5.0.1",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "localkit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 5.0.1",

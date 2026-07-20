@@ -101,11 +101,18 @@ export interface SyncRecord {
   created_at: string;
 }
 
+/** A router port held by another program (plan 16 pre-flight probe). */
+export interface PortConflict {
+  port: number;
+  process: string | null;
+}
+
 export interface RouterStatus {
   enabled: boolean;
   running: boolean;
   ca_trusted: boolean;
   error: string | null;
+  conflicts: PortConflict[];
 }
 
 export interface TerminalDataEvent {

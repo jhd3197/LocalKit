@@ -143,6 +143,7 @@ export const routerStatus: RouterStatus = {
   running: true,
   ca_trusted: false,
   error: null,
+  conflicts: [],
 };
 
 /** In-memory app_settings KV (e.g. run_in_background for the tray toggle). */
