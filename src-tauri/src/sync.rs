@@ -6,7 +6,7 @@ use std::path::Path;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-use crate::{serverkit, site, wordpress, AppState};
+use crate::{router, serverkit, site, wordpress, AppState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {
@@ -147,7 +147,11 @@ pub async fn push_db(
     let _ = std::fs::remove_file(&dump_path);
     let sql = sql?;
 
-    let local_url = format!("http://localhost:{}", site.port);
+    // Whatever the site is actually served at — its `.test` domain (with the
+    // port in fallback mode) when local domains are on. The server rewrites
+    // local -> remote with this, so a hardcoded localhost:<port> would leave
+    // `<slug>.test` URLs baked into the remote database.
+    let local_url = router::site_public_url(state, &site);
     emit(app, site_id, "push", "Uploading database dump...");
     run(app, state, connection_id, site_id, "push", "db", async move {
         serverkit::push_db(&conn.url, &conn.api_key, remote_site_id, &local_url, sql).await?;
@@ -177,7 +181,9 @@ pub async fn pull_db(
         .read_to_end(&mut sql)
         .map_err(|e| format!("failed to decompress remote dump: {e}"))?;
 
-    let local_url = format!("http://localhost:{}", site.port);
+    // Same rule on the way back in: pulling must land the site on its current
+    // public URL, not silently knock it off its domain onto localhost.
+    let local_url = router::site_public_url(state, &site);
     emit(app, site_id, "pull", "Importing database into local site...");
     run(app, state, connection_id, site_id, "pull", "db", async move {
         wordpress::import_db(&site.dir(), &sql).await?;
