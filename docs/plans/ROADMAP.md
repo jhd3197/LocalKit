@@ -23,7 +23,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 13 | `13_settings-store` | ✅ | Unified settings store on `app_settings` KV + pre-paint injection; substrate for terminal settings and themes. |
 | 14 | `14_terminal-quick-wins` | ✅ shipped | Web-links, copy-on-select, ghost-text history, terminal font/scrollback settings (needs 13). |
 | 15 | `15_command-palette-shortcuts` | ✅ shipped | Command registry + palette (mod+K), global shortcuts, remappable bindings in Settings (needs 13). |
-| 16 | `16_router-coexistence` | ⬜ | Port-80/443 conflict pre-flight + configurable router ports so domains survive alongside LocalWP & co. |
+| 16 | `16_router-coexistence` | ✅ shipped | Port-80/443 conflict pre-flight + configurable router ports so domains survive alongside LocalWP & co. |
 | 17 | `17_snapshots` | ⬜ | DB + wp-content snapshots with one-click restore; automatic before push/pull/delete. Safety net for 18–20. |
 | 18 | `18_import-remote-site` | ⬜ | Clone a ServerKit site down as a *new* local site (needs the extension's missing pull/code endpoint). |
 | 19 | `19_sync-v2-chunked` | ⬜ | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). |
@@ -72,6 +72,10 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 - ✅ Local domains: `http(s)://<slug>.test` via a shared Caddy router +
   managed hosts block + local CA trust (plan 6), layered on top of the
   always-working `localhost:<port>` URLs
+- ✅ Router coexistence (plan 16): port pre-flight that names the process
+  holding 80/443, configurable router ports with one-click fallback to
+  8080/8443, port-aware `site_public_url`, conflict UX in Settings +
+  SiteDetail + `lk doctor`
 - ✅ System tray + background mode: close-to-tray, tray menu with quick site
   actions, single-instance focus (plan 8)
 

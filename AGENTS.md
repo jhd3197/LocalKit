@@ -82,6 +82,11 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - `node scripts/verify-shortcuts.mjs` — headless runtime check of the plan-15
   keyboard system against the mock server (palette, shortcuts, editable
   guard, rebinding/conflicts/persistence)
+- `node scripts/verify-router-conflict.mjs` — headless runtime check of the
+  plan-16 port-conflict UX against the mock server (named conflict, fallback
+  one-click recovery, port-bearing site URLs, SiteDetail banner). The mock
+  fakes a LocalWP holding 80/443; `window.__LOCALKIT_MOCK__` (mock builds
+  only) lets the script reach states the UI can't drive on its own.
 - `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
   uses a scratch data dir under the OS temp dir.
@@ -89,7 +94,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
   mock serverkit-localkit extension (`node examples/mock_localkit_ext.cjs`
   first, port 9872); requires the smoke site to exist.
 - `cd src-tauri && cargo test --lib router` — unit tests for the M6 hosts-file
-  block logic (insert/replace/remove idempotency, CRLF preservation).
+  block logic (insert/replace/remove idempotency, CRLF preservation) plus the
+  plan-16 port probe, compose port mapping and `site_url` formatting.
 - `cd src-tauri && cargo run --example m6_smoke` — M6 router E2E against the
   smoke site; **interactive only** (hosts-file writes trigger UAC/elevation
   prompts twice). Run `smoke -- create` first, `smoke -- cleanup` after.
@@ -184,6 +190,28 @@ src-tauri/               Rust backend (also a cargo workspace root)
   Windows — no admin) and records success in settings. Caddyfile regenerates
   + reloads on site create/start/stop/delete; hosts sync on create/delete
   only (no UAC spam on start/stop).
+- **Router coexistence (plan 16):** host ports are configurable via the
+  `app_settings` keys `router_http_port` / `router_https_port` (default
+  80/443; `router::router_ports`). Container ports stay 80/443 — only the
+  host mapping moves — so the Caddyfile and the hosts block stay port-blind.
+  `site_url` is therefore **port-aware**: default ports give the clean
+  `https://<slug>.test`, any other pair gives `http://<slug>.test:<port>`
+  and deliberately stays on http (a non-standard https port re-prompts for a
+  cert exception even with the CA trusted). **`router::site_public_url` is
+  the single source of truth** for "where does this site live" — tray menu,
+  WP install URL, one-click login and sync's `local_url` all funnel through
+  it; never hand-roll the domain-vs-localhost rule again. Frontend mirror:
+  `lib/domains.ts` (`siteUrl`, `isDefaultPorts`).
+  Before enabling (and on every `status()` where `enabled && !running`),
+  `probe_ports` checks who owns the ports. **Probing must consult the OS
+  listener table** (`Get-NetTCPConnection` / `lsof`), not just a trial bind:
+  on Windows a socket bound with SO_REUSEADDR (Docker's port publisher does
+  this) lets you re-bind the same wildcard address, so bind-only probing
+  reports a busy port as free. Conflicts surface as `RouterStatus.conflicts`
+  and drive the Settings callout, the SiteDetail banner and `lk doctor`.
+  Note a failed *enable* leaves `domains_enabled` off (the backend
+  short-circuits before setting it), so UI must not gate conflict reporting
+  on the enabled flag.
 - **System tray (M8):** `tray.rs` owns the tray icon/menu (Tauri 2 built-in
   `TrayIconBuilder` — no extra crate) plus the close-to-tray interception in
   `run()`'s `on_window_event`. The `run_in_background` flag lives in

@@ -1,6 +1,30 @@
 # 16 — Router coexistence: port-conflict pre-flight + configurable router ports
 
-Status: ⬜ planned
+Status: ✅ shipped
+
+> Implementation notes (deviations from the plan as written):
+>
+> - **The probe cannot be bind-only.** Phase 1 specified
+>   `TcpListener::bind` as the conflict test. On Windows that produces false
+>   negatives: a socket bound with `SO_REUSEADDR` — which Docker's port
+>   publisher uses — lets us bind the *same* wildcard address again, so an
+>   occupied port reports free. Verified directly: a container published
+>   8080, `netstat` showed it LISTENING, `bind(0.0.0.0:8080)` still
+>   succeeded. `probe_port` now treats the OS listener table
+>   (`Get-NetTCPConnection` / `lsof`) as the primary signal, with the bind as
+>   corroboration.
+> - **`sync.rs` did not use `site_public_url`.** The Risks section assumed it
+>   already did; both push and pull hardcoded `http://localhost:<port>`, so
+>   with local domains on, push baked `<slug>.test` URLs into the remote DB
+>   and pull knocked the site off its domain. Fixed as part of this plan.
+> - **A failed enable leaves `domains_enabled` off**, so the UI must not gate
+>   conflict reporting on the enabled flag. The SiteDetail banner instead
+>   targets the persistent hazard (domains on, router later lost its ports)
+>   and refreshes router status on mount, since `App.tsx` only refreshed at
+>   startup.
+> - Phase 3's UX is verified headlessly by
+>   `scripts/verify-router-conflict.mjs` (15 checks over the plan's manual
+>   matrix), which is what caught the last two items.
 
 Make local domains survive alongside other tools that also claim ports 80/443
 and the `.test`/`.local` hosts space (LocalWP's nginx router is the canonical

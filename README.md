@@ -214,6 +214,40 @@ docs/
 
 ---
 
+## 🩺 Troubleshooting
+
+### "LocalWP / Local by Flywheel is installed" — my `.test` sites show someone else's 404
+
+Only one program on your machine can own ports **80** and **443**, and
+LocalKit's local-domains router needs them. LocalWP's nginx router binds both
+machine-wide *and* answers every unknown local hostname with its own "Site Not
+Found" page — so if it wins the port, `http://mysite.test` renders **Local's**
+404 rather than anything from LocalKit.
+
+LocalKit detects this before it can bite:
+
+- Enabling local domains runs a port pre-flight first. If something else holds
+  80/443 it names the process and stops, rather than writing hosts entries that
+  would point your sites at the other program.
+- Settings → **Local domains** shows the conflict with two ways out: **Use
+  fallback ports** (one click; the router moves to 8080/8443) or **Retry** after
+  you quit the other app.
+- `lk doctor` prints the active router mode and who owns the ports.
+
+On fallback ports your sites are reachable at
+`http://<slug>.test:8080` — the hosts entries are port-blind, so nothing else
+changes and both apps can run side by side. LocalKit deliberately uses the
+`.test` TLD (RFC 2606) while Local uses `.local`, so the hostnames themselves
+never collide; the fight is only ever over the ports.
+
+Prefer clean `http://<slug>.test` URLs? Quit the other program, set the router
+back to 80/443 in Settings → Local domains, and hit Retry.
+
+> **Note:** switching ports restarts the router and rewrites each running
+> site's WordPress `home`/`siteurl`, so bookmarks and absolute URLs follow.
+
+---
+
 ## 🗺️ Roadmap
 
 - **M1 — Local site lifecycle** ✅ create/start/stop/delete, compose projects, port allocation
