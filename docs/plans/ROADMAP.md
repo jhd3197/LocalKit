@@ -22,7 +22,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 12 | `12_toasts` | ✅ | Global toast store + viewport (from Faro); success/error feedback for every action. |
 | 13 | `13_settings-store` | ✅ | Unified settings store on `app_settings` KV + pre-paint injection; substrate for terminal settings and themes. |
 | 14 | `14_terminal-quick-wins` | ✅ shipped | Web-links, copy-on-select, ghost-text history, terminal font/scrollback settings (needs 13). |
-| 15 | `15_command-palette-shortcuts` | ⬜ | Command registry + palette (mod+K), global shortcuts, remappable bindings in Settings (needs 13). |
+| 15 | `15_command-palette-shortcuts` | ✅ shipped | Command registry + palette (mod+K), global shortcuts, remappable bindings in Settings (needs 13). |
 
 Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferred
 
@@ -89,7 +89,7 @@ Faro paths referenced in each plan):
   terminal settings, themes, notification prefs
 - ✅ Terminal quick wins (plan 14): web-links addon, copy-on-select,
   ghost-text per-site command history, font-size/scrollback settings
-- ⬜ Command palette + shortcuts (plan 15): one command registry feeding a
+- ✅ Command palette + shortcuts (plan 15): one command registry feeding a
   fuzzy palette (mod+K), global shortcuts with editable-target guards,
   remappable bindings in Settings → Keyboard, cheat-sheet, shared
   `useDialog` for modals

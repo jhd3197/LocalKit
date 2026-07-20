@@ -17,7 +17,17 @@ src/                     React 18 + TS + Vite frontend
                          site; scrollback survives page switches; attach/detach)
   lib/termSuggest.ts       ghost-text history suggestions (plan 14): per-site MRU
                          in localStorage, →/End accepts, frontend-only
-  stores/                Zustand stores (nav.ts = page state + settings modal,
+  lib/commands.tsx         single command registry (plan 15): static + per-site
+                         commands feeding the palette, shortcuts, cheat-sheet
+  lib/shortcuts.ts         keyCombo canonicalizer (mod = Ctrl/Cmd) + comboLabel
+  lib/keybindings.ts       shortcut override resolver over the settings KV
+                         (shortcut.<id>; absent = default, "none" = unbound)
+  lib/fuzzy.ts             fuzzy scorer for the command palette
+  hooks/                   useShortcuts.ts (global keydown dispatcher with
+                         editable-target guard), useDialog.ts (shared modal
+                         Escape/outside-click, topmost-only stack)
+  stores/                Zustand stores (nav.ts = page state + settings modal +
+                         palette/new-site/cheat-sheet dialog flags,
                          settings.ts = unified prefs over the app_settings KV —
                          seeded pre-paint from window.__LOCALKIT_SETTINGS__,
                          sites.ts = data/actions, toast.ts = global toasts +
@@ -27,6 +37,8 @@ src/                     React 18 + TS + Vite frontend
                          container), Settings (modal, opened via sidebar gear —
                          not a page)
   components/            Sidebar, StatusBadge, CopyButton, NewSiteDialog,
+                         CommandPalette, KeyboardSettings,
+                         KeyboardShortcutsDialog,
                          icons.tsx (inline SVGs, 1.75px rounded strokes)
   assets/logo.png        Vite-bundled brand logo (sidebar); master at assets/logo.png
   mock/                  in-browser mocks of @tauri-apps/* for `vite --mode mock`
@@ -67,6 +79,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   so the UI renders with fake data and no Tauri/Docker
 - `npm run shots` — regenerate README screenshots into `docs/screenshots/`
   (headless local Chrome/Edge via puppeteer-core; see docs/screenshots/CAPTURE.md)
+- `node scripts/verify-shortcuts.mjs` — headless runtime check of the plan-15
+  keyboard system against the mock server (palette, shortcuts, editable
+  guard, rebinding/conflicts/persistence)
 - `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
   uses a scratch data dir under the OS temp dir.
@@ -205,6 +220,26 @@ src-tauri/               Rust backend (also a cargo workspace root)
   Terminal exposes `terminalFontSize` (11–16, live-applied via a
   `useSettings.subscribe` in the registry) and `terminalScrollback`
   (1k/5k/10k, read at terminal creation only — noted in the UI).
+- **Command palette + shortcuts (plan 15):** `lib/commands.tsx` is the single
+  registry (`buildCommands()` reads stores via getState so the dispatcher
+  always sees fresh state; `useCommands()` is the reactive wrapper) — static
+  commands + per-site Open/Start|Stop/WP Admin/Terminal rebuilt from the
+  sites store. `hooks/useShortcuts.ts` is the one global keydown listener;
+  the editable-target guard means shortcuts never fire in
+  inputs/selects/contenteditable/xterm unless the combo has `mod`.
+  Combos are canonical (`lib/shortcuts.ts`: `mod` = Ctrl/Cmd, shifted
+  punctuation like `?` carries its own shift). Remappable bindings
+  (phase 3) live in the app_settings KV as `shortcut.<commandId>` —
+  absent = default, `"none"` = explicitly unbound — resolved by the one
+  `effectiveCombo()` in `lib/keybindings.ts` shared by dispatcher, palette,
+  cheat-sheet and Settings → Keyboard; resets go through the
+  `delete_app_setting` command (settings store `remove()`), not a sentinel.
+  Dialog flags (`paletteOpen`, `newSiteOpen`, `cheatsheetOpen`) live in
+  nav.ts and the dialogs render globally in App.tsx, so commands work from
+  any page. Modals share `hooks/useDialog.ts` (Escape closes the topmost
+  dialog only, via a module-level stack; outside-click; focus stays
+  declarative via `autoFocus`) — never hand-roll per-modal Escape
+  listeners.
 - **One-click login (plan 10):** `wordpress::login_url(dir, site, user,
   base_url)` mints a one-time token (`wp option update localkit_login_token`
   + `_exp`, ~120 s TTL) consumed by the MU plugin

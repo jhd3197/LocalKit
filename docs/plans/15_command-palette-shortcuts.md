@@ -1,6 +1,6 @@
 # 15 — Command palette + keyboard shortcuts (with remappable bindings)
 
-Status: ⬜ not started
+Status: ✅ shipped
 
 A single command registry feeding a fuzzy command palette, global keyboard
 shortcuts, a cheat-sheet, and a **Settings → Keyboard** tab where every
