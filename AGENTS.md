@@ -39,7 +39,7 @@ src/                     React 18 + TS + Vite frontend
   components/            Sidebar, StatusBadge, CopyButton, NewSiteDialog,
                          CommandPalette, KeyboardSettings,
                          KeyboardShortcutsDialog, SnapshotsPanel,
-                         DeleteSiteDialog,
+                         DeleteSiteDialog, ImportSiteDialog,
                          icons.tsx (inline SVGs, 1.75px rounded strokes)
   assets/logo.png        Vite-bundled brand logo (sidebar); master at assets/logo.png
   mock/                  in-browser mocks of @tauri-apps/* for `vite --mode mock`
@@ -63,7 +63,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          running `docker compose exec wordpress bash`; events
                          `terminal://data` / `terminal://exit`
   src/serverkit.rs       ServerKit API client (X-API-Key) + connection model
-  src/sync.rs            push/pull orchestration + SyncRecord (sync_history)
+  src/sync.rs            push/pull orchestration + SyncRecord (sync_history) +
+                         plan 18 import (clone a remote site to a new local one)
   src/snapshot.rs        plan 17 snapshots: DB dump + wp-content archive on
                          disk (no DB table), restore, retention
   tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin;
@@ -103,7 +104,13 @@ src-tauri/               Rust backend (also a cargo workspace root)
   `smoke -- create` first.
 - `cd src-tauri && cargo run --example m4_smoke` — M4 push/pull E2E against a
   mock serverkit-localkit extension (`node examples/mock_localkit_ext.cjs`
-  first, port 9872); requires the smoke site to exist.
+  first, port 9872); requires the smoke site to exist. Since plan 18 it also
+  imports a remote site as a real new local site (containers and all) and
+  deletes it again, and asserts the multisite refusal provisions nothing.
+- `node scripts/verify-import.mjs` — headless runtime check of the plan-18
+  import UX against the mock server (per-row Import buttons, the multisite
+  refusal and its tooltip, the version-match readout and mismatch warning,
+  the progress stages, the dashboard origin badge, the duplicate refusal).
 - `cd src-tauri && cargo test --lib router` — unit tests for the M6 hosts-file
   block logic (insert/replace/remove idempotency, CRLF preservation) plus the
   plan-16 port probe, listener-table parsing, compose port mapping and
@@ -115,7 +122,7 @@ src-tauri/               Rust backend (also a cargo workspace root)
   prompts twice). Run `smoke -- create` first, `smoke -- cleanup` after.
 - `cd src-tauri && cargo run -p lk -- <cmd>` — headless CLI (`lk list |
   create | start | stop | restart | delete | info | logs | wp | env | login |
-  snapshot list|create|restore|delete | doctor`); shares the GUI's data dir,
+  snapshot list|create|restore|delete | import | doctor`); shares the GUI's data dir,
   so use `--data-dir` (or
   `LOCALKIT_DATA_DIR`) for throwaway tests. See docs/plans/7_cli.md.
 - CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
@@ -309,7 +316,41 @@ src-tauri/               Rust backend (also a cargo workspace root)
   `wp search-replace` remote → local. Ops emit `site-event` stages and record
   rows in `sync_history` (migration 3). Connections live in
   `serverkit_connections` (migration 2); **API keys in plaintext SQLite** —
-  accepted for v1, revisit with a keyring later.
+  accepted for v1, revisit with a keyring later. `sync::emit` delegates to
+  `site::emit`, so sync progress prints to stderr in the CLI/examples instead
+  of vanishing. Bulk transfers use `serverkit::transfer_client` (30 min), not
+  the 15 s probe client — reqwest's `timeout` is a *total* request budget, so
+  the short one aborts any payload bigger than a fast link can move in 15 s.
+- **Import (plan 18):** `sync::import_site` clones a remote site into a *new*
+  local site. Order is the design: `pre_import` checks everything knowable
+  before provisioning (extension advertises `pull-code`, remote exists, not
+  multisite, not already imported from that same remote via the migration-5
+  `connection_id`/`remote_site_id` columns), so a predictable failure leaves
+  no half-built site; after `site::reserve` any failure runs `site::cleanup`.
+  **`wp core install` is never run** — the imported database IS the site, and
+  `admin_user` is read back from its first administrator (no password stored;
+  one-click login does not need one). `extract_wp_content` treats the archive
+  as hostile: plain files/dirs under `wp-content/` only — absolute paths,
+  `..`, symlinks and hardlinks are refused, never sanitized. Version drift is
+  a warning, not an error (`match_version` drops the remote patch level and
+  matches `major.minor` against the allowlist, falling back to newest).
+  Permalinks are flushed after import or every imported page 404s. Optional
+  post-import wp-cli steps are wrapped in `optional()` (2 min timeout): they
+  run after the data has landed, so hanging on one would discard a completed
+  import.
+- **Extension capabilities:** `GET /pair` returns a `features` array; probe it
+  with `serverkit::has_feature`. **Absent means unsupported, not unknown** —
+  gate the UI on it rather than discovering a 404 mid-operation. Add new
+  server capabilities to `FEATURES` in the extension's `localkit.py` (append
+  only; never rename an entry, clients match the literal string).
+- **`site::create` is split** into `reserve` (validate + unique slug + free
+  ports + insert the `creating` row) and `write_project_files`, so the import
+  flow allocates through the same race-free path instead of a parallel copy.
+  `wordpress::wait_for_config` exists because `site::wait_for_port` is not a
+  readiness signal: Docker publishes the host port when the container is
+  *created*, so wp-cli can race the image entrypoint still writing
+  wp-config.php. Anything shelling into wp-cli right after `compose up` must
+  wait on it (`site::create` only survives because its install step retries).
 - **Snapshots (plan 17):** `snapshot.rs`. A snapshot is a *directory*, not a
   DB row — no migration: `<data dir>/snapshots/<site_id>/<ts>/` holding
   `manifest.json` + `db.sql.gz` + `wp-content.tar.gz`. The manifest carries

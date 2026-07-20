@@ -1,6 +1,6 @@
 # 18 — Import a ServerKit site as a new local site
 
-Status: ⬜ planned
+Status: ✅ shipped
 
 One-click "clone to local" for any site on a connected ServerKit server:
 provision a fresh local site, pull down the remote `wp-content` and database,
@@ -98,3 +98,47 @@ for code and orchestrates the whole flow behind one button.
   paths, symlink escapes) against fixture archives.
 - Manual E2E against a real ServerKit box: import → one-click login works →
   edit a theme file locally → push code back.
+
+## What shipped
+
+All three phases, plus `scripts/verify-import.mjs` (headless UI check against
+the mock server, mirroring the other plans' `verify-*.mjs`).
+
+Deviations from the plan above, and why:
+
+- **Feature names.** `GET /pair` reports `["sites", "push-code", "push-db",
+  "pull-db", "pull-code"]` — hyphenated and split per direction, rather than
+  the sketch's `["sites", "push", "pull-db", "pull-code"]`. A single `push`
+  could not express a server that gained one direction but not the other.
+- **`/sites` enrichment.** `url` and `wp_version` were already in the hub
+  payload; only `php_version` (regexed off the compose image tag, not a
+  per-site container shell) and an explicit `site_url` alias were added.
+  `multisite` was already there and is what the refusal reads.
+- **Version matching returns a warning, not just an event.** `match_version`
+  is a pure, unit-tested function shared by the backend, and mirrored in the
+  Import dialog so the user sees the mismatch *before* committing.
+- **`pre_import` is stricter than sketched.** It refuses a second import from
+  the same remote outright rather than offering "pull into existing" inline —
+  the error names the local site to pull into, which is the same guidance
+  without a second flow to build.
+
+Two things found by running it that the plan did not anticipate:
+
+- **`wait_for_port` is not a readiness signal.** Docker publishes the host
+  port when the container is *created*, so the first wp-cli call raced the
+  image entrypoint still writing wp-config.php and died with "'wp-config.php'
+  not found". `site::create` never noticed because its install step retries
+  for a minute. Fixed with `wordpress::wait_for_config`.
+- **A hung `docker compose run` can discard a finished import.** Observed a
+  container Docker reported as "Up" with no processes inside it. The optional
+  post-import steps (permalink/cache flush, admin lookup) are now bounded by
+  `optional()`, since they run after the data has already landed.
+
+Deferred, deliberately:
+
+- **Large-site warning.** The plan wanted the Import button to warn when the
+  remote reports a huge `wp-content`; the extension does not report a size,
+  and adding one belongs with plan 19's chunked transfer work.
+- **A killed import leaves a `creating` row with live containers.** In-process
+  failures clean up, but a SIGKILL cannot. That is plan 23's (reconciliation)
+  job, not a second half-measure here.

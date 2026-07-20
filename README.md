@@ -97,7 +97,8 @@ npm run tauri build
 | | |
 |---|---|
 | **Push Code**<br>Push your local `wp-content` straight to a remote site on your ServerKit server. | **Push / Pull Database**<br>Push the DB, or pull a remote DB into your local site with automatic URL search-replace. |
-| **Sync History**<br>Every sync op is recorded per site, with its result. | **Connections**<br>Save, test, and delete server connections; browse remote sites and provision new ones — all through the `serverkit-localkit` extension. |
+| **Import a Remote Site**<br>Clone any site on your server down as a *new* local site — wp-content, database and URL rewriting in one step, from the app or `lk import`. | **Sync History**<br>Every sync op is recorded per site, with its result. |
+| **Connections**<br>Save, test, and delete server connections; browse remote sites and provision new ones — all through the `serverkit-localkit` extension. | **Capability-Aware**<br>The app asks the extension what it supports, so features an older server can't do are disabled with a reason instead of failing halfway. |
 
 ### 🖥️ Desktop & CLI
 
@@ -137,6 +138,7 @@ lk wp my-blog plugin list               # wp-cli passthrough
 lk env my-blog                          # eval-able exports: eval $(lk env my-blog)
 lk snapshot create my-blog              # point-in-time DB + wp-content copy
 lk snapshot restore my-blog <id> --yes  # roll back to one
+lk import Production client-blog        # clone a server site down as a new local site
 lk doctor                               # diagnose Docker / compose / data dir
 lk list --json                          # machine-readable output
 ```
@@ -212,6 +214,9 @@ docs/
 - Connection test = public `/api/v1/system/health` + key validation against `/api/v1/setup-health/account` + a `/api/v1/localkit/pair` probe that detects the extension.
 - All sync endpoints live in the `serverkit-localkit` extension (`/api/v1/localkit/...`); without it, LocalKit tells you exactly what's missing.
 - **Push code** = in-memory tar.gz of `wp-content/` → multipart POST. **Push DB** = `wp db export` → multipart POST. **Pull DB** = download dump → `wp db import` → `wp search-replace` remote URL → local URL.
+- **Import** provisions a new local site, then lands the remote `wp-content` (via the extension's `pull/code`) and database on it. WordPress is never installed over the imported database — the database *is* the site, so its posts, users and settings come across intact. Log in with the remote's own accounts (`lk login`, or the app's WP Admin button).
+- The app gates Import on the capabilities the extension reports from `GET /pair`, so a server running an older extension shows the button disabled with the reason rather than failing mid-import. Multisite installs are refused outright.
+- Downloaded archives are extracted under a strict policy — only plain files and directories under `wp-content/`; absolute paths, `..`, and symlinks are rejected.
 - Every sync op is recorded in the per-site sync history with its result.
 - API keys are stored in **plaintext** in LocalKit's local SQLite DB — accepted for v1, keyring storage is on the roadmap.
 
@@ -256,7 +261,7 @@ back to 80/443 in Settings → Local domains, and hit Retry.
 - **M1 — Local site lifecycle** ✅ create/start/stop/delete, compose projects, port allocation
 - **M2 — WordPress install & detail** ✅ wp-cli install, credentials, logs, wp info
 - **M3 — ServerKit connection** ✅ save/test connections, extension detection, browse remote sites
-- **M4 — Push / pull** ✅ push code, push DB, pull DB with URL rewrite, sync history
+- **M4 — Push / pull** ✅ push code, push DB, pull DB with URL rewrite, sync history, import a remote site as a new local site
 - **M5 — Release polish** ⬜ installers, auto-update, OS keyring for API keys, test suite
 - **M6 — Local domains** ✅ `http(s)://<slug>.test` via a shared Caddy router, managed hosts block + local CA trust (plan 6)
 - **M7 — CLI (`lk`)** ✅ headless companion binary: lifecycle, wp passthrough, `env`, `doctor`, JSON output (plan 7)

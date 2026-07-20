@@ -25,7 +25,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 15 | `15_command-palette-shortcuts` | ✅ shipped | Command registry + palette (mod+K), global shortcuts, remappable bindings in Settings (needs 13). |
 | 16 | `16_router-coexistence` | ✅ shipped | Port-80/443 conflict pre-flight + configurable router ports so domains survive alongside LocalWP & co. |
 | 17 | `17_snapshots` | ✅ shipped | DB + wp-content snapshots with one-click restore; automatic before push/pull/delete. Safety net for 18–20. |
-| 18 | `18_import-remote-site` | ⬜ | Clone a ServerKit site down as a *new* local site (needs the extension's missing pull/code endpoint). |
+| 18 | `18_import-remote-site` | ✅ shipped | Clone a ServerKit site down as a *new* local site; adds the extension's `pull/code` endpoint + a `features` capability contract. |
 | 19 | `19_sync-v2-chunked` | ⬜ | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). |
 | 20 | `20_clone-and-blueprints` | ⬜ | One-click site clone + save-site-as-blueprint creation flows (needs 17). |
 | 21 | `21_cli-serverkit` | ⬜ | `lk connection/push/pull` + remote listing + shell completions (Track D). |
@@ -62,8 +62,11 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 - ✅ Push code (in-memory tar.gz of `wp-content/`), push DB (`wp db export`),
   pull DB (download → `wp db import` → `wp search-replace`)
 - ✅ Sync history per site (migration 3)
-- ⬜ Pull a remote site down as a *new* local site (plan 18; today pull
-  targets an existing local site)
+- ✅ Pull a remote site down as a *new* local site (plan 18): the extension's
+  new `pull/code` endpoint, safe-extract policy, no-`core install` import,
+  migration-5 origin columns, Import UI + `lk import`
+- ✅ Extension capability contract (`GET /pair` → `features`), so the UI
+  disables what an older server cannot do instead of failing mid-operation
 
 ## Track C — Product (M5–M6)
 
@@ -90,6 +93,8 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   / `info` / `logs`
 - ✅ `lk wp <site> <args...>` wp-cli passthrough, `lk env` (eval-able
   exports), `lk doctor`, `-o json` / `--quiet` / `--data-dir` global flags
+- ✅ `lk import <connection> <remote-site>` (plan 18) — the first ServerKit
+  command in the CLI; the rest lands with plan 21
 - ⬜ ServerKit from the CLI: `lk connection add/list`, `lk push`, `lk pull`
   (plan 21; library calls already exist)
 - ⬜ Shell completions (plan 21), self-update (future)
