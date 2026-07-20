@@ -6,7 +6,7 @@
 
 **Spin up local WordPress sites in one click — each site an isolated Docker Compose project.**
 
-[![Version](https://img.shields.io/badge/version-0.1.0-756ce3?style=flat-square)](https://github.com/jhd3197/localkit/releases)
+[![Version](https://img.shields.io/badge/version-0.1.1-756ce3?style=flat-square)](https://github.com/jhd3197/localkit/releases)
 [![License](https://img.shields.io/badge/license-MIT-756ce3?style=flat-square)](LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-756ce3?style=flat-square)](https://tauri.app)
 
