@@ -202,6 +202,8 @@ export interface ServerKitInfo {
   localkit_extension: boolean;
   /** Extension capabilities (plan 18). Absent name = unsupported, not unknown. */
   features: string[];
+  /** Site kinds the extension can sync (plan 26). Empty/absent → wordpress only. */
+  kinds: string[];
 }
 
 /** Capability names reported by the extension's `GET /pair`. */
@@ -214,6 +216,8 @@ export interface RemoteWpSite {
   status: string;
   wp_version: string | null;
   php_version: string | null;
+  /** Stack kind (plan 26): "wordpress" (default) | "php". */
+  kind: string;
   /** Multisite installs cannot be imported — one compose project, one site. */
   multisite: boolean;
   environment_count: number;

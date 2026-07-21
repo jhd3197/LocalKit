@@ -758,7 +758,8 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         staging: false,
         api_key_valid: true,
         localkit_extension: true,
-        features: ["sites", "push-code", "push-db", "pull-db", "pull-code"],
+        features: ["sites", "push-code", "push-db", "pull-db", "pull-code", "sync-v2"],
+        kinds: ["wordpress", "php"],
       };
       return info;
     }
@@ -775,6 +776,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         status: "running",
         wp_version: "6.7",
         php_version: "8.3",
+        kind: "wordpress",
         multisite: false,
         environment_count: 1,
       };
@@ -800,19 +802,33 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
       const id = `site-${slug}`;
       const conn = data.connections.find((c) => c.id === connectionId);
+      const isPhp = remote.kind === "php";
       // Same stages the Rust import emits, so the progress toast reads the same.
-      const stages: Array<[string, string]> = [
-        ["files", "Writing project files…"],
-        ["pulling", "Downloading WordPress images (first run can take a few minutes)…"],
-        ["code", "Downloading remote wp-content…"],
-        ["code", "Extracting wp-content (48.2 MB)…"],
-        ["containers", "Starting Docker containers…"],
-        ["waiting", "Waiting for WordPress to come online…"],
-        ["install", "Downloading remote database…"],
-        ["install", "Importing remote database…"],
-        ["install", "Rewriting URLs remote -> local…"],
-        ["done", `${name} imported from ${conn?.label ?? "server"} — now running at http://localhost:${port}`],
-      ];
+      const stages: Array<[string, string]> = isPhp
+        ? [
+            ["files", "Creating the project directory…"],
+            ["code", "Downloading remote application code…"],
+            ["code", "Extracting code (6.1 MB)…"],
+            ["files", "Writing project files…"],
+            ["pulling", "Building the PHP image (first run can take a few minutes)…"],
+            ["containers", "Starting containers…"],
+            ["waiting", "Waiting for the app to come online…"],
+            ["install", "Downloading remote database…"],
+            ["install", "Importing remote database…"],
+            ["done", `${name} imported from ${conn?.label ?? "server"} — now running at http://localhost:${port}`],
+          ]
+        : [
+            ["files", "Writing project files…"],
+            ["pulling", "Downloading WordPress images (first run can take a few minutes)…"],
+            ["code", "Downloading remote wp-content…"],
+            ["code", "Extracting wp-content (48.2 MB)…"],
+            ["containers", "Starting Docker containers…"],
+            ["waiting", "Waiting for WordPress to come online…"],
+            ["install", "Downloading remote database…"],
+            ["install", "Importing remote database…"],
+            ["install", "Rewriting URLs remote -> local…"],
+            ["done", `${name} imported from ${conn?.label ?? "server"} — now running at http://localhost:${port}`],
+          ];
       void (async () => {
         for (const [stage, message] of stages) {
           emit("site-event", { id, stage, message } satisfies SiteEvent);
@@ -837,12 +853,18 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         status: "creating",
         // The imported database keeps the remote's accounts, and no password
         // of ours — mirrors what the backend records.
-        admin_user: "admin",
+        admin_user: isPhp ? "" : "admin",
         admin_pass: "",
         created_at: new Date().toISOString(),
         connection_id: connectionId,
         remote_site_id: remoteId,
-        ...WP_SITE_KIND,
+        ...(isPhp
+          ? {
+              kind: "php",
+              config: { service: "app", sync_path: "app", db_engine: "mariadb", db_service: "db" },
+              capabilities: data.PHP_CAPS,
+            }
+          : WP_SITE_KIND),
       };
       data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-imp0rt-0001" });
       (data.syncHistory[id] ??= []).unshift({

@@ -176,7 +176,11 @@ src-tauri/               Rust backend (also a cargo workspace root)
   when `/pair` withholds `sync-v2`. Since plan 21 the mock also serves the
   ServerKit core probes (public `GET /api/v1/system/health` →
   `service: serverkit-api`, and the key-gated `GET /api/v1/setup-health/account`)
-  so `lk connection add`/`test` and `lk doctor` can validate against it.
+  so `lk connection add`/`test` and `lk doctor` can validate against it. Since
+  plan 26 the mock advertises `kinds` in `/pair` and a php remote (id 4), and
+  `m4_smoke` step 8 drives a php stack cycle: create a real php site, assert a
+  server that drops php from `kinds` refuses the push, then engine-native
+  push-db → wipe → pull-db and assert the marker row round-trips (no wp-cli).
 - `node scripts/verify-sync-progress.mjs` — headless runtime check of the
   plan-19 transfer UX against the mock server (the byte readout advancing
   monotonically against a fixed total, the Cancel button appearing only while
@@ -607,12 +611,28 @@ src-tauri/               Rust backend (also a cargo workspace root)
   Permalinks are flushed after import or every imported page 404s. Optional
   post-import wp-cli steps are wrapped in `optional()` (2 min timeout): they
   run after the data has landed, so hanging on one would discard a completed
-  import.
+  import. A **php** remote imports through `do_import_php` (plan 26): reserve a
+  php site, download the `app/` code, generate the infra against the real layout
+  (`php::write_infra` picks the nginx webroot), build + up, import the DB
+  engine-native, and patch `APP_URL` — no wp-cli, no `wait_for_config`, no
+  `core install`.
 - **Extension capabilities:** `GET /pair` returns a `features` array; probe it
   with `serverkit::has_feature`. **Absent means unsupported, not unknown** —
   gate the UI on it rather than discovering a 404 mid-operation. Add new
   server capabilities to `FEATURES` in the extension's `localkit.py` (append
   only; never rename an entry, clients match the literal string).
+- **Per-kind ServerKit sync (plan 26):** `/pair` also returns a `kinds` array
+  (site kinds the extension can sync) and `/sites` carries a `kind` per site.
+  **Absent → `["wordpress"]`** (`serverkit::normalize_kinds`), so an old server ↔
+  new client is safe. WordPress is always syncable; `serverkit::supports_kind`
+  gates php on the advertisement. `sync::require_syncable` enforces capability +
+  kind (wordpress|php only — docker stays local-only) + server support before
+  provisioning/dumping. DB export/import is engine-native for php via `dbsync`;
+  code push/import archive the config `sync_path` (`app/` for php, `wp-content`
+  for WP) through the same `extract_code(root)`. php pull/import patches
+  `APP_URL` best-effort (no search-replace). The `serverkit-localkit` extension
+  advertises `KINDS = ['wordpress']` today (serverkit-wordpress is its only
+  backend); add `'php'` in lockstep with a php-stack backend.
 - **`site::create` is split** into `reserve` (validate + unique slug + free
   ports + insert the `creating` row) and `write_project_files`, so the import
   flow allocates through the same race-free path instead of a parallel copy.

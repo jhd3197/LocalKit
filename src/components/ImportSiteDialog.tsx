@@ -41,10 +41,12 @@ export default function ImportSiteDialog() {
 
   if (!target) return null;
   const { site } = target;
+  const isPhp = site.kind === "php";
 
   const wp = matchVersion(versions.wp_versions, site.wp_version);
   const php = matchVersion(versions.php_versions, site.php_version);
-  const mismatch = !wp.exact || !php.exact;
+  // A php site has no WordPress version, so only its PHP image match matters.
+  const mismatch = isPhp ? !php.exact : !wp.exact || !php.exact;
 
   const submit = async () => {
     const created = await importSite(name.trim() || undefined);
@@ -62,9 +64,9 @@ export default function ImportSiteDialog() {
       >
         <h2 className="text-lg font-semibold text-white">Import “{site.name}”</h2>
         <p className="mt-1 text-sm text-zinc-500">
-          LocalKit will create a new local site and copy this server site's wp-content and
-          database into it, rewriting URLs to the local address. The remote site is not
-          modified.
+          {isPhp
+            ? "LocalKit will create a new local PHP/Laravel site and copy this server site's application code and database into it. The remote site is not modified."
+            : "LocalKit will create a new local site and copy this server site's wp-content and database into it, rewriting URLs to the local address. The remote site is not modified."}
         </p>
 
         <div className="mt-5 flex flex-col gap-4">
@@ -82,11 +84,14 @@ export default function ImportSiteDialog() {
 
           <dl className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-sm">
             <Row label="Remote URL" value={site.url ?? "—"} mono />
-            <Row
-              label="WordPress"
-              value={`${site.wp_version ?? "unknown"} → ${wp.chosen}`}
-              warn={!wp.exact}
-            />
+            <Row label="Kind" value={isPhp ? "PHP / Laravel" : "WordPress"} />
+            {!isPhp && (
+              <Row
+                label="WordPress"
+                value={`${site.wp_version ?? "unknown"} → ${wp.chosen}`}
+                warn={!wp.exact}
+              />
+            )}
             <Row
               label="PHP"
               value={`${site.php_version ?? "unknown"} → ${php.chosen}`}
