@@ -33,7 +33,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 23 | `23_reconciliation` | ✅ shipped | Settle DB site status against Docker ground truth (forward-only, 60s reconciler); `degraded` status; recover half-created sites (Resume/Clean up); Docker-health pill. |
 | 24 | `24_site-tools` | ✅ shipped | Tools tab: Adminer sidecar, serialization-safe search-replace, WP_DEBUG + log viewer, config editor. |
 | 25 | `25_release-polish-completion` | ✅ | M5 remainder: update checker, OS keyring for API keys, OS notifications, real test suite. |
-| 26 | `26_php-laravel-stack` | ⬜ | Generated PHP/Laravel stack + per-kind ServerKit sync parity (needs 22, 17–19). |
+| 26 | `26_php-laravel-stack` | ✅ shipped | Generated PHP/Laravel stack + engine-native DB sync + per-kind ServerKit sync/import parity (needs 22, 17–19). Server-side php *hosting* awaits a php backend; `serverkit-localkit` advertises `kinds: ['wordpress']` until then. |
 
 Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferred
 
@@ -135,8 +135,13 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   terminal, local domain (`<slug>.test` → the app's published port), tray,
   code-only snapshots. Code-only for now — engine-native DB dumps (which would
   flip `db_sync` on) are a follow-up
-- ⬜ PHP/Laravel generated stack + engine-native DB sync + per-kind
-  ServerKit push/pull/import parity, and per-kind clone/blueprints (plan 26)
+- ✅ PHP/Laravel generated stack (plan 26): a generated php-fpm + nginx + mariadb
+  stack (built with pdo_mysql + Composer), empty Laravel-ready skeleton or import
+  an existing folder; engine-native DB sync (`dbsync`: mysqldump/mysql,
+  pg_dump/psql) wired into snapshots; per-kind ServerKit push/pull/import parity
+  gated on a `kinds` advertisement (`lk create --kind php`, New Site "PHP /
+  Laravel" tab). Server-side php *hosting* awaits a php backend (the extension
+  advertises `kinds: ['wordpress']`); per-kind clone/blueprints remain WP-only.
 - 🅿️ Node/Python kinds (unplanned; same capability shape when there's demand)
 
 ## Track E — UX ports from Faro (M12–M14)

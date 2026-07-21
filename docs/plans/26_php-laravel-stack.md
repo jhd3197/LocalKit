@@ -1,6 +1,25 @@
 # 26 — PHP/Laravel stack + per-kind ServerKit sync parity
 
-Status: ⬜ planned
+Status: ✅ shipped (LocalKit side); server-side php *hosting* awaits a php backend
+
+**Implementation notes (what shipped vs the design below):**
+- Phase 1: `php.rs` generates the stack. The `app` service is **built** from a
+  tiny `docker/Dockerfile` (`FROM php:<ver>-fpm` + `pdo_mysql` + Composer) rather
+  than the bare php-fpm image — the plan's "keep the default extension set" left
+  a Laravel app unable to reach the bundled mariadb, so the two extensions a
+  bundled DB makes pointless without are added. Exotic extensions stay the
+  documented "edit the Dockerfile" path. `render_compose` is now kind-aware.
+- Phase 2: `dbsync.rs` is the engine-native dispatch (mariadb-dump/mysqldump/
+  pg_dump + clients), wired into `snapshot::create`/`restore`. Verified via
+  `smoke -- php` (snapshot DB round-trip).
+- Phase 3: client-side per-kind push/pull/import (`sync.rs`), `kinds`
+  advertisement + gating (`serverkit.rs`), mock php remote + `m4_smoke` step 8.
+  The **server extension** gained the contract (`kinds` in `/pair`, `kind` in
+  `/sites`) but advertises `['wordpress']` only — ServerKit has no php site
+  backend yet, so php hosting there is a follow-up. The client already speaks
+  the php protocol, so flipping `KINDS` on lands with that backend.
+- Not done (out of the plan's Phase 1–3 scope): per-kind clone/blueprints stay
+  WordPress-only.
 
 The second multi-stack kind: a generated **PHP/Laravel** site template with
 database sync that doesn't depend on wp-cli — plus the ServerKit extension
