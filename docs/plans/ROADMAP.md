@@ -28,7 +28,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 18 | `18_import-remote-site` | ✅ shipped | Clone a ServerKit site down as a *new* local site; adds the extension's `pull/code` endpoint + a `features` capability contract. |
 | 19 | `19_sync-v2-chunked` | ✅ shipped | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). Server-side job-queue handoff deferred — see the plan. |
 | 20 | `20_clone-and-blueprints` | ✅ shipped | One-click site clone + save-site-as-blueprint creation flows, portable `.lkbp` export/import (needs 17). |
-| 21 | `21_cli-serverkit` | ⬜ | `lk connection/push/pull` + remote listing + shell completions (Track D). |
+| 21 | `21_cli-serverkit` | ✅ shipped | `lk connection/push/pull` + remote listing + shell completions (Track D). |
 | 22 | `22_multi-stack-core` | ⬜ | Kind/capability site model + bring-your-own-compose Docker apps — before 23–25 so new features are capability-aware from day one. |
 | 23 | `23_reconciliation` | ⬜ | Settle DB site status against Docker ground truth; recover half-created sites; Docker-health gating. |
 | 24 | `24_site-tools` | ⬜ | Tools tab: Adminer sidecar, serialization-safe search-replace, WP_DEBUG + log viewer, config editor. |
@@ -107,9 +107,12 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   command in the CLI; the rest lands with plan 21
 - ✅ `lk clone <site> <new-name>`, `lk blueprint list|save|delete|export|import`
   and `lk create --blueprint <id|name>` (plan 20)
-- ⬜ ServerKit from the CLI: `lk connection add/list`, `lk push`, `lk pull`
-  (plan 21; library calls already exist)
-- ⬜ Shell completions (plan 21), self-update (future)
+- ✅ ServerKit from the CLI (plan 21): `lk connection add/list/test/remove`,
+  `lk sites --remote <conn>`, `lk push <site> --code|--db`, `lk pull <site>
+  --db` — validated `connection add`, target defaults to the site's linked
+  remote, exit 2 on a server rejection, `doctor` connection probes
+- ✅ Shell completions (plan 21): `lk completions <bash|zsh|fish|powershell>`
+  via `clap_complete`; self-update (future)
 
 ## Track F — Multi-stack (M9)
 

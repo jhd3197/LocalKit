@@ -126,7 +126,10 @@ src-tauri/               Rust backend (also a cargo workspace root)
   incompressible filler into the smoke site's wp-content, has the mock refuse
   chunks after two land, and asserts the retry re-sends only the missing ones,
   that the same >100 MB archive is refused over v1, and that v1 still works
-  when `/pair` withholds `sync-v2`.
+  when `/pair` withholds `sync-v2`. Since plan 21 the mock also serves the
+  ServerKit core probes (public `GET /api/v1/system/health` →
+  `service: serverkit-api`, and the key-gated `GET /api/v1/setup-health/account`)
+  so `lk connection add`/`test` and `lk doctor` can validate against it.
 - `node scripts/verify-sync-progress.mjs` — headless runtime check of the
   plan-19 transfer UX against the mock server (the byte readout advancing
   monotonically against a fixed total, the Cancel button appearing only while
@@ -156,9 +159,20 @@ src-tauri/               Rust backend (also a cargo workspace root)
   create [--blueprint <id|name>] | clone <site> <new-name> | start | stop |
   restart | delete | info | logs | wp | env | login |
   snapshot list|create|restore|delete |
-  blueprint list|save|delete|export|import | import | doctor`); shares the GUI's
+  blueprint list|save|delete|export|import | import |
+  connection add|list|test|remove | sites --remote <conn> |
+  push <site> --code|--db | pull <site> --db |
+  completions <bash|zsh|fish|powershell> | doctor`); shares the GUI's
   data dir, so use `--data-dir` (or
-  `LOCALKIT_DATA_DIR`) for throwaway tests. See docs/plans/7_cli.md.
+  `LOCALKIT_DATA_DIR`) for throwaway tests. See docs/plans/7_cli.md and
+  docs/plans/21_cli-serverkit.md (the ServerKit surface).
+- `node scripts/verify-cli-serverkit.mjs` — headless runtime check of the
+  plan-21 `lk` ServerKit surface against `examples/mock_localkit_ext.cjs`:
+  it shells out to the compiled `lk` binary (build it first with
+  `cargo build -p lk`) with a throwaway data dir and asserts exit codes and
+  `--json` shapes for connection add/list/test/remove, `sites --remote`, the
+  bad-key refusal, the push/pull argument errors, and completions for all four
+  shells. The Docker-backed push/pull path is covered by `m4_smoke`.
 - CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
   build`, `cargo check --workspace --all-targets`, `cargo test --workspace`
   (matches Faro's CI shape).
@@ -237,6 +251,22 @@ src-tauri/               Rust backend (also a cargo workspace root)
   is per-command and always pretty, errors print `error: <msg>` on stderr
   with exit 1, sites resolve by exact id or case-insensitive slug/name, and
   destructive commands prompt (default No) with `--yes` required on non-TTY.
+- **CLI ServerKit (plan 21):** connections resolve by exact id or
+  case-insensitive label, same shape as sites (`pick_connection` sits next to
+  `pick`). `connection add` validates (health + key + `/pair`) *before*
+  storing and refuses a key that doesn't work; the key comes from a hidden
+  `rpassword` prompt, `--key`, or `LOCALKIT_API_KEY` (never prompts on a
+  non-TTY). `connection list` is local-only (no network — `test` does the live
+  probe) and its `--json` uses a redacted `ConnectionView` so the plaintext
+  API key never reaches stdout. `push`/`pull` default their target to the
+  site's linked remote (plan-18 migration-5 `connection_id`/`remote_site_id`);
+  `--connection`/`--remote-site` override, and are required when the site has
+  no link. Push/pull exit **2** when the *server* rejects the operation
+  (`remote_rejected` heuristic over the library's error strings) vs 1 for local
+  failures, and `--json` prints the resulting `SyncRecord` (read back from
+  history). `doctor` runs the same connection probe per stored connection but
+  keeps it informational — a down remote is not a local misconfig, so it never
+  flips the exit code. `completions` is `clap_complete`.
 - **Local domains (M6):** `router.rs` runs one shared Caddy project at
   `<data dir>/router/` (ports 80/443, `host.docker.internal:host-gateway`,
   routes to site host ports — never touch site compose templates). TLD is

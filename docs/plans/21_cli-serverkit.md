@@ -1,6 +1,20 @@
 # 21 — `lk` CLI: ServerKit connections, push/pull, shell completions
 
-Status: ⬜ planned
+Status: ✅ shipped
+
+Shipped as designed, with two deliberate calls where the plan was open:
+
+- **`connection list` is local-only** (name, url, added) rather than probing
+  every server for its extension version / last-used. A list that hangs on N
+  network round-trips (and can't run offline) is the wrong default for a CLI;
+  `lk connection test <name>` does the live probe, and `lk doctor` probes every
+  connection at once. Both `list` outputs redact the API key.
+- **push/pull gained `--remote-site <id|name>`.** The plan only named
+  `--connection`, but a push needs *both* a connection and a remote site id.
+  Imported sites carry both (plan-18 migration-5 columns) so the common case is
+  zero-flag; `--connection`/`--remote-site` fill in for a site with no link.
+  Exit codes: 0 / 1 / 2 (server rejected, via a heuristic over the library's
+  error strings, since `sync::*` returns a bare `String`).
 
 Close out Track D: give the `lk` CLI full access to the ServerKit side of
 the app — manage connections, list remote sites, push, pull — plus shell
