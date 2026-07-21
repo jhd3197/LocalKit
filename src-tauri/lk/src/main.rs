@@ -18,7 +18,10 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell as CompletionShell;
+use localkit_lib::serverkit::{self, ServerKitConnection};
+use localkit_lib::sync::{self, SyncRecord};
 use localkit_lib::{blueprint, db::Db, docker, router, site, snapshot, wordpress, AppState};
 
 // ---------------------------------------------------------------------------
@@ -55,6 +58,63 @@ enum Cmd {
     /// List all sites (slug, live status, URL, versions)
     List {
         /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List the WordPress sites on a ServerKit server (read-only).
+    Sites {
+        /// ServerKit connection to query (exact id, or case-insensitive name)
+        #[arg(long)]
+        remote: String,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Manage ServerKit connections (add, list, test, remove)
+    #[command(subcommand)]
+    Connection(ConnectionCmd),
+
+    /// Push a local site's code and/or database to its ServerKit remote.
+    /// `--connection`/`--remote-site` are only needed when the site has no
+    /// linked remote (imported sites carry one). Exit 2 = the server rejected it.
+    Push {
+        /// Local site (exact id, or case-insensitive slug or name)
+        site: String,
+        /// Push wp-content
+        #[arg(long)]
+        code: bool,
+        /// Push the database (site must be running)
+        #[arg(long)]
+        db: bool,
+        /// ServerKit connection (defaults to the site's linked remote)
+        #[arg(long)]
+        connection: Option<String>,
+        /// Remote site to target (numeric id or name; defaults to the link)
+        #[arg(long)]
+        remote_site: Option<String>,
+        /// Print the resulting sync record(s) as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Pull a database from a local site's ServerKit remote into it (destructive
+    /// — a pre-pull snapshot is taken first). Exit 2 = the server rejected it.
+    /// To bring a remote site down as a NEW local site, use `lk import`.
+    Pull {
+        /// Local site (exact id, or case-insensitive slug or name)
+        site: String,
+        /// Pull the database (the only pull; the site must be running)
+        #[arg(long)]
+        db: bool,
+        /// ServerKit connection (defaults to the site's linked remote)
+        #[arg(long)]
+        connection: Option<String>,
+        /// Remote site to target (numeric id or name; defaults to the link)
+        #[arg(long)]
+        remote_site: Option<String>,
+        /// Print the resulting sync record as machine-readable JSON
         #[arg(long)]
         json: bool,
     },
@@ -184,9 +244,66 @@ enum Cmd {
         open: bool,
     },
 
-    /// Diagnose the local environment (Docker, compose, data dir).
-    /// Exits non-zero while any check fails, so it can gate scripts.
+    /// Diagnose the local environment (Docker, compose, data dir) plus every
+    /// stored ServerKit connection. Exits non-zero while any local check fails,
+    /// so it can gate scripts; a connection being down is reported but does not
+    /// flip the exit code (a remote outage is not a local misconfiguration).
     Doctor,
+
+    /// Print a shell completion script for `lk` to stdout.
+    /// e.g. `lk completions bash > /etc/bash_completion.d/lk`.
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+}
+
+/// ServerKit connection management (Track D, plan 21). Connections live in the
+/// same SQLite table the GUI uses, so `lk connection add` and the app's
+/// Settings → ServerKit panel share one list.
+#[derive(Subcommand)]
+enum ConnectionCmd {
+    /// Add a connection. Validates it (health + API key + extension probe) the
+    /// same way the app does and refuses to store a key that doesn't work.
+    /// The key is read from a hidden prompt, `--key`, or LOCALKIT_API_KEY.
+    Add {
+        /// Connection name (label), e.g. "prod"
+        name: String,
+        /// ServerKit base URL, e.g. https://panel.example.com
+        url: String,
+        /// API key (skips the hidden prompt; required when not on a TTY)
+        #[arg(long, env = "LOCALKIT_API_KEY", hide_env_values = true)]
+        key: Option<String>,
+        /// Output the stored connection as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List stored connections (local only — no network). Use `test` to probe.
+    List {
+        /// Output machine-readable JSON (never includes the API key)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Re-run the connection test: health, API key, and extension features.
+    Test {
+        /// Connection (exact id, or case-insensitive name)
+        connection: String,
+        /// Output the test result as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a connection. Prompts unless --yes; --yes required on non-TTY.
+    Remove {
+        /// Connection (exact id, or case-insensitive name)
+        connection: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -293,21 +410,88 @@ async fn main() {
     let cli = Cli::parse();
     NO_COLOR_FLAG.store(cli.no_color, std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = run(&cli).await {
-        eprintln!("{} {e}", red("error:"));
-        std::process::exit(1);
+        eprintln!("{} {}", red("error:"), e.message);
+        std::process::exit(e.code);
     }
 }
 
-async fn run(cli: &Cli) -> Result<(), String> {
-    // `doctor` works without opening the DB.
-    if let Cmd::Doctor = cli.command {
-        return cmd_doctor(cli.data_dir.clone()).await;
+/// A CLI failure plus the process exit code it carries. Almost everything is
+/// code 1; a sync operation the *server* rejects surfaces as code 2 so scripts
+/// can tell "the server said no" apart from "something local broke".
+struct CliError {
+    message: String,
+    code: i32,
+}
+
+impl CliError {
+    fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into(), code: 1 }
+    }
+    /// Exit code 2 — the remote rejected the operation (see `sync_err`).
+    fn rejected(message: impl Into<String>) -> Self {
+        Self { message: message.into(), code: 2 }
+    }
+}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        CliError::new(message)
+    }
+}
+
+async fn run(cli: &Cli) -> Result<(), CliError> {
+    // These two never touch the DB.
+    match &cli.command {
+        Cmd::Doctor => return cmd_doctor(cli.data_dir.clone()).await.map_err(CliError::from),
+        Cmd::Completions { shell } => return cmd_completions(*shell).map_err(CliError::from),
+        _ => {}
     }
 
     let state = make_state(cli)?;
 
-    match &cli.command {
+    // Push/pull own their exit code (2 on a server rejection), so they `return`
+    // a `CliError` directly; every other command's `String` error collapses to
+    // a plain code-1 `CliError` at the end.
+    let out: Result<(), String> = match &cli.command {
+        Cmd::Push {
+            site,
+            code,
+            db,
+            connection,
+            remote_site,
+            json,
+        } => {
+            return cmd_push(
+                &state,
+                site,
+                *code,
+                *db,
+                connection.as_deref(),
+                remote_site.as_deref(),
+                *json,
+            )
+            .await
+        }
+        Cmd::Pull {
+            site,
+            db,
+            connection,
+            remote_site,
+            json,
+        } => {
+            return cmd_pull(
+                &state,
+                site,
+                *db,
+                connection.as_deref(),
+                remote_site.as_deref(),
+                *json,
+            )
+            .await
+        }
         Cmd::List { json } => cmd_list(&state, *json).await,
+        Cmd::Sites { remote, json } => cmd_remote_sites(&state, remote, *json).await,
+        Cmd::Connection(sub) => cmd_connection(&state, sub).await,
         Cmd::Create {
             name,
             wp_version,
@@ -372,8 +556,9 @@ async fn run(cli: &Cli) -> Result<(), String> {
         }
         Cmd::Env { site: q, shell, json } => cmd_env(&state, q, *shell, *json),
         Cmd::Login { site: q, user, open } => cmd_login(&state, q, user.as_deref(), *open).await,
-        Cmd::Doctor => unreachable!("handled above"),
-    }
+        Cmd::Doctor | Cmd::Completions { .. } => unreachable!("handled before make_state"),
+    };
+    out.map_err(CliError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -831,20 +1016,26 @@ async fn cmd_import(
 
 /// Exact connection id wins, then case-insensitive label — the same shape as
 /// site resolution, so the two feel identical from the terminal.
-fn resolve_connection(
-    state: &AppState,
-    query: &str,
-) -> Result<localkit_lib::serverkit::ServerKitConnection, String> {
-    let conns = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.list_connections()?
-    };
+fn resolve_connection(state: &AppState, query: &str) -> Result<ServerKitConnection, String> {
+    let conns = load_connections(state)?;
     if conns.is_empty() {
-        return Err(
-            "no ServerKit connections yet — add one in the LocalKit app under Settings → ServerKit."
-                .into(),
-        );
+        return Err(NO_CONNECTIONS.into());
     }
+    pick_connection(&conns, query)
+}
+
+const NO_CONNECTIONS: &str =
+    "no ServerKit connections yet — add one with `lk connection add <name> <url>`.";
+
+fn load_connections(state: &AppState) -> Result<Vec<ServerKitConnection>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.list_connections()
+}
+
+/// Pure connection resolver: exact id, then unique case-insensitive label.
+/// Kept separate from `resolve_connection` so it can be unit-tested without a DB
+/// (it mirrors `pick` for sites).
+fn pick_connection(conns: &[ServerKitConnection], query: &str) -> Result<ServerKitConnection, String> {
     if let Some(c) = conns.iter().find(|c| c.id == query) {
         return Ok(c.clone());
     }
@@ -864,14 +1055,11 @@ fn resolve_connection(
 
 /// A remote site is addressed by its numeric server id, or by name — in which
 /// case the server is listed to look it up.
-async fn resolve_remote_site(
-    conn: &localkit_lib::serverkit::ServerKitConnection,
-    query: &str,
-) -> Result<i64, String> {
+async fn resolve_remote_site(conn: &ServerKitConnection, query: &str) -> Result<i64, String> {
     if let Ok(id) = query.parse::<i64>() {
         return Ok(id);
     }
-    let sites = localkit_lib::serverkit::list_wp_sites(&conn.url, &conn.api_key).await?;
+    let sites = serverkit::list_wp_sites(&conn.url, &conn.api_key).await?;
     let q = query.to_lowercase();
     let hits: Vec<_> = sites.iter().filter(|s| s.name.to_lowercase() == q).collect();
     match hits.len() {
@@ -889,6 +1077,400 @@ async fn resolve_remote_site(
             "`{query}` matches more than one remote site. pass the numeric id."
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// ServerKit — connections, remote listing, push/pull (plan 21)
+// ---------------------------------------------------------------------------
+
+/// Redacted view of a connection for `--json` output — deliberately omits the
+/// API key, which the full `ServerKitConnection` struct carries in plaintext.
+#[derive(serde::Serialize)]
+struct ConnectionView<'a> {
+    id: &'a str,
+    name: &'a str,
+    url: &'a str,
+    created_at: &'a str,
+}
+
+impl<'a> From<&'a ServerKitConnection> for ConnectionView<'a> {
+    fn from(c: &'a ServerKitConnection) -> Self {
+        Self { id: &c.id, name: &c.label, url: &c.url, created_at: &c.created_at }
+    }
+}
+
+async fn cmd_connection(state: &AppState, cmd: &ConnectionCmd) -> Result<(), String> {
+    match cmd {
+        ConnectionCmd::Add { name, url, key, json } => cmd_connection_add(state, name, url, key.as_deref(), *json).await,
+        ConnectionCmd::List { json } => cmd_connection_list(state, *json),
+        ConnectionCmd::Test { connection, json } => cmd_connection_test(state, connection, *json).await,
+        ConnectionCmd::Remove { connection, yes } => cmd_connection_remove(state, connection, *yes),
+    }
+}
+
+/// `lk connection add` — validate before storing (health + key + extension),
+/// mirroring the app's Settings → ServerKit flow, and refuse to persist a key
+/// that doesn't work rather than storing a dud that fails at push time.
+async fn cmd_connection_add(
+    state: &AppState,
+    name: &str,
+    url: &str,
+    key: Option<&str>,
+    json: bool,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a connection name is required".into());
+    }
+    let url = serverkit::normalize_base_url(url)?;
+    let api_key = read_api_key(key)?;
+
+    eprintln!("{} testing {url}...", info("→"));
+    let ext = serverkit::test_connection(&url, &api_key).await?;
+
+    let conn = ServerKitConnection {
+        id: uuid::Uuid::new_v4().to_string(),
+        label: name.to_string(),
+        url,
+        api_key,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.insert_connection(&conn)?;
+    }
+
+    if json {
+        print_json(&ConnectionView::from(&conn))?;
+    } else {
+        // stdout carries the new id (scriptable); chrome stays on stderr.
+        println!("{}", conn.id);
+    }
+    eprintln!("{} connection {} saved ({})", ok("✓"), bold(&conn.label), conn.url);
+    if ext.localkit_extension {
+        eprintln!(
+            "{} serverkit-localkit extension detected — features: {}",
+            info("→"),
+            if ext.features.is_empty() { "(none advertised)".to_string() } else { ext.features.join(", ") }
+        );
+    } else {
+        eprintln!(
+            "{} the serverkit-localkit extension is not installed — push/pull/import will not work until it is.",
+            warn("!")
+        );
+    }
+    Ok(())
+}
+
+/// Read an API key from `--key`/env, or a hidden TTY prompt. Refuses to hang on
+/// a non-TTY with no key supplied.
+fn read_api_key(flag: Option<&str>) -> Result<String, String> {
+    if let Some(k) = flag {
+        let k = k.trim();
+        if k.is_empty() {
+            return Err("the API key is empty".into());
+        }
+        return Ok(k.to_string());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(
+            "no API key and no TTY to prompt on — pass --key <key> or set LOCALKIT_API_KEY.".into(),
+        );
+    }
+    let key = rpassword::prompt_password("ServerKit API key: ")
+        .map_err(|e| format!("failed to read the API key: {e}"))?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Err("no API key entered".into());
+    }
+    Ok(key)
+}
+
+fn cmd_connection_list(state: &AppState, json: bool) -> Result<(), String> {
+    let conns = load_connections(state)?;
+    if json {
+        let views: Vec<ConnectionView> = conns.iter().map(ConnectionView::from).collect();
+        return print_json(&views);
+    }
+    if conns.is_empty() {
+        eprintln!(
+            "{} no ServerKit connections yet. add one with `lk connection add <name> <url>`.",
+            info("→")
+        );
+        return Ok(());
+    }
+    let rows: Vec<[String; 3]> = conns
+        .iter()
+        .map(|c| [c.label.clone(), c.url.clone(), short_time(&c.created_at)])
+        .collect();
+    print_table(&["NAME", "URL", "ADDED"], &rows);
+    eprintln!("{} probe a server's extension with `lk connection test <name>`", info("→"));
+    Ok(())
+}
+
+async fn cmd_connection_test(state: &AppState, query: &str, json: bool) -> Result<(), String> {
+    let conn = resolve_connection(state, query)?;
+    eprintln!("{} testing {}...", info("→"), conn.url);
+    let ext = serverkit::test_connection(&conn.url, &conn.api_key).await?;
+    if json {
+        return print_json(&ext);
+    }
+    eprintln!("{} {} reachable, API key valid", ok("✓"), bold(&conn.label));
+    if ext.localkit_extension {
+        println!(
+            "serverkit-localkit extension: installed (features: {})",
+            if ext.features.is_empty() { "none advertised".to_string() } else { ext.features.join(", ") }
+        );
+    } else {
+        println!("serverkit-localkit extension: NOT installed");
+    }
+    Ok(())
+}
+
+fn cmd_connection_remove(state: &AppState, query: &str, yes: bool) -> Result<(), String> {
+    let conn = resolve_connection(state, query)?;
+    confirm(
+        yes,
+        &format!("remove connection `{}` ({})?", conn.label, conn.url),
+        &format!("`lk connection remove` deletes `{}`. pass --yes to confirm.", conn.label),
+    )?;
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.delete_connection(&conn.id)?;
+    }
+    eprintln!("{} connection {} removed", ok("✓"), bold(&conn.label));
+    Ok(())
+}
+
+/// `lk sites --remote <connection>` — read-only remote site listing.
+async fn cmd_remote_sites(state: &AppState, remote: &str, json: bool) -> Result<(), String> {
+    let conn = resolve_connection(state, remote)?;
+    let sites = serverkit::list_wp_sites(&conn.url, &conn.api_key).await?;
+    if json {
+        return print_json(&sites);
+    }
+    if sites.is_empty() {
+        eprintln!("{} no WordPress sites on {}.", info("→"), conn.label);
+        return Ok(());
+    }
+    let rows: Vec<[String; 5]> = sites
+        .iter()
+        .map(|s| {
+            [
+                s.id.to_string(),
+                s.name.clone(),
+                s.status.clone(),
+                s.url.clone().unwrap_or_else(|| "—".into()),
+                if s.multisite {
+                    "multisite".into()
+                } else {
+                    format!(
+                        "WP {} / PHP {}",
+                        s.wp_version.as_deref().unwrap_or("?"),
+                        s.php_version.as_deref().unwrap_or("?")
+                    )
+                },
+            ]
+        })
+        .collect();
+    print_table(&["ID", "NAME", "STATUS", "URL", "STACK"], &rows);
+    Ok(())
+}
+
+/// Decide which connection a push/pull targets: an explicit `--connection`
+/// wins; otherwise the site's linked remote (plan 18 columns); otherwise the
+/// sole connection if there is exactly one.
+fn resolve_sync_connection(
+    conns: Vec<ServerKitConnection>,
+    site: &site::Site,
+    flag: Option<&str>,
+) -> Result<ServerKitConnection, String> {
+    if let Some(q) = flag {
+        if conns.is_empty() {
+            return Err(NO_CONNECTIONS.into());
+        }
+        return pick_connection(&conns, q);
+    }
+    // A site imported from a remote carries its origin connection.
+    if let Some(cid) = &site.connection_id {
+        if let Some(c) = conns.iter().find(|c| &c.id == cid) {
+            return Ok(c.clone());
+        }
+        // The linked connection was removed — fall through to the auto rules.
+    }
+    match conns.len() {
+        0 => Err(NO_CONNECTIONS.into()),
+        1 => Ok(conns.into_iter().next().unwrap()),
+        _ => Err(format!(
+            "`{}` has no linked remote and there is more than one connection — pass --connection <name>. available: {}",
+            site.slug,
+            conns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// Decide which remote site id a push/pull targets: `--remote-site` wins;
+/// otherwise the site's linked remote id, but only when the resolved connection
+/// is the one it was linked to (a remote id is meaningless on another server).
+async fn resolve_sync_remote_id(
+    conn: &ServerKitConnection,
+    site: &site::Site,
+    flag: Option<&str>,
+) -> Result<i64, String> {
+    if let Some(q) = flag {
+        return resolve_remote_site(conn, q).await;
+    }
+    if site.connection_id.as_deref() == Some(conn.id.as_str()) {
+        if let Some(id) = site.remote_site_id {
+            return Ok(id);
+        }
+    }
+    Err(format!(
+        "`{}` has no linked remote site on {} — pass --remote-site <id|name> (see `lk sites --remote {}`).",
+        site.slug, conn.label, conn.label
+    ))
+}
+
+/// The remote site's public URL, best-effort, so pull can search-replace remote
+/// -> local. A listing failure just means the rewrite is skipped, not that the
+/// pull fails.
+async fn remote_site_url(conn: &ServerKitConnection, remote_id: i64) -> Option<String> {
+    serverkit::list_wp_sites(&conn.url, &conn.api_key)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|s| s.id == remote_id)
+        .and_then(|s| s.url)
+}
+
+/// Classify a sync failure into an exit code: 2 when the failure clearly
+/// originated on the server (rejected key, missing/old extension, size limit,
+/// an HTTP status), 1 for local failures (site not found, snapshot, Docker).
+///
+/// A heuristic over the library's error strings — the sync API returns a bare
+/// `String`. Worst case a server error is reported as 1 rather than 2; it never
+/// mislabels a local failure as a remote rejection in a way that matters.
+fn remote_rejected(msg: &str) -> bool {
+    const MARKERS: [&str; 6] = [
+        "API key was rejected",
+        "extension is not installed",
+        "too old to import",
+        "too large for the server",
+        "failed with HTTP",
+        "ServerKit limit",
+    ];
+    MARKERS.iter().any(|m| msg.contains(m))
+}
+
+fn sync_err(e: String) -> CliError {
+    if remote_rejected(&e) {
+        CliError::rejected(e)
+    } else {
+        CliError::new(e)
+    }
+}
+
+/// The freshly written sync-history row for an operation, so `--json` can print
+/// the resulting `SyncRecord` (the library's sync fns return `()`).
+fn latest_record(state: &AppState, site_id: &str, direction: &str, kind: &str) -> Result<SyncRecord, String> {
+    sync::history(state, site_id)?
+        .into_iter()
+        .find(|r| r.direction == direction && r.kind == kind)
+        .ok_or_else(|| "the sync succeeded but no history record was found".into())
+}
+
+async fn cmd_push(
+    state: &AppState,
+    query: &str,
+    code: bool,
+    db: bool,
+    connection: Option<&str>,
+    remote_site: Option<&str>,
+    json: bool,
+) -> Result<(), CliError> {
+    if !code && !db {
+        return Err(CliError::new("nothing to push — pass --code and/or --db"));
+    }
+    let site = resolve(state, query)?;
+    let conns = load_connections(state)?;
+    let conn = resolve_sync_connection(conns, &site, connection)?;
+    let remote_id = resolve_sync_remote_id(&conn, &site, remote_site).await?;
+
+    let mut records: Vec<SyncRecord> = Vec::new();
+    if code {
+        sync::push_code(None, state, &conn.id, &site.id, remote_id).await.map_err(sync_err)?;
+        records.push(latest_record(state, &site.id, "push", "code")?);
+    }
+    if db {
+        sync::push_db(None, state, &conn.id, &site.id, remote_id).await.map_err(sync_err)?;
+        records.push(latest_record(state, &site.id, "push", "db")?);
+    }
+
+    if json {
+        // One record → the object; both → the array, so the shape is predictable.
+        match records.as_slice() {
+            [only] => print_json(only)?,
+            many => print_json(&many)?,
+        }
+    }
+    eprintln!(
+        "{} pushed {} to remote site #{remote_id} on {}",
+        ok("✓"),
+        pushed_kinds(code, db),
+        conn.label
+    );
+    Ok(())
+}
+
+fn pushed_kinds(code: bool, db: bool) -> &'static str {
+    match (code, db) {
+        (true, true) => "code + database",
+        (true, false) => "code",
+        _ => "database",
+    }
+}
+
+async fn cmd_pull(
+    state: &AppState,
+    query: &str,
+    db: bool,
+    connection: Option<&str>,
+    remote_site: Option<&str>,
+    json: bool,
+) -> Result<(), CliError> {
+    if !db {
+        return Err(CliError::new(
+            "pass --db — pulling a remote site's code creates a NEW local site, which is `lk import`.",
+        ));
+    }
+    let site = resolve(state, query)?;
+    let conns = load_connections(state)?;
+    let conn = resolve_sync_connection(conns, &site, connection)?;
+    let remote_id = resolve_sync_remote_id(&conn, &site, remote_site).await?;
+    let remote_url = remote_site_url(&conn, remote_id).await;
+
+    sync::pull_db(None, state, &conn.id, &site.id, remote_id, remote_url)
+        .await
+        .map_err(sync_err)?;
+    let record = latest_record(state, &site.id, "pull", "db")?;
+    if json {
+        print_json(&record)?;
+    }
+    eprintln!(
+        "{} pulled the database from remote site #{remote_id} on {} into {}",
+        ok("✓"),
+        conn.label,
+        bold(&site.name)
+    );
+    eprintln!("{} a pre-pull snapshot was taken — `lk snapshot list {}` to restore", info("→"), site.slug);
+    Ok(())
+}
+
+/// `lk completions <shell>` — static completion script via clap_complete.
+fn cmd_completions(shell: CompletionShell) -> Result<(), String> {
+    let mut cmd = Cli::command();
+    clap_complete::generate(shell, &mut cmd, "lk", &mut std::io::stdout());
+    Ok(())
 }
 
 fn cmd_info(state: &AppState, query: &str, json: bool) -> Result<(), String> {
@@ -1009,10 +1591,57 @@ async fn cmd_doctor(data_dir_override: Option<PathBuf>) -> Result<(), String> { 
 
     ok &= doctor_router(&data_dir).await;
 
+    // Connection reachability is diagnostic only — a remote being down is not a
+    // local misconfiguration, so it prints pass/fail but never flips the exit
+    // code that scripts gate their local setup on.
+    doctor_connections(&data_dir).await;
+
     if !ok {
         return Err("one or more checks failed".into());
     }
     Ok(())
+}
+
+/// ServerKit section of `doctor` (plan 21): for each stored connection, run the
+/// same health + key + `/pair` probe the app does, so "is it me or the server"
+/// has a one-command answer. Best-effort and non-fatal — a missing DB or a
+/// down server does not fail `doctor`.
+async fn doctor_connections(data_dir: &Path) {
+    let Ok(db) = Db::open(&data_dir.join("localkit.db")) else {
+        return;
+    };
+    let conns = match db.list_connections() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    // Drop the DB handle before the awaits below — nothing else needs it, and
+    // holding it across network calls buys nothing.
+    drop(db);
+
+    if conns.is_empty() {
+        check_line(true, "no ServerKit connections configured");
+        return;
+    }
+    for conn in &conns {
+        match serverkit::test_connection(&conn.url, &conn.api_key).await {
+            Ok(ext) => {
+                let extension = if ext.localkit_extension {
+                    if ext.features.is_empty() {
+                        "extension present".to_string()
+                    } else {
+                        format!("extension: {}", ext.features.join(", "))
+                    }
+                } else {
+                    "extension NOT installed".to_string()
+                };
+                check_line(true, &format!("connection {} → {} ({extension})", conn.label, conn.url));
+            }
+            Err(e) => {
+                check_line(false, &format!("connection {} → {}", conn.label, conn.url));
+                eprintln!("  {e}");
+            }
+        }
+    }
 }
 
 /// Local-domains section of `doctor` (plan 16): active router mode + who owns
@@ -1389,5 +2018,154 @@ mod tests {
             &[("DB_PORT".into(), "18081".into())],
         );
         assert_eq!(out, "$env:DB_PORT = \"18081\"\n");
+    }
+
+    // -- ServerKit CLI (plan 21) -------------------------------------------
+
+    fn conn(id: &str, label: &str) -> ServerKitConnection {
+        ServerKitConnection {
+            id: id.into(),
+            label: label.into(),
+            url: "https://x.example.com".into(),
+            api_key: "k".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn linked_site(conn_id: &str, remote_id: i64) -> site::Site {
+        let mut s = site("id-x", "linked", "Linked");
+        s.connection_id = Some(conn_id.into());
+        s.remote_site_id = Some(remote_id);
+        s
+    }
+
+    #[test]
+    fn connection_pick_exact_id_then_label() {
+        let conns = vec![conn("c1", "prod"), conn("c2", "staging")];
+        assert_eq!(pick_connection(&conns, "c2").unwrap().label, "staging");
+        assert_eq!(pick_connection(&conns, "PROD").unwrap().id, "c1");
+    }
+
+    #[test]
+    fn connection_pick_no_match_lists_available() {
+        let conns = vec![conn("c1", "prod")];
+        let err = pick_connection(&conns, "nope").unwrap_err();
+        assert!(err.contains("prod"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn connection_pick_ambiguous_label_asks_for_id() {
+        let conns = vec![conn("c1", "dup"), conn("c2", "DUP")];
+        let err = pick_connection(&conns, "dup").unwrap_err();
+        assert!(err.contains("more than one"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn sync_connection_flag_wins_over_link() {
+        let conns = vec![conn("c1", "prod"), conn("c2", "staging")];
+        let chosen = resolve_sync_connection(conns, &linked_site("c1", 5), Some("staging")).unwrap();
+        assert_eq!(chosen.id, "c2");
+    }
+
+    #[test]
+    fn sync_connection_defaults_to_link() {
+        let conns = vec![conn("c1", "prod"), conn("c2", "staging")];
+        let chosen = resolve_sync_connection(conns, &linked_site("c2", 5), None).unwrap();
+        assert_eq!(chosen.id, "c2");
+    }
+
+    #[test]
+    fn sync_connection_single_is_auto_selected() {
+        let conns = vec![conn("c1", "prod")];
+        let site = site("id-x", "unlinked", "Unlinked");
+        assert_eq!(resolve_sync_connection(conns, &site, None).unwrap().id, "c1");
+    }
+
+    #[test]
+    fn sync_connection_ambiguous_without_link_needs_flag() {
+        let conns = vec![conn("c1", "prod"), conn("c2", "staging")];
+        let site = site("id-x", "unlinked", "Unlinked");
+        let err = resolve_sync_connection(conns, &site, None).unwrap_err();
+        assert!(err.contains("--connection"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn sync_connection_stale_link_falls_back_to_single() {
+        // Linked to a connection that no longer exists → the auto rules apply.
+        let conns = vec![conn("c1", "prod")];
+        let chosen = resolve_sync_connection(conns, &linked_site("gone", 5), None).unwrap();
+        assert_eq!(chosen.id, "c1");
+    }
+
+    #[tokio::test]
+    async fn sync_remote_id_defaults_to_link() {
+        let c = conn("c1", "prod");
+        assert_eq!(resolve_sync_remote_id(&c, &linked_site("c1", 42), None).await.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn sync_remote_id_unlinked_needs_flag() {
+        let c = conn("c1", "prod");
+        let site = site("id-x", "unlinked", "Unlinked");
+        let err = resolve_sync_remote_id(&c, &site, None).await.unwrap_err();
+        assert!(err.contains("--remote-site"), "unexpected: {err}");
+    }
+
+    #[tokio::test]
+    async fn sync_remote_id_link_ignored_for_other_connection() {
+        // The numeric remote id is meaningless on a different server.
+        let other = conn("c2", "staging");
+        let err = resolve_sync_remote_id(&other, &linked_site("c1", 42), None).await.unwrap_err();
+        assert!(err.contains("--remote-site"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn remote_rejected_flags_server_errors() {
+        assert!(remote_rejected("The API key was rejected (or lacks admin rights). Check the key."));
+        assert!(remote_rejected("Push failed with HTTP 500."));
+        assert!(remote_rejected(
+            "The serverkit-localkit extension is not installed on this ServerKit server (404)."
+        ));
+        assert!(remote_rejected("The upload is too large for the server (ServerKit limit is 100MB)."));
+    }
+
+    #[test]
+    fn remote_rejected_ignores_local_errors() {
+        assert!(!remote_rejected("no site named `blog`"));
+        assert!(!remote_rejected("pre-sync snapshot failed, nothing was synced: disk full"));
+        assert!(!remote_rejected("Docker is not running"));
+    }
+
+    #[test]
+    fn pushed_kinds_labels() {
+        assert_eq!(pushed_kinds(true, true), "code + database");
+        assert_eq!(pushed_kinds(true, false), "code");
+        assert_eq!(pushed_kinds(false, true), "database");
+    }
+
+    #[test]
+    fn connection_view_omits_the_api_key() {
+        let json = serde_json::to_string(&ConnectionView::from(&conn("c1", "prod"))).unwrap();
+        assert!(!json.contains("api_key"), "the api key leaked into --json output: {json}");
+        assert!(!json.contains("\"k\""), "the api key value leaked: {json}");
+        assert!(json.contains("\"prod\""));
+    }
+
+    #[test]
+    fn completions_generate_for_every_shell() {
+        for shell in [
+            CompletionShell::Bash,
+            CompletionShell::Zsh,
+            CompletionShell::Fish,
+            CompletionShell::PowerShell,
+        ] {
+            let mut cmd = Cli::command();
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut cmd, "lk", &mut buf);
+            let out = String::from_utf8(buf).expect("completion script is valid UTF-8");
+            assert!(!out.is_empty(), "{shell:?} produced no completion script");
+            assert!(out.contains("connection"), "{shell:?} completion missing `connection`");
+            assert!(out.contains("completions"), "{shell:?} completion missing `completions`");
+        }
     }
 }
