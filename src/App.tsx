@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { onSiteEvent, onSitesChanged } from "./lib/ipc";
+import { useDocker } from "./stores/docker";
 import { useNav } from "./stores/nav";
 import { useRouter } from "./stores/router";
 import { useSites } from "./stores/sites";
@@ -26,13 +27,21 @@ export default function App() {
   useEffect(() => {
     void useSites.getState().refresh();
     void useRouter.getState().refresh();
+    void useDocker.getState().refresh();
     const unlisten = onSiteEvent(handleEvent);
     // The reconciler settles status in the background; re-fetch when it does
     // so an external stop/start corrects itself without a manual refresh.
-    const unlistenChanged = onSitesChanged(() => void useSites.getState().refresh());
+    const unlistenChanged = onSitesChanged(() => {
+      void useSites.getState().refresh();
+      void useDocker.getState().refresh();
+    });
+    // Poll Docker health so the "unavailable" pill appears/clears on its own
+    // (plan 23); the backend caches for 30 s, so this is cheap.
+    const docker = window.setInterval(() => void useDocker.getState().refresh(), 30_000);
     return () => {
       void unlisten.then((f) => f());
       void unlistenChanged.then((f) => f());
+      window.clearInterval(docker);
     };
   }, [handleEvent]);
 

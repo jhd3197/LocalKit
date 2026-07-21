@@ -23,7 +23,7 @@ import type {
 
 /** Typed wrappers around the Tauri commands exposed by the Rust backend. */
 export const ipc = {
-  checkDocker: () => invoke<DockerStatus>("check_docker"),
+  checkDocker: (force = false) => invoke<DockerStatus>("check_docker", { force }),
   appInfo: () => invoke<AppInfo>("app_info"),
   listSites: () => invoke<SiteWithStatus[]>("list_sites"),
   getSite: (id: string) => invoke<SiteDetail>("get_site", { id }),

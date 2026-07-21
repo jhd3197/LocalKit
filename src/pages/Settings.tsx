@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ipc } from "../lib/ipc";
 import type { AppInfo, DockerStatus } from "../lib/types";
+import { useDocker } from "../stores/docker";
 import { useNav } from "../stores/nav";
 import { useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
 import { useDialog } from "../hooks/useDialog";
@@ -98,10 +99,13 @@ function GeneralSection() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [runInBackground, setRunInBackground] = useState(true);
 
-  const checkDocker = useCallback(async () => {
+  const checkDocker = useCallback(async (force = false) => {
     setChecking(true);
     try {
-      setDocker(await ipc.checkDocker());
+      const status = await ipc.checkDocker(force);
+      setDocker(status);
+      // Keep the sidebar's global pill in sync with a manual re-check.
+      useDocker.setState({ status });
     } finally {
       setChecking(false);
     }
@@ -128,7 +132,7 @@ function GeneralSection() {
       <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Docker</h2>
-          <button onClick={() => void checkDocker()} className="text-xs text-zinc-500 hover:text-zinc-300">
+          <button onClick={() => void checkDocker(true)} className="text-xs text-zinc-500 hover:text-zinc-300">
             {checking ? "Checking…" : "Re-check"}
           </button>
         </div>

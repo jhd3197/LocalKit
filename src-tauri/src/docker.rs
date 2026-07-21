@@ -6,7 +6,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
+
+/// How long a `check()` result is cached (plan 23) — long enough that the
+/// sidebar can poll Docker health cheaply, short enough to notice a daemon
+/// going down within a tick.
+const CHECK_TTL: Duration = Duration::from_secs(30);
 
 /// Hide the console window Windows would otherwise allocate for a
 /// console-subsystem child of our GUI process. No-op on other OSes.
@@ -59,6 +66,32 @@ pub async fn check() -> DockerStatus {
             ),
         },
     }
+}
+
+fn check_cache() -> &'static Mutex<Option<(Instant, DockerStatus)>> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, DockerStatus)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// `check()` behind a 30 s cache (plan 23). The sidebar polls this to show a
+/// global "Docker unavailable" pill without spawning a `docker info` subprocess
+/// every few seconds. `force` bypasses the cache — the Settings "refresh"
+/// button wants an immediate re-check. The lock is never held across the await.
+pub async fn check_cached(force: bool) -> DockerStatus {
+    if !force {
+        if let Ok(guard) = check_cache().lock() {
+            if let Some((at, status)) = guard.as_ref() {
+                if at.elapsed() < CHECK_TTL {
+                    return status.clone();
+                }
+            }
+        }
+    }
+    let status = check().await;
+    if let Ok(mut guard) = check_cache().lock() {
+        *guard = Some((Instant::now(), status.clone()));
+    }
+    status
 }
 
 /// Turn raw CLI stderr into something the UI can show directly.

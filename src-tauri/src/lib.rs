@@ -54,8 +54,9 @@ struct AppInfo {
 }
 
 #[tauri::command]
-async fn check_docker() -> docker::DockerStatus {
-    docker::check().await
+async fn check_docker(force: Option<bool>) -> docker::DockerStatus {
+    // Cached for 30 s (plan 23); the sidebar polls this. `force` re-checks now.
+    docker::check_cached(force.unwrap_or(false)).await
 }
 
 #[tauri::command]
