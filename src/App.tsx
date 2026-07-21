@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { onSiteEvent } from "./lib/ipc";
+import { onSiteEvent, onSitesChanged } from "./lib/ipc";
 import { useNav } from "./stores/nav";
 import { useRouter } from "./stores/router";
 import { useSites } from "./stores/sites";
@@ -27,8 +27,12 @@ export default function App() {
     void useSites.getState().refresh();
     void useRouter.getState().refresh();
     const unlisten = onSiteEvent(handleEvent);
+    // The reconciler settles status in the background; re-fetch when it does
+    // so an external stop/start corrects itself without a manual refresh.
+    const unlistenChanged = onSitesChanged(() => void useSites.getState().refresh());
     return () => {
       void unlisten.then((f) => f());
+      void unlistenChanged.then((f) => f());
     };
   }, [handleEvent]);
 

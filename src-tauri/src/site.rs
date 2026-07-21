@@ -590,6 +590,8 @@ pub async fn create(
     )
     .await?;
 
+    // Own this site's status until the create finishes (plan 23).
+    let _guard = state.in_flight.guard(&site.id);
     match do_create(app, state, &site).await {
         Ok(site) => Ok(site),
         Err(e) => {
@@ -711,6 +713,7 @@ pub async fn clone_site(
         }
     };
 
+    let _guard = state.in_flight.guard(&target.id);
     match do_clone(app, state, &source, &snap.id, &target).await {
         Ok(site) => {
             // The clone_source snapshot is an implementation detail — prune it
@@ -849,6 +852,8 @@ pub fn detail(state: &AppState, id: &str) -> Result<SiteDetail, String> {
 }
 
 pub async fn start(state: &AppState, id: &str) -> Result<Site, String> {
+    // Hold the reconciler off this site while its status is in flight (plan 23).
+    let _guard = state.in_flight.guard(id);
     let site = get(state, id)?;
     docker::compose_up(&site.dir()).await?;
     {
@@ -860,6 +865,7 @@ pub async fn start(state: &AppState, id: &str) -> Result<Site, String> {
 }
 
 pub async fn stop(state: &AppState, id: &str) -> Result<Site, String> {
+    let _guard = state.in_flight.guard(id);
     let site = get(state, id)?;
     docker::compose_down(&site.dir(), false).await?;
     {
@@ -884,6 +890,7 @@ pub async fn delete(
     id: &str,
     delete_snapshots: bool,
 ) -> Result<(), String> {
+    let _guard = state.in_flight.guard(id);
     let site = get(state, id)?;
     let dir = site.dir();
 

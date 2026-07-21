@@ -568,6 +568,8 @@ pub async fn import_site(
     // The cancel token is keyed on the *new* site's id — that is what the UI
     // shows progress against, so it is what a Cancel button can address.
     let cancel = state.transfers.begin(&site.id);
+    // Own this site's status until the import finishes (plan 23).
+    let _guard = state.in_flight.guard(&site.id);
 
     // From here on a failure owns cleanup — the site row and directory exist.
     match do_import(app, state, &conn, &site, &remote, (wp_exact, php_exact), v2, &cancel).await {

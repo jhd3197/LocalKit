@@ -624,6 +624,9 @@ pub fn run() {
                 .initialization_script(&settings_init_script)
                 .build()?;
             tray::setup(app.handle())?;
+            // Settle DB status against Docker's ground truth: once now (so the
+            // dashboard opens honest), then every 60 s (plan 23).
+            reconcile::spawn_loop(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

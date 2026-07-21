@@ -290,6 +290,8 @@ pub async fn import_project(
     )
     .await?;
 
+    // Own this site's status until the import finishes (plan 23).
+    let _guard = state.in_flight.guard(&site.id);
     let excludes: &[&str] = if include_all { &[] } else { DEFAULT_EXCLUDES };
     match do_import(app, state, &site, &source_dir, excludes, app_port).await {
         Ok(site) => {

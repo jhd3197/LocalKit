@@ -108,6 +108,15 @@ export function onSiteEvent(cb: (event: SiteEvent) => void): Promise<UnlistenFn>
   return listen<SiteEvent>("site-event", (e) => cb(e.payload));
 }
 
+/**
+ * Fired after the reconciler settles a site's status against Docker ground
+ * truth (plan 23) — the frontend re-fetches so a site stopped/started outside
+ * the app corrects itself without a manual refresh.
+ */
+export function onSitesChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen("sites-changed", () => cb());
+}
+
 /** Terminal output stream for one PTY session (filter by terminalId). */
 export function onTerminalData(cb: (event: TerminalDataEvent) => void): Promise<UnlistenFn> {
   return listen<TerminalDataEvent>("terminal://data", (e) => cb(e.payload));

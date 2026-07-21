@@ -1,7 +1,7 @@
 //! End-to-end smoke test driver for the real LocalKit site lifecycle.
 //! Runs outside the Tauri runtime (no AppHandle; events are skipped).
 //!
-//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|clone|blueprint|delete|cleanup>
+//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|clone|blueprint|delete|cleanup>
 //!
 //! Uses a fixed smoke data dir + site name so subcommands can run as separate
 //! invocations (each one reconstructs the same AppState).
@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use localkit_lib::{blueprint, db::Db, docker, site, snapshot, wordpress, AppState};
+use localkit_lib::{blueprint, db::Db, docker, reconcile, site, snapshot, wordpress, AppState};
 
 const SMOKE_NAME: &str = "Smoke Test";
 const SMOKE_SLUG: &str = "smoke-test";
@@ -133,6 +133,90 @@ async fn start(state: &AppState) -> Result<(), String> {
     let s = site::start(state, &s.id).await?;
     println!("STARTED status={}", s.status);
     assert_eq!(s.status, "running");
+    Ok(())
+}
+
+/// Backdate a site's status write via a second connection to the smoke DB, so
+/// the reconciler's 60 s grace window does not shield an "external stop". This
+/// is the one thing the public `Db::set_status` (which always stamps `now`)
+/// deliberately won't do — hence the raw UPDATE, kept here in the dev tool.
+fn force_status(state: &AppState, id: &str, status: &str, ts: &str) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(state.data_dir.join("localkit.db"))
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE sites SET status = ?1, status_updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![status, ts, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn db_status(state: &AppState, id: &str) -> Result<String, String> {
+    Ok(state.db.lock().map_err(|e| e.to_string())?.get_site(id)?.status)
+}
+
+/// Stop a site's containers *without* removing them (`docker compose stop`),
+/// simulating an external `docker stop` — LocalKit's own stop uses `down`.
+fn compose_stop(dir: &Path) -> Result<(), String> {
+    let out = std::process::Command::new("docker")
+        .args(["compose", "stop"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("docker compose stop failed to run: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
+/// Reconciler verification (plan 23) against real Docker drift: stop the
+/// site's containers behind LocalKit's back and confirm the reconciler settles
+/// running→stopped, then bring them back and confirm it settles stopped→
+/// running. The DB is manipulated directly to create the drift a crash / an
+/// external `docker stop` would leave.
+async fn reconcile_smoke(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    // Start from a known-up state.
+    docker::compose_up(&s.dir()).await?;
+    site::start(state, &s.id).await?;
+
+    // --- External stop: containers down, DB still says running (backdated past
+    //     the grace window so the reconciler is allowed to downgrade). ---
+    println!("stopping containers externally (docker compose stop)...");
+    compose_stop(&s.dir())?;
+    force_status(state, &s.id, "running", "2000-01-01T00:00:00+00:00")?;
+    let events = reconcile::reconcile_once(state).await;
+    println!("after external stop -> {} settle(s): {events:?}", events.len());
+    assert_eq!(db_status(state, &s.id)?, "stopped", "external stop must settle to stopped");
+    assert!(
+        events.iter().any(|e| e.to == "stopped" && e.reason == "external stop"),
+        "expected an external-stop settle event"
+    );
+
+    // --- External start: containers up, DB still says stopped. ---
+    println!("starting containers externally (docker compose up -d)...");
+    docker::compose_up(&s.dir()).await?;
+    // Give the container a moment to report `running` to `docker ps`.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    force_status(state, &s.id, "stopped", "2000-01-01T00:00:00+00:00")?;
+    let events = reconcile::reconcile_once(state).await;
+    println!("after external start -> {} settle(s): {events:?}", events.len());
+    assert_eq!(db_status(state, &s.id)?, "running", "external start must settle to running");
+
+    // --- Forward-only: a fresh command write must NOT be clobbered by a stale
+    //     reconcile observation. Stop the containers but keep a *now* running
+    //     write; the reconciler must leave it alone (grace window). ---
+    compose_stop(&s.dir())?;
+    state.db.lock().map_err(|e| e.to_string())?.set_status(&s.id, "running")?;
+    let events = reconcile::reconcile_once(state).await;
+    assert_eq!(db_status(state, &s.id)?, "running", "a fresh running write must survive the grace window");
+    assert!(events.is_empty(), "grace window should suppress the downgrade");
+    println!("forward-only grace window held: fresh running write survived");
+
+    // Leave the smoke site genuinely running for the next subcommand.
+    site::start(state, &s.id).await?;
+    println!("RECONCILE OK");
     Ok(())
 }
 
@@ -424,6 +508,7 @@ async fn main() {
         "info" => info(&state).await,
         "stop" => stop(&state).await,
         "start" => start(&state).await,
+        "reconcile" => reconcile_smoke(&state).await,
         "clone" => clone(&state).await,
         "blueprint" => blueprint_smoke(&state).await,
         "delete" => delete(&state).await,

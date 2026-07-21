@@ -473,6 +473,8 @@ pub async fn create_site(
     )
     .await?;
 
+    // Own this site's status until it finishes provisioning (plan 23).
+    let _guard = state.in_flight.guard(&target.id);
     match do_create(app, state, blueprint_id, &target).await {
         Ok(site) => {
             let url = router::site_public_url(state, &site);

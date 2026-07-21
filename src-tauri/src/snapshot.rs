@@ -362,6 +362,9 @@ pub async fn restore(
     site_id: &str,
     snapshot_id: &str,
 ) -> Result<String, String> {
+    // Restore can auto-start the site for the DB import; own its status until
+    // the restore finishes so the reconciler doesn't race it (plan 23).
+    let _guard = state.in_flight.guard(site_id);
     let snap = read_manifest(&state.data_dir, site_id, snapshot_id)?;
     let s = site::get(state, site_id)?;
     let dir = s.dir();

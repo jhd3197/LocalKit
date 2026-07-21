@@ -110,9 +110,12 @@ src-tauri/               Rust backend (also a cargo workspace root)
   one-click recovery, port-bearing site URLs, SiteDetail banner). The mock
   fakes a LocalWP holding 80/443; `window.__LOCALKIT_MOCK__` (mock builds
   only) lets the script reach states the UI can't drive on its own.
-- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|clone|blueprint|delete|cleanup>`
+- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|clone|blueprint|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
-  uses a scratch data dir under the OS temp dir. `clone` and `blueprint` (plan 20)
+  uses a scratch data dir under the OS temp dir. `reconcile` (plan 23) stops the
+  containers behind LocalKit's back and asserts the reconciler settles
+  running→stopped, then stopped→running, and that the grace window shields a
+  fresh command write. `clone` and `blueprint` (plan 20)
   create a marker post on the smoke site, then assert a one-click clone / a
   save-then-create-from-blueprint carries the content across with fresh
   ports/secrets; both clean up after themselves.

@@ -12,11 +12,16 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use tauri::{Emitter, Manager};
+
 use crate::{docker, AppState};
 
 /// How recently a `running` write must have happened for the reconciler to
 /// leave an empty ground truth alone (grace window for slow container starts).
 const GRACE_SECS: i64 = 60;
+
+/// Interval between reconcile passes while the app runs.
+const TICK_SECS: u64 = 60;
 
 /// What Docker's ground truth says about a site's app service right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +181,28 @@ pub async fn reconcile_once(state: &AppState) -> Vec<ReconcileEvent> {
         }
     }
     events
+}
+
+/// Start the background reconcile loop: one pass immediately (so the dashboard
+/// opens honest on cold start), then every 60 s. After any pass that settled
+/// something, the tray is rebuilt and a `sites-changed` event tells the
+/// frontend to re-fetch. Runs for the life of the app.
+pub fn spawn_loop(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let events = {
+                let state = app.state::<AppState>();
+                reconcile_once(&state).await
+            };
+            if !events.is_empty() {
+                // A settled status must reach the tray menu/tooltip and the
+                // dashboard, same as any lifecycle change.
+                crate::tray::refresh(&app);
+                let _ = app.emit("sites-changed", ());
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(TICK_SECS)).await;
+        }
+    });
 }
 
 /// Per-site set of in-flight lifecycle commands, shared across every command
