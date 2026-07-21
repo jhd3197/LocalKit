@@ -75,6 +75,19 @@ enum Cmd {
         json: bool,
     },
 
+    /// Clone an existing local site into a NEW one (copies its database and
+    /// wp-content, with fresh ports and DB credentials). Prints the new site's
+    /// URL on stdout; progress goes to stderr.
+    Clone {
+        /// Source site (exact id, or case-insensitive slug or name)
+        site: String,
+        /// Name for the new cloned site
+        new_name: String,
+        /// Output the created site as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Start a site
     Start { site: String },
 
@@ -242,6 +255,11 @@ async fn run(cli: &Cli) -> Result<(), String> {
             php_version,
             json,
         } => cmd_create(&state, name, wp_version, php_version, *json).await,
+        Cmd::Clone {
+            site: q,
+            new_name,
+            json,
+        } => cmd_clone(&state, q, new_name, *json).await,
         Cmd::Start { site: q } => {
             let s = resolve(&state, q)?;
             let s = site::start(&state, &s.id).await?;
@@ -377,6 +395,38 @@ async fn cmd_create(
         info("→"),
         site.admin_user,
         site.admin_pass
+    );
+    Ok(())
+}
+
+/// `lk clone` — thin wrapper over `site::clone_site`; all orchestration lives
+/// in the library. Progress reaches the terminal on its own: with no Tauri app
+/// handle `site::emit` prints each stage to stderr.
+async fn cmd_clone(
+    state: &AppState,
+    query: &str,
+    new_name: &str,
+    json: bool,
+) -> Result<(), String> {
+    let source = resolve(state, query)?;
+    let clone = site::clone_site(None, state, &source.id, new_name.to_string()).await?;
+    if json {
+        print_json(&clone)?;
+    } else {
+        // stdout carries the URL (scriptable); chrome stays on stderr.
+        println!("{}", site_url(&clone));
+    }
+    eprintln!(
+        "{} {} cloned from {} and running",
+        ok("✓"),
+        bold(&clone.name),
+        bold(&source.name)
+    );
+    eprintln!(
+        "{} admin login carries over from the source: {} / {}",
+        info("→"),
+        clone.admin_user,
+        clone.admin_pass
     );
     Ok(())
 }
