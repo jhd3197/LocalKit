@@ -107,10 +107,12 @@ fn new_id() -> String {
 // Archive helpers (shared with sync::push_code)
 // ---------------------------------------------------------------------------
 
-/// Bundle the site's wp-content directory as a tar.gz in memory.
-pub(crate) fn build_wp_content_tgz(site_dir: &Path) -> Result<Vec<u8>, String> {
+/// Bundle the site's code directory (`sync_path`) as a tar.gz in memory.
+/// `sync_path` is the site's `config.sync_path` — `wp-content` for a WP site
+/// (plan 22).
+pub(crate) fn build_wp_content_tgz(site_dir: &Path, sync_path: &str) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
-    write_wp_content_tgz(site_dir, &mut buf)?;
+    write_wp_content_tgz(site_dir, sync_path, &mut buf)?;
     Ok(buf)
 }
 
@@ -120,19 +122,23 @@ pub(crate) fn build_wp_content_tgz(site_dir: &Path) -> Result<Vec<u8>, String> {
 /// straight into a staging file, so a site with a real `uploads/` directory
 /// never has to exist as a `Vec<u8>` first. `build_wp_content_tgz` is now just
 /// this with a `Vec` on the end.
+///
+/// Entries are prefixed with `sync_path`, so an archive is self-describing and
+/// `restore_wp_content` unpacks it back into the same relative location.
 pub(crate) fn write_wp_content_tgz(
     site_dir: &Path,
+    sync_path: &str,
     out: &mut dyn std::io::Write,
 ) -> Result<(), String> {
-    let wp_content = site_dir.join("wp-content");
-    if !wp_content.is_dir() {
-        return Err("wp-content directory not found in the local site".into());
+    let content = site_dir.join(sync_path);
+    if !content.is_dir() {
+        return Err(format!("{sync_path} directory not found in the local site"));
     }
     let enc = flate2::write::GzEncoder::new(out, flate2::Compression::fast());
     let mut builder = tar::Builder::new(enc);
     builder
-        .append_dir_all("wp-content", &wp_content)
-        .map_err(|e| format!("failed to bundle wp-content: {e}"))?;
+        .append_dir_all(sync_path, &content)
+        .map_err(|e| format!("failed to bundle {sync_path}: {e}"))?;
     // Finish both layers explicitly: letting the encoder write its trailer on
     // drop would discard the error, and a truncated gzip only shows up much
     // later as an unreadable archive.
@@ -269,7 +275,7 @@ pub async fn create(
     let db_gz = gzip(sql.as_bytes())?;
 
     site::emit(app, site_id, "snapshot", "Archiving wp-content...");
-    let code_tgz = build_wp_content_tgz(&dir)?;
+    let code_tgz = build_wp_content_tgz(&dir, &s.config.sync_path)?;
 
     let snap = Snapshot {
         id: new_id(),
@@ -371,7 +377,7 @@ pub async fn restore(
     // The DB import needs the stack up; the user asked to go back to this
     // snapshot, so start the site rather than refusing.
     let mut started = false;
-    if !is_running(&dir).await {
+    if !is_running(&dir, s.app_service()).await {
         site::emit(app, site_id, "restore", "Starting the site...");
         site::start(state, site_id).await?;
         started = true;
@@ -381,7 +387,7 @@ pub async fn restore(
     wordpress::import_db(&dir, &sql).await?;
 
     site::emit(app, site_id, "restore", "Restoring wp-content...");
-    restore_wp_content(&dir, &code_tgz)?;
+    restore_wp_content(&dir, &s.config.sync_path, &code_tgz)?;
 
     // Object/transient caches can outlive the import; best effort.
     let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
@@ -394,24 +400,24 @@ pub async fn restore(
     })
 }
 
-async fn is_running(dir: &Path) -> bool {
+async fn is_running(dir: &Path, service: &str) -> bool {
     docker::compose_ps(dir)
         .await
         .map(|cs| {
             cs.iter()
-                .any(|c| c.service == "wordpress" && c.state == "running")
+                .any(|c| c.service == service && c.state == "running")
         })
         .unwrap_or(false)
 }
 
-/// Replace `wp-content` with the archived copy. The directory itself is kept
-/// (it is bind-mounted into the running containers — removing it would break
-/// the mount); only its contents are swapped.
-fn restore_wp_content(site_dir: &Path, tgz: &[u8]) -> Result<(), String> {
-    let wp_content = site_dir.join("wp-content");
-    if wp_content.is_dir() {
-        let entries = std::fs::read_dir(&wp_content)
-            .map_err(|e| format!("failed to read wp-content: {e}"))?;
+/// Replace `sync_path` (`wp-content` for a WP site) with the archived copy. The
+/// directory itself is kept (it is bind-mounted into the running containers —
+/// removing it would break the mount); only its contents are swapped.
+fn restore_wp_content(site_dir: &Path, sync_path: &str, tgz: &[u8]) -> Result<(), String> {
+    let content = site_dir.join(sync_path);
+    if content.is_dir() {
+        let entries = std::fs::read_dir(&content)
+            .map_err(|e| format!("failed to read {sync_path}: {e}"))?;
         for entry in entries.flatten() {
             let path = entry.path();
             let removed = if path.is_dir() {
@@ -420,18 +426,18 @@ fn restore_wp_content(site_dir: &Path, tgz: &[u8]) -> Result<(), String> {
                 std::fs::remove_file(&path)
             };
             removed.map_err(|e| {
-                format!("failed to clear wp-content ({}): {e}", path.display())
+                format!("failed to clear {sync_path} ({}): {e}", path.display())
             })?;
         }
     } else {
-        std::fs::create_dir_all(&wp_content)
-            .map_err(|e| format!("failed to create wp-content: {e}"))?;
+        std::fs::create_dir_all(&content)
+            .map_err(|e| format!("failed to create {sync_path}: {e}"))?;
     }
-    // Entries are prefixed `wp-content/`, so unpack at the site root.
+    // Entries are prefixed with `sync_path`, so unpack at the site root.
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tgz));
     archive
         .unpack(site_dir)
-        .map_err(|e| format!("failed to restore wp-content: {e}"))
+        .map_err(|e| format!("failed to restore {sync_path}: {e}"))
 }
 
 /// Seed a *target* site from a snapshot taken of a *different* site (plan 20).
@@ -473,7 +479,7 @@ pub async fn restore_archives_into(
 
     let dir = target.dir();
     wordpress::import_db(&dir, &sql).await?;
-    restore_wp_content(&dir, &code)?;
+    restore_wp_content(&dir, &target.config.sync_path, &code)?;
     // Object/transient caches from the fresh install can outlive the import.
     let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
     Ok(())

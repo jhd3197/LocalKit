@@ -47,12 +47,15 @@ impl PtyManager {
         Self::default()
     }
 
-    /// Open a shell inside the site's `wordpress` container. Returns the
-    /// terminal id the frontend uses for write/resize/close.
+    /// Open a shell inside the site's app container (`service`). Returns the
+    /// terminal id the frontend uses for write/resize/close. `service` is the
+    /// site's `config.service` — `wordpress` for a WP site, the chosen app
+    /// service for a docker project (plan 22).
     pub fn open(
         &self,
         app: &AppHandle,
         site_dir: &Path,
+        service: &str,
         cols: u32,
         rows: u32,
     ) -> Result<String, String> {
@@ -66,7 +69,7 @@ impl PtyManager {
             .map_err(|e| format!("failed to open PTY: {e}"))?;
 
         let mut cmd = CommandBuilder::new("docker");
-        cmd.args(["compose", "exec", "wordpress", "bash"]);
+        cmd.args(["compose", "exec", service, "bash"]);
         cmd.cwd(site_dir);
         cmd.env("TERM", "xterm-256color");
 

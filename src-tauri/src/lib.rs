@@ -28,12 +28,24 @@ pub struct AppState {
     pub transfers: transfer::CancelRegistry,
 }
 
+/// The base capability set advertised for a kind (plan 22). `docker`'s
+/// `db_sync` is the code-only default here — it flips on per-site when a
+/// recognized DB engine is in the compose.
+#[derive(Serialize)]
+struct KindInfo {
+    kind: String,
+    capabilities: site::Capabilities,
+}
+
 #[derive(Serialize)]
 struct AppInfo {
     data_dir: String,
     sites_dir: String,
     wp_versions: Vec<String>,
     php_versions: Vec<String>,
+    /// Every site kind and the capabilities it claims, so both frontends can
+    /// gate UI on the same matrix the backend enforces.
+    kinds: Vec<KindInfo>,
 }
 
 #[tauri::command]
@@ -48,6 +60,16 @@ fn app_info(state: State<AppState>) -> AppInfo {
         sites_dir: state.data_dir.join("sites").to_string_lossy().to_string(),
         wp_versions: site::WP_VERSIONS.iter().map(|s| s.to_string()).collect(),
         php_versions: site::PHP_VERSIONS.iter().map(|s| s.to_string()).collect(),
+        kinds: vec![
+            KindInfo {
+                kind: site::KIND_WORDPRESS.to_string(),
+                capabilities: site::Capabilities::WORDPRESS,
+            },
+            KindInfo {
+                kind: site::KIND_DOCKER.to_string(),
+                capabilities: site::Capabilities::DOCKER,
+            },
+        ],
     }
 }
 
@@ -123,6 +145,7 @@ async fn site_logs(state: State<'_, AppState>, id: String, tail: Option<u32>) ->
 #[tauri::command]
 async fn wp_cli_info(state: State<'_, AppState>, id: String) -> Result<wordpress::WpInfo, String> {
     let s = site::get(&state, &id)?;
+    s.require(s.capabilities.wp_tools, "WordPress info")?;
     wordpress::info(&s.dir()).await
 }
 
@@ -137,10 +160,11 @@ async fn login_site(
     user_id: Option<u64>,
 ) -> Result<String, String> {
     let s = site::get(&state, &id)?;
+    s.require(s.capabilities.one_click_login, "One-click login")?;
     let containers = docker::compose_ps(&s.dir()).await?;
     if !containers
         .iter()
-        .any(|c| c.service == "wordpress" && c.state == "running")
+        .any(|c| c.service == s.app_service() && c.state == "running")
     {
         return Err(format!(
             "\"{}\" is not running — start the site first.",
@@ -158,6 +182,7 @@ async fn site_wp_users(
     id: String,
 ) -> Result<Vec<wordpress::WpUser>, String> {
     let s = site::get(&state, &id)?;
+    s.require(s.capabilities.one_click_login, "The WordPress user list")?;
     wordpress::users(&s.dir()).await
 }
 
@@ -479,10 +504,11 @@ async fn terminal_open(
     rows: Option<u32>,
 ) -> Result<String, String> {
     let site = site::get(&state, &site_id)?;
+    site.require(site.capabilities.terminal, "Opening a terminal")?;
     let containers = docker::compose_ps(&site.dir()).await?;
     let running = containers
         .iter()
-        .any(|c| c.service == "wordpress" && c.state == "running");
+        .any(|c| c.service == site.app_service() && c.state == "running");
     if !running {
         return Err(format!(
             "\"{}\" is not running — start the site first.",
@@ -491,7 +517,7 @@ async fn terminal_open(
     }
     state
         .terminals
-        .open(&app, &site.dir(), cols.unwrap_or(80), rows.unwrap_or(24))
+        .open(&app, &site.dir(), site.app_service(), cols.unwrap_or(80), rows.unwrap_or(24))
 }
 
 #[tauri::command]

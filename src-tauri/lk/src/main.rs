@@ -548,6 +548,7 @@ async fn run(cli: &Cli) -> Result<(), CliError> {
         }
         Cmd::Wp { site: q, args } => {
             let s = resolve(&state, q)?;
+            s.require(s.capabilities.wp_tools, "`lk wp`")?;
             let mut full: Vec<&str> = vec!["wp"];
             full.extend(args.iter().map(String::as_str));
             let out = docker::compose_run(&s.dir(), "wpcli", &full).await?;
@@ -1533,6 +1534,7 @@ fn cmd_env(state: &AppState, query: &str, shell: Shell, json: bool) -> Result<()
 
 async fn cmd_login(state: &AppState, query: &str, user: Option<&str>, open: bool) -> Result<(), String> {
     let s = resolve(state, query)?;
+    s.require(s.capabilities.one_click_login, "`lk login`")?;
     let base = router::site_public_url(state, &s);
     // Thin wrapper: all logic lives in localkit_lib::wordpress.
     let url = wordpress::login_url(&s.dir(), &s, user, &base).await?;
@@ -1914,7 +1916,7 @@ mod tests {
     use super::*;
 
     fn site(id: &str, slug: &str, name: &str) -> site::Site {
-        site::Site {
+        let mut s = site::Site {
             id: id.into(),
             name: name.into(),
             slug: slug.into(),
@@ -1928,7 +1930,12 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             connection_id: None,
             remote_site_id: None,
-        }
+            kind: site::KIND_WORDPRESS.into(),
+            config: site::SiteConfig::default(),
+            capabilities: site::Capabilities::default(),
+        };
+        s.refresh_capabilities();
+        s
     }
 
     fn sample_sites() -> Vec<site::Site> {

@@ -16,6 +16,138 @@ pub const BASE_PORT: u16 = 8081;
 /// Host DB port = site port + this offset (8081 -> 18081).
 pub const DB_PORT_OFFSET: u16 = 10000;
 
+/// Site kinds (plan 22). WordPress is the reference implementation with every
+/// capability; `docker` is a bring-your-own-compose project. The stored default
+/// is `wordpress`, so every pre-plan-22 row migrates cleanly. (`php`/Laravel
+/// arrives with plan 26.)
+pub const KIND_WORDPRESS: &str = "wordpress";
+pub const KIND_DOCKER: &str = "docker";
+
+/// Per-kind settings, persisted as the `config_json` column (plan 22).
+///
+/// Every field is de-hardcoded from a WordPress assumption LocalKit used to
+/// bake in: the terminal/log service name, the code-sync path, the router
+/// upstream port, and (for docker apps) which compose service is a recognized
+/// database engine. The defaults ARE the WordPress values, so a legacy row with
+/// `config_json = '{}'` deserializes to exactly the behaviour it had before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SiteConfig {
+    /// Compose service the terminal shells into and single-service logs read.
+    #[serde(default = "SiteConfig::default_service")]
+    pub service: String,
+    /// Path under the site directory that code sync + snapshots archive.
+    #[serde(default = "SiteConfig::default_sync_path")]
+    pub sync_path: String,
+    /// Host port the router proxies to; `None` = the site's own `port`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_port: Option<u16>,
+    /// Recognized DB engine in a docker app's compose (`mysql`|`mariadb`|
+    /// `postgres`), which flips on `db_sync`. `None` = a code-only app.
+    /// WordPress leaves this unset — it always has `db_sync` via wp-cli.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_engine: Option<String>,
+    /// The compose service of that DB engine, for native dumps (plan 22 phase 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_service: Option<String>,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        Self {
+            service: Self::default_service(),
+            sync_path: Self::default_sync_path(),
+            app_port: None,
+            db_engine: None,
+            db_service: None,
+        }
+    }
+}
+
+impl SiteConfig {
+    fn default_service() -> String {
+        KIND_WORDPRESS.to_string()
+    }
+    fn default_sync_path() -> String {
+        "wp-content".to_string()
+    }
+    /// The host port the router should proxy to — the app's own port when a
+    /// docker project publishes on a different one, else the site port.
+    pub fn upstream_port(&self, site_port: u16) -> u16 {
+        self.app_port.unwrap_or(site_port)
+    }
+}
+
+/// What a site's kind (plus config) supports. Every feature in the app checks
+/// one of these instead of assuming WordPress (plan 22). WordPress = all true;
+/// docker = `domains, terminal, logs, snapshots, code_sync` (and `db_sync` when
+/// a recognized DB engine is in its compose).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Capabilities {
+    pub domains: bool,
+    pub terminal: bool,
+    pub logs: bool,
+    pub snapshots: bool,
+    pub db_gui: bool,
+    pub db_sync: bool,
+    pub code_sync: bool,
+    pub one_click_login: bool,
+    pub wp_tools: bool,
+    pub search_replace: bool,
+}
+
+impl Capabilities {
+    pub const WORDPRESS: Self = Self {
+        domains: true,
+        terminal: true,
+        logs: true,
+        snapshots: true,
+        db_gui: true,
+        db_sync: true,
+        code_sync: true,
+        one_click_login: true,
+        wp_tools: true,
+        search_replace: true,
+    };
+    pub const DOCKER: Self = Self {
+        domains: true,
+        terminal: true,
+        logs: true,
+        snapshots: true,
+        db_gui: false,
+        db_sync: false,
+        code_sync: true,
+        one_click_login: false,
+        wp_tools: false,
+        search_replace: false,
+    };
+
+    /// Derive the capability set for a kind + its config. Every kind × every
+    /// capability is an explicit decision here (unit-tested), never an `if`
+    /// scattered through a feature.
+    pub fn for_kind(kind: &str, config: &SiteConfig) -> Self {
+        match kind {
+            KIND_DOCKER => {
+                let mut c = Self::DOCKER;
+                // A recognized database engine in the copied compose earns the
+                // site engine-native DB snapshots/dumps (plan 22 phase 2).
+                if config.db_engine.is_some() {
+                    c.db_sync = true;
+                }
+                c
+            }
+            // `wordpress` and any unknown/legacy kind fall back to the fully
+            // capable WordPress set — the safe default for a pre-plan-22 row.
+            _ => Self::WORDPRESS,
+        }
+    }
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self::WORDPRESS
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Site {
     pub id: String,
@@ -36,6 +168,22 @@ pub struct Site {
     pub connection_id: Option<String>,
     #[serde(default)]
     pub remote_site_id: Option<i64>,
+    /// Plan 22 — stack kind (`wordpress` | `docker`) and its per-kind settings.
+    /// `kind` defaults to WordPress so legacy rows migrate cleanly; `config`
+    /// defaults to the WordPress values (service `wordpress`, sync path
+    /// `wp-content`).
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub config: SiteConfig,
+    /// Derived, read-only: what this site supports. Recomputed from `kind` +
+    /// `config` at every read (never persisted), so it can never drift.
+    #[serde(default, skip_deserializing)]
+    pub capabilities: Capabilities,
+}
+
+fn default_kind() -> String {
+    KIND_WORDPRESS.to_string()
 }
 
 impl Site {
@@ -45,6 +193,31 @@ impl Site {
 
     pub fn dir(&self) -> PathBuf {
         PathBuf::from(&self.path)
+    }
+
+    /// Recompute `capabilities` from the current `kind`/`config`. Call after
+    /// building or mutating a `Site` so the derived field stays in sync.
+    pub fn refresh_capabilities(&mut self) {
+        self.capabilities = Capabilities::for_kind(&self.kind, &self.config);
+    }
+
+    /// The live-status service to watch — `wordpress` for a WP site, the chosen
+    /// app service for a docker project.
+    pub fn app_service(&self) -> &str {
+        &self.config.service
+    }
+
+    /// Guard a capability-gated command with a clean, user-displayable refusal
+    /// (the frontends hide the affordance; this catches a direct invoke / CLI).
+    pub fn require(&self, cap: bool, action: &str) -> Result<(), String> {
+        if cap {
+            Ok(())
+        } else {
+            Err(format!(
+                "{action} is not supported for {} sites.",
+                self.kind
+            ))
+        }
     }
 }
 
@@ -320,22 +493,30 @@ pub type Origin = Option<(String, i64)>;
 /// and insert the `creating` row. Shared by `create` and `sync::import_site` —
 /// both need an identical reservation, and doing it in one place is what keeps
 /// slug/port allocation race-free across the two entry points.
+///
+/// `kind`/`config` carry the plan-22 stack (WordPress callers pass
+/// `KIND_WORDPRESS` + `SiteConfig::default()`). WP/PHP version validation only
+/// runs for the WordPress kind — a docker project has no such versions.
 pub(crate) async fn reserve(
     state: &AppState,
     name: String,
+    kind: String,
     wp_version: String,
     php_version: String,
+    config: SiteConfig,
     origin: Origin,
 ) -> Result<Site, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Site name is required".into());
     }
-    if !WP_VERSIONS.contains(&wp_version.as_str()) {
-        return Err(format!("unsupported WordPress version: {wp_version}"));
-    }
-    if !PHP_VERSIONS.contains(&php_version.as_str()) {
-        return Err(format!("unsupported PHP version: {php_version}"));
+    if kind == KIND_WORDPRESS {
+        if !WP_VERSIONS.contains(&wp_version.as_str()) {
+            return Err(format!("unsupported WordPress version: {wp_version}"));
+        }
+        if !PHP_VERSIONS.contains(&php_version.as_str()) {
+            return Err(format!("unsupported PHP version: {php_version}"));
+        }
     }
 
     let slug = unique_slug(state, &slugify(&name))?;
@@ -346,7 +527,7 @@ pub(crate) async fn reserve(
         None => (None, None),
     };
 
-    let site = Site {
+    let mut site = Site {
         id: Uuid::new_v4().to_string(),
         name,
         slug,
@@ -360,7 +541,11 @@ pub(crate) async fn reserve(
         created_at: chrono::Utc::now().to_rfc3339(),
         connection_id,
         remote_site_id,
+        kind,
+        config,
+        capabilities: Capabilities::default(),
     };
+    site.refresh_capabilities();
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.insert_site(&site)?;
@@ -389,7 +574,16 @@ pub async fn create(
     wp_version: String,
     php_version: String,
 ) -> Result<Site, String> {
-    let site = reserve(state, name, wp_version, php_version, None).await?;
+    let site = reserve(
+        state,
+        name,
+        KIND_WORDPRESS.to_string(),
+        wp_version,
+        php_version,
+        SiteConfig::default(),
+        None,
+    )
+    .await?;
 
     match do_create(app, state, &site).await {
         Ok(site) => Ok(site),
@@ -493,8 +687,10 @@ pub async fn clone_site(
     let target = match reserve(
         state,
         new_name,
+        source.kind.clone(),
         source.wp_version.clone(),
         source.php_version.clone(),
+        source.config.clone(),
         None,
     )
     .await
@@ -733,7 +929,7 @@ pub async fn list(state: &AppState) -> Result<Vec<SiteWithStatus>, String> {
             Ok(containers) => {
                 if containers
                     .iter()
-                    .any(|c| c.service == "wordpress" && c.state == "running")
+                    .any(|c| c.service == site.app_service() && c.state == "running")
                 {
                     "running".to_string()
                 } else {
@@ -751,4 +947,128 @@ pub async fn list(state: &AppState) -> Result<Vec<SiteWithStatus>, String> {
 pub async fn logs(state: &AppState, id: &str, tail: u32) -> Result<String, String> {
     let site = get(state, id)?;
     docker::compose_logs(&site.dir(), tail).await
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the plan-22 capability matrix + config serde defaults
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The WordPress reference stack claims every capability — the whole point
+    /// of the model is that WP is not an `if` branch but the maximal kind.
+    #[test]
+    fn wordpress_claims_every_capability() {
+        let caps = Capabilities::for_kind(KIND_WORDPRESS, &SiteConfig::default());
+        assert_eq!(caps, Capabilities::WORDPRESS);
+        for on in [
+            caps.domains,
+            caps.terminal,
+            caps.logs,
+            caps.snapshots,
+            caps.db_gui,
+            caps.db_sync,
+            caps.code_sync,
+            caps.one_click_login,
+            caps.wp_tools,
+            caps.search_replace,
+        ] {
+            assert!(on, "WordPress must claim every capability");
+        }
+    }
+
+    /// A plain docker app gets lifecycle + domains + terminal + logs +
+    /// snapshots (code) but never the WordPress-only affordances.
+    #[test]
+    fn docker_claims_only_the_generic_capabilities() {
+        let caps = Capabilities::for_kind(KIND_DOCKER, &SiteConfig::default());
+        assert!(caps.domains && caps.terminal && caps.logs && caps.snapshots && caps.code_sync);
+        assert!(
+            !caps.db_gui
+                && !caps.db_sync
+                && !caps.one_click_login
+                && !caps.wp_tools
+                && !caps.search_replace,
+            "a code-only docker app must not claim WordPress capabilities"
+        );
+    }
+
+    /// A recognized DB engine in a docker app's compose flips on `db_sync` (and
+    /// only `db_sync` — not the WP tooling).
+    #[test]
+    fn a_recognized_db_engine_flips_on_db_sync_only() {
+        let config = SiteConfig {
+            db_engine: Some("mariadb".into()),
+            db_service: Some("db".into()),
+            ..SiteConfig::default()
+        };
+        let caps = Capabilities::for_kind(KIND_DOCKER, &config);
+        assert!(caps.db_sync, "a DB engine earns db_sync");
+        assert!(!caps.wp_tools && !caps.one_click_login && !caps.search_replace);
+    }
+
+    /// An unknown/legacy kind falls back to the fully-capable WordPress set —
+    /// the safe default for a row written before this kind existed.
+    #[test]
+    fn an_unknown_kind_falls_back_to_wordpress() {
+        assert_eq!(
+            Capabilities::for_kind("something-new", &SiteConfig::default()),
+            Capabilities::WORDPRESS
+        );
+    }
+
+    /// A legacy `config_json` of `{}` (what migration 6 back-fills) deserializes
+    /// to the WordPress `SiteConfig` — service `wordpress`, sync path
+    /// `wp-content`, no app-port override.
+    #[test]
+    fn empty_config_json_is_the_wordpress_default() {
+        let config: SiteConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, SiteConfig::default());
+        assert_eq!(config.service, "wordpress");
+        assert_eq!(config.sync_path, "wp-content");
+        assert_eq!(config.app_port, None);
+        assert_eq!(config.upstream_port(8081), 8081);
+    }
+
+    /// An explicit app port overrides the site port for the router upstream;
+    /// unknown JSON fields are ignored rather than failing the read.
+    #[test]
+    fn config_serde_round_trips_and_tolerates_extra_fields() {
+        let json = r#"{"service":"app","sync_path":"data","app_port":3000,"future_field":true}"#;
+        let config: SiteConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.service, "app");
+        assert_eq!(config.sync_path, "data");
+        assert_eq!(config.upstream_port(8081), 3000);
+        // Round-trips back to JSON and parses to the same value.
+        let back: SiteConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn require_refuses_a_missing_capability_with_the_kind_named() {
+        let mut s = Site {
+            id: "d".into(),
+            name: "API".into(),
+            slug: "api".into(),
+            path: "/tmp/api".into(),
+            port: 8081,
+            wp_version: String::new(),
+            php_version: String::new(),
+            status: "running".into(),
+            admin_user: DEFAULT_ADMIN_USER.into(),
+            admin_pass: String::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            connection_id: None,
+            remote_site_id: None,
+            kind: KIND_DOCKER.into(),
+            config: SiteConfig::default(),
+            capabilities: Capabilities::default(),
+        };
+        s.refresh_capabilities();
+        let err = s.require(s.capabilities.wp_tools, "WordPress info").unwrap_err();
+        assert!(err.contains("docker"), "the refusal names the kind: {err}");
+        assert!(s.require(s.capabilities.terminal, "Terminal").is_ok());
+    }
 }

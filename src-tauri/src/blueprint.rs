@@ -456,7 +456,18 @@ pub async fn create_site(
     let (php_version, _) =
         crate::sync::match_version(site::PHP_VERSIONS, Some(&bp.manifest.php_version));
 
-    let target = site::reserve(state, name, wp_version, php_version, None).await?;
+    // Blueprints are WordPress recipes today (per-kind blueprints arrive with
+    // plan 26), so the target reserves the WordPress stack.
+    let target = site::reserve(
+        state,
+        name,
+        site::KIND_WORDPRESS.to_string(),
+        wp_version,
+        php_version,
+        site::SiteConfig::default(),
+        None,
+    )
+    .await?;
 
     match do_create(app, state, blueprint_id, &target).await {
         Ok(site) => {

@@ -174,7 +174,7 @@ async fn push_code_v1(
     remote_site_id: i64,
 ) -> Result<String, String> {
     emit(app, site_id, "push", "Bundling wp-content...");
-    let tgz = snapshot::build_wp_content_tgz(&site.dir())?;
+    let tgz = snapshot::build_wp_content_tgz(&site.dir(), &site.config.sync_path)?;
     let size = transfer::human_bytes(tgz.len() as u64);
     emit(app, site_id, "push", &format!("Uploading wp-content ({size})..."));
     serverkit::push_code(&conn.url, &conn.api_key, remote_site_id, tgz).await?;
@@ -196,7 +196,8 @@ async fn push_code_v2(
 ) -> Result<String, String> {
     emit(app, site_id, "push", "Bundling wp-content...");
     let dir = site.dir();
-    let staged = transfer::stage("wp-content", |w| snapshot::write_wp_content_tgz(&dir, w))?;
+    let staged =
+        transfer::stage("wp-content", |w| snapshot::write_wp_content_tgz(&dir, &site.config.sync_path, w))?;
     cancel.check()?;
 
     let size = transfer::human_bytes(staged.total());
@@ -553,8 +554,10 @@ pub async fn import_site(
     let site = site::reserve(
         state,
         name,
+        site::KIND_WORDPRESS.to_string(),
         wp_version.clone(),
         php_version.clone(),
+        site::SiteConfig::default(),
         Some((conn.id.clone(), remote_site_id)),
     )
     .await?;

@@ -119,6 +119,21 @@ impl Db {
                 )
                 .map_err(|e| format!("migration 5 failed: {e}"))?;
         }
+        if version < 6 {
+            // Plan 22: the stack kind + its per-kind settings. Constant defaults
+            // migrate every existing row to the WordPress stack it already is —
+            // `config_json = '{}'` deserializes to the WordPress `SiteConfig`
+            // defaults (service `wordpress`, sync path `wp-content`).
+            self.conn
+                .execute_batch(
+                    "
+                    ALTER TABLE sites ADD COLUMN kind        TEXT NOT NULL DEFAULT 'wordpress';
+                    ALTER TABLE sites ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}';
+                    PRAGMA user_version = 6;
+                    ",
+                )
+                .map_err(|e| format!("migration 6 failed: {e}"))?;
+        }
         Ok(())
     }
 
@@ -177,7 +192,13 @@ impl Db {
     }
 
     fn row_to_site(row: &Row) -> rusqlite::Result<Site> {
-        Ok(Site {
+        // `config_json` parses to the WordPress defaults when empty/`{}` or
+        // unreadable, so a legacy row is always the fully-capable WP stack.
+        let config_json: String = row.get("config_json")?;
+        let config: crate::site::SiteConfig =
+            serde_json::from_str(&config_json).unwrap_or_default();
+        let kind: String = row.get("kind")?;
+        let mut site = Site {
             id: row.get("id")?,
             name: row.get("name")?,
             slug: row.get("slug")?,
@@ -191,16 +212,25 @@ impl Db {
             created_at: row.get("created_at")?,
             connection_id: row.get("connection_id")?,
             remote_site_id: row.get("remote_site_id")?,
-        })
+            kind,
+            config,
+            capabilities: crate::site::Capabilities::default(),
+        };
+        site.refresh_capabilities();
+        Ok(site)
     }
 
     pub fn insert_site(&self, site: &Site) -> Result<(), String> {
+        // The derived `capabilities` field is never persisted — it is
+        // recomputed from `kind`/`config` on every read.
+        let config_json = serde_json::to_string(&site.config)
+            .map_err(|e| format!("failed to serialize site config: {e}"))?;
         self.conn
             .execute(
                 "INSERT INTO sites
                  (id, name, slug, path, port, wp_version, php_version, status, admin_user, admin_pass,
-                  created_at, connection_id, remote_site_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  created_at, connection_id, remote_site_id, kind, config_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     site.id,
                     site.name,
@@ -215,6 +245,8 @@ impl Db {
                     site.created_at,
                     site.connection_id,
                     site.remote_site_id,
+                    site.kind,
+                    config_json,
                 ],
             )
             .map_err(|e| format!("failed to insert site: {e}"))?;
@@ -440,7 +472,7 @@ mod tests {
     }
 
     fn site(id: &str, slug: &str) -> Site {
-        Site {
+        let mut s = Site {
             id: id.into(),
             name: slug.into(),
             slug: slug.into(),
@@ -454,7 +486,12 @@ mod tests {
             created_at: "2026-07-20T00:00:00Z".into(),
             connection_id: None,
             remote_site_id: None,
-        }
+            kind: crate::site::KIND_WORDPRESS.into(),
+            config: crate::site::SiteConfig::default(),
+            capabilities: crate::site::Capabilities::default(),
+        };
+        s.refresh_capabilities();
+        s
     }
 
     /// The pre-plan-18 schema, verbatim: a database created by the shipped
@@ -500,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_5_upgrades_a_v4_database_without_touching_existing_rows() {
+    fn migrations_upgrade_a_v4_database_without_touching_existing_rows() {
         let path = temp_db_path("v4");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         seed_v4(&path);
@@ -510,13 +547,53 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
-        // The pre-existing site survives and reads back with a NULL origin.
+        // The pre-existing site survives, reads back with a NULL origin, and —
+        // crucially for plan 22 — migrates to the fully-capable WordPress stack:
+        // kind `wordpress`, the WordPress `SiteConfig` defaults, all caps true.
         let legacy = db.get_site("old-1").unwrap();
         assert_eq!(legacy.slug, "legacy");
         assert_eq!(legacy.connection_id, None);
         assert_eq!(legacy.remote_site_id, None);
+        assert_eq!(legacy.kind, crate::site::KIND_WORDPRESS);
+        assert_eq!(legacy.config, crate::site::SiteConfig::default());
+        assert_eq!(legacy.config.service, "wordpress");
+        assert_eq!(legacy.config.sync_path, "wp-content");
+        assert_eq!(legacy.capabilities, crate::site::Capabilities::WORDPRESS);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn docker_kind_round_trips_config_and_derives_capabilities() {
+        let path = temp_db_path("docker-kind");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let db = Db::open(&path).unwrap();
+
+        let mut app = site("d-1", "my-api");
+        app.kind = crate::site::KIND_DOCKER.into();
+        app.config = crate::site::SiteConfig {
+            service: "app".into(),
+            sync_path: ".".into(),
+            app_port: Some(3000),
+            db_engine: Some("postgres".into()),
+            db_service: Some("db".into()),
+        };
+        app.refresh_capabilities();
+        db.insert_site(&app).unwrap();
+
+        let back = db.get_site("d-1").unwrap();
+        assert_eq!(back.kind, crate::site::KIND_DOCKER);
+        assert_eq!(back.config.service, "app");
+        assert_eq!(back.config.app_port, Some(3000));
+        assert_eq!(back.config.db_engine.as_deref(), Some("postgres"));
+        // A docker app with a recognized DB engine earns db_sync but never the
+        // WordPress-only capabilities.
+        assert!(back.capabilities.code_sync);
+        assert!(back.capabilities.db_sync, "a recognized DB engine flips db_sync on");
+        assert!(!back.capabilities.wp_tools);
+        assert!(!back.capabilities.one_click_login);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
