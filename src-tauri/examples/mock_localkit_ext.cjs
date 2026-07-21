@@ -1,6 +1,11 @@
 // Mock of the serverkit-localkit extension for LocalKit M4 E2E testing.
 // Mimics builtin-extensions/serverkit-localkit/backend/localkit.py contract.
-// - Validates X-API-Key (good-key); invalid key -> 401 {'error': ...} on ALL routes.
+// - Serves the ServerKit core probes `test_connection` needs (plan 21): public
+//   GET /api/v1/system/health (service: serverkit-api, no key) and the
+//   key-gated GET /api/v1/setup-health/account, so `lk connection add/test`
+//   and `lk doctor` can validate against this mock.
+// - Validates X-API-Key (good-key); invalid key -> 401 {'error': ...} on ALL
+//   routes except the public health check above.
 // - Stores the SQL uploaded via POST /push/db; GET /pull/db returns it gzipped
 //   with the local URL rewritten to the remote URL (simulating a remote DB).
 // - Implements sync v2 (plan 19): chunked resumable push with an in-memory
@@ -192,10 +197,31 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(code, { "Content-Type": "application/json" });
     res.end(JSON.stringify(obj));
   };
+
+  // Public health check — no key required (the real ServerKit serves this
+  // unauthenticated, and `test_connection` deliberately sends no key so an
+  // invalid key can't mask an unreachable/wrong server). Must come before the
+  // key gate so `lk connection add`/`test`/`doctor` can validate against us.
+  if (req.url.split("?")[0] === "/api/v1/system/health") {
+    return json(200, {
+      status: "ok",
+      service: "serverkit-api",
+      canonical_domain: "panel.example.com",
+      canonical_origin: "https://panel.example.com",
+      staging: false,
+    });
+  }
+
   if (req.headers["x-api-key"] !== GOOD_KEY) {
     return json(401, { error: "Invalid or expired API key" });
   }
   const url = new URL(req.url, "http://x");
+
+  // API-key-validation endpoint (`@auth_required` upstream) — any 200 for a
+  // good key proves the key works. `test_connection` hits this after health.
+  if (url.pathname === "/api/v1/setup-health/account" && req.method === "GET") {
+    return json(200, { account: { email: "admin@example.com", plan: "pro" } });
+  }
 
   // --- mock-only test hooks ------------------------------------------------
   if (url.pathname === "/api/v1/localkit/__stats") {
