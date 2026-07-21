@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use localkit_lib::{db::Db, docker, router, site, snapshot, wordpress, AppState};
+use localkit_lib::{blueprint, db::Db, docker, router, site, snapshot, wordpress, AppState};
 
 // ---------------------------------------------------------------------------
 // clap surface
@@ -62,14 +62,17 @@ enum Cmd {
     /// Create a new site (pulls Docker images on first run).
     /// Prints the site URL on stdout; progress goes to stderr.
     Create {
-        /// Site name, e.g. "My Blog"
-        name: String,
-        /// WordPress version (allowlist lives in the app)
+        /// Site name, e.g. "My Blog" (defaults to the blueprint name with --blueprint)
+        name: Option<String>,
+        /// WordPress version (allowlist lives in the app; ignored with --blueprint)
         #[arg(long)]
         wp_version: Option<String>,
-        /// PHP version (allowlist lives in the app)
+        /// PHP version (allowlist lives in the app; ignored with --blueprint)
         #[arg(long)]
         php_version: Option<String>,
+        /// Create from a saved blueprint (its id or name) instead of a blank install
+        #[arg(long)]
+        blueprint: Option<String>,
         /// Output the created site as machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -113,6 +116,10 @@ enum Cmd {
     /// Manage point-in-time snapshots (database + wp-content) of a site
     #[command(subcommand)]
     Snapshot(SnapshotCmd),
+
+    /// Manage reusable site blueprints (save one, list, delete, share)
+    #[command(subcommand)]
+    Blueprint(BlueprintCmd),
 
     /// Clone a site from a ServerKit server down as a NEW local site.
     /// Downloads its wp-content and database, rewrites URLs to the local one,
@@ -225,6 +232,58 @@ enum SnapshotCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum BlueprintCmd {
+    /// List saved blueprints
+    List {
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Save an existing site as a reusable blueprint.
+    /// Prints the new blueprint's id on stdout; progress goes to stderr.
+    Save {
+        /// Source site (exact id, or case-insensitive slug or name)
+        site: String,
+        /// Blueprint name
+        name: String,
+        /// Optional description stored in the blueprint
+        #[arg(long)]
+        description: Option<String>,
+        /// Output the created blueprint as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Delete a blueprint (id or name). Prompts unless --yes.
+    Delete {
+        /// Blueprint (exact id, or case-insensitive name)
+        blueprint: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Export a blueprint to a single portable `.lkbp` file for sharing
+    Export {
+        /// Blueprint (exact id, or case-insensitive name)
+        blueprint: String,
+        /// Output file (defaults to <id>.lkbp in the current directory)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Import a blueprint from a `.lkbp` file
+    Import {
+        /// Path to the `.lkbp` file
+        file: PathBuf,
+        /// Output the imported blueprint as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // main / dispatch
 // ---------------------------------------------------------------------------
@@ -253,8 +312,9 @@ async fn run(cli: &Cli) -> Result<(), String> {
             name,
             wp_version,
             php_version,
+            blueprint,
             json,
-        } => cmd_create(&state, name, wp_version, php_version, *json).await,
+        } => cmd_create(&state, name.as_deref(), wp_version, php_version, blueprint.as_deref(), *json).await,
         Cmd::Clone {
             site: q,
             new_name,
@@ -288,6 +348,7 @@ async fn run(cli: &Cli) -> Result<(), String> {
             delete_snapshots,
         } => cmd_delete(&state, q, *yes, *delete_snapshots).await,
         Cmd::Snapshot(sub) => cmd_snapshot(&state, sub).await,
+        Cmd::Blueprint(sub) => cmd_blueprint(&state, sub).await,
         Cmd::Import {
             connection,
             site: remote,
@@ -371,11 +432,36 @@ async fn cmd_list(state: &AppState, json: bool) -> Result<(), String> {
 
 async fn cmd_create(
     state: &AppState,
-    name: &str,
+    name: Option<&str>,
     wp_version: &Option<String>,
     php_version: &Option<String>,
+    blueprint: Option<&str>,
     json: bool,
 ) -> Result<(), String> {
+    // From a blueprint: versions come from the recipe, the name defaults to it.
+    if let Some(query) = blueprint {
+        let bp = blueprint::find(state, query)?;
+        let site = blueprint::create_site(None, state, &bp.id, name.map(str::to_string)).await?;
+        if json {
+            print_json(&site)?;
+        } else {
+            println!("{}", site_url(&site));
+        }
+        eprintln!(
+            "{} {} created from blueprint {} and running",
+            ok("✓"),
+            bold(&site.name),
+            bold(&bp.manifest.name)
+        );
+        eprintln!(
+            "{} log in with `lk login {}` — the blueprint's database keeps its accounts",
+            info("→"),
+            site.slug
+        );
+        return Ok(());
+    }
+
+    let name = name.ok_or("a site name is required (or pass --blueprint <name>)")?;
     let wp = wp_version
         .clone()
         .unwrap_or_else(|| site::WP_VERSIONS[0].into());
@@ -592,6 +678,118 @@ async fn cmd_snapshot(state: &AppState, cmd: &SnapshotCmd) -> Result<(), String>
             )?;
             snapshot::delete(state, &s.id, id)?;
             eprintln!("{} snapshot {id} deleted", ok("✓"));
+            Ok(())
+        }
+    }
+}
+
+async fn cmd_blueprint(state: &AppState, cmd: &BlueprintCmd) -> Result<(), String> {
+    match cmd {
+        BlueprintCmd::List { json } => {
+            let bps = blueprint::list(state)?;
+            if *json {
+                return print_json(&bps);
+            }
+            if bps.is_empty() {
+                eprintln!(
+                    "{} no blueprints yet. save one with `lk blueprint save <site> <name>`.",
+                    info("→")
+                );
+                return Ok(());
+            }
+            let rows: Vec<[String; 5]> = bps
+                .iter()
+                .map(|b| {
+                    let theme = if b.manifest.theme.is_empty() {
+                        "—"
+                    } else {
+                        b.manifest.theme.as_str()
+                    };
+                    [
+                        b.id.clone(),
+                        b.manifest.name.clone(),
+                        short_time(&b.manifest.created_at),
+                        format!("{} + {}", human_bytes(b.db_bytes), human_bytes(b.code_bytes)),
+                        format!("{} plugins · {theme}", b.manifest.plugins.len()),
+                    ]
+                })
+                .collect();
+            print_table(&["ID", "NAME", "CREATED", "DB + CODE", "STACK"], &rows);
+            Ok(())
+        }
+
+        BlueprintCmd::Save {
+            site: q,
+            name,
+            description,
+            json,
+        } => {
+            let s = resolve(state, q)?;
+            let bp = blueprint::save(None, state, &s.id, name.clone(), description.clone()).await?;
+            if *json {
+                print_json(&bp)?;
+            } else {
+                // stdout carries the id (scriptable); chrome stays on stderr.
+                println!("{}", bp.id);
+            }
+            eprintln!(
+                "{} saved {} as the blueprint {} ({} plugins, {} theme)",
+                ok("✓"),
+                bold(&s.name),
+                bold(&bp.manifest.name),
+                bp.manifest.plugins.len(),
+                if bp.manifest.theme.is_empty() { "no" } else { bp.manifest.theme.as_str() }
+            );
+            Ok(())
+        }
+
+        BlueprintCmd::Delete { blueprint: q, yes } => {
+            let bp = blueprint::find(state, q)?;
+            confirm(
+                *yes,
+                &format!("delete blueprint `{}`? this cannot be undone.", bp.manifest.name),
+                &format!("`lk blueprint delete` removes `{}` permanently. pass --yes to confirm.", bp.id),
+            )?;
+            blueprint::delete(state, &bp.id)?;
+            eprintln!("{} blueprint {} deleted", ok("✓"), bold(&bp.manifest.name));
+            Ok(())
+        }
+
+        BlueprintCmd::Export { blueprint: q, output } => {
+            let bp = blueprint::find(state, q)?;
+            let dest = output
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(format!("{}.lkbp", bp.id)));
+            blueprint::export(state, &bp.id, &dest)?;
+            // stdout carries the path (scriptable); chrome stays on stderr.
+            println!("{}", dest.display());
+            eprintln!(
+                "{} exported blueprint {} to {}",
+                ok("✓"),
+                bold(&bp.manifest.name),
+                dest.display()
+            );
+            Ok(())
+        }
+
+        BlueprintCmd::Import { file, json } => {
+            let bp = blueprint::import(state, file)?;
+            if *json {
+                print_json(&bp)?;
+            } else {
+                println!("{}", bp.id);
+            }
+            eprintln!(
+                "{} imported blueprint {} ({} plugins)",
+                ok("✓"),
+                bold(&bp.manifest.name),
+                bp.manifest.plugins.len()
+            );
+            eprintln!(
+                "{} create a site from it with `lk create --blueprint {}`",
+                info("→"),
+                bp.id
+            );
             Ok(())
         }
     }

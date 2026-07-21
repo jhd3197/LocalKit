@@ -165,6 +165,29 @@ pub fn list(state: &AppState) -> Result<Vec<Blueprint>, String> {
     Ok(out)
 }
 
+/// Resolve a blueprint by exact id (slug), then case-insensitive name — the
+/// same shape as site resolution, for the CLI. Ambiguous names ask for the id.
+pub fn find(state: &AppState, query: &str) -> Result<Blueprint, String> {
+    let all = list(state)?;
+    if let Some(bp) = all.iter().find(|b| b.id == query) {
+        return Ok(bp.clone());
+    }
+    let q = query.to_lowercase();
+    let hits: Vec<&Blueprint> = all.iter().filter(|b| b.manifest.name.to_lowercase() == q).collect();
+    match hits.len() {
+        1 => Ok(hits[0].clone()),
+        0 => {
+            let available = all.iter().map(|b| b.id.as_str()).collect::<Vec<_>>().join(", ");
+            if available.is_empty() {
+                Err(format!("no blueprint named `{query}` — there are none yet. save one with `lk blueprint save <site> <name>`."))
+            } else {
+                Err(format!("no blueprint named `{query}`. available: {available}"))
+            }
+        }
+        _ => Err(format!("`{query}` matches more than one blueprint. pass the exact id.")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Save
 // ---------------------------------------------------------------------------
@@ -294,6 +317,115 @@ pub fn delete(state: &AppState, id: &str) -> Result<(), String> {
         return Err(format!("blueprint `{id}` not found"));
     }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to delete blueprint: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Export / import — a single portable `.lkbp` file (plan 20)
+// ---------------------------------------------------------------------------
+
+/// The three files that make up a blueprint on disk; also the only entries an
+/// imported archive may contain, so a shared `.lkbp` can't write anything else.
+const ARTIFACTS: [&str; 3] = [MANIFEST_FILE, DB_FILE, CODE_FILE];
+
+/// Bundle a blueprint into a single `.lkbp` file (a tar.gz of its three
+/// artifacts at the archive root) so it can be shared without a registry.
+pub fn export(state: &AppState, id: &str, dest: &Path) -> Result<(), String> {
+    let dir = blueprint_dir(&state.data_dir, id);
+    if !dir.is_dir() {
+        return Err(format!("blueprint `{id}` not found"));
+    }
+    let file = std::fs::File::create(dest)
+        .map_err(|e| format!("failed to create {}: {e}", dest.display()))?;
+    let enc = flate2::write::GzEncoder::new(
+        std::io::BufWriter::new(file),
+        flate2::Compression::fast(),
+    );
+    let mut builder = tar::Builder::new(enc);
+    for name in ARTIFACTS {
+        let path = dir.join(name);
+        if !path.exists() {
+            return Err(format!("blueprint `{id}` is missing {name}; refusing to export a broken bundle"));
+        }
+        builder
+            .append_path_with_name(&path, name)
+            .map_err(|e| format!("failed to add {name} to the bundle: {e}"))?;
+    }
+    builder
+        .into_inner()
+        .map_err(|e| format!("failed to finalize the bundle: {e}"))?
+        .finish()
+        .map_err(|e| format!("failed to finalize the bundle: {e}"))?;
+    Ok(())
+}
+
+/// Install a blueprint from a `.lkbp` file under a fresh unique slug.
+///
+/// The archive is treated as semi-trusted (a teammate may have made it): only
+/// the three known filenames are accepted, each written through `io::copy` so a
+/// crafted symlink or path entry can never place a file outside the staging
+/// directory. Extraction lands in a temp dir first, so a bad bundle leaves no
+/// half-installed blueprint behind.
+pub fn import(state: &AppState, src: &Path) -> Result<Blueprint, String> {
+    let file = std::fs::File::open(src)
+        .map_err(|e| format!("failed to open {}: {e}", src.display()))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)));
+
+    let root = blueprints_root(&state.data_dir);
+    std::fs::create_dir_all(&root)
+        .map_err(|e| format!("failed to create blueprints directory: {e}"))?;
+    let tmp = root.join(format!(".import-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("failed to stage the import: {e}"))?;
+
+    let staged = extract_artifacts(&mut archive, &tmp);
+    let bp = staged.and_then(|_| install_staged(state, &tmp));
+    if bp.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    bp
+}
+
+fn extract_artifacts<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    tmp: &Path,
+) -> Result<(), String> {
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("the blueprint bundle is unreadable: {e}"))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("the blueprint bundle is unreadable: {e}"))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("bundle entry has an unreadable path: {e}"))?
+            .into_owned();
+        let name = path.to_str().ok_or("bundle entry has a non-UTF-8 name")?;
+        if !ARTIFACTS.contains(&name) {
+            return Err(format!("blueprint bundle contains an unexpected entry: {name}"));
+        }
+        // io::copy reads the entry's data stream and writes a plain file — it
+        // never follows a link header, so a symlink entry lands as a (harmless,
+        // empty) regular file instead of escaping the staging dir.
+        let mut out = std::fs::File::create(tmp.join(name))
+            .map_err(|e| format!("failed to write {name}: {e}"))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| format!("failed to write {name}: {e}"))?;
+    }
+    Ok(())
+}
+
+fn install_staged(state: &AppState, tmp: &Path) -> Result<Blueprint, String> {
+    let text = std::fs::read_to_string(tmp.join(MANIFEST_FILE))
+        .map_err(|_| "the bundle has no blueprint.json".to_string())?;
+    let manifest: Manifest = serde_json::from_str(&text)
+        .map_err(|e| format!("the bundle's blueprint.json is unreadable: {e}"))?;
+    for name in [DB_FILE, CODE_FILE] {
+        if !tmp.join(name).exists() {
+            return Err(format!("the bundle is missing {name}"));
+        }
+    }
+    let id = unique_slug(&state.data_dir, &manifest.name);
+    let dest = blueprint_dir(&state.data_dir, &id);
+    std::fs::rename(tmp, &dest)
+        .map_err(|e| format!("failed to install the imported blueprint: {e}"))?;
+    read_blueprint(&state.data_dir, &id)
 }
 
 // ---------------------------------------------------------------------------
