@@ -63,6 +63,10 @@ src-tauri/               Rust backend (also a cargo workspace root)
   src/dockerapp.rs       plan-22 generic Docker app kind: inspect a compose
                          project (services/ports/DB engine) + import (copy the
                          folder, record app service/port, bring it up)
+  src/php.rs             plan-26 PHP/Laravel stack kind: generated compose
+                         (php-fpm built w/ pdo_mysql+Composer, nginx, mariadb,
+                         profile-gated adminer) + create (empty skeleton or
+                         import a code folder into app/)
   src/wordpress.rs       wp-cli via `docker compose run --rm wpcli wp ...`
   src/router.rs          M6 local domains: shared Caddy router (`*.test`),
                          hosts-file block + elevated writer, CA trust, status
@@ -118,7 +122,7 @@ src-tauri/               Rust backend (also a cargo workspace root)
   one-click recovery, port-bearing site URLs, SiteDetail banner). The mock
   fakes a LocalWP holding 80/443; `window.__LOCALKIT_MOCK__` (mock builds
   only) lets the script reach states the UI can't drive on its own.
-- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|adminer|delete|cleanup>`
+- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|adminer|php|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
   uses a scratch data dir under the OS temp dir. `reconcile` (plan 23) stops the
   containers behind LocalKit's back and asserts the reconciler settles
@@ -137,7 +141,10 @@ src-tauri/               Rust backend (also a cargo workspace root)
   running container via `compose cp`, round-trips a write without breaking the
   site, and reads/writes the `.env`. `adminer` (plan 24) rewrites the compose
   file to add the profile-gated `adminer` service, starts it on demand, and
-  asserts it serves its login page on db_port + 1000.
+  asserts it serves its login page on db_port + 1000. `php` (plan 26) creates a
+  self-contained PHP/Laravel stack site (empty skeleton), asserts the built
+  php-fpm+nginx webroot serves 200 and the skeleton page's PDO probe reports the
+  bundled mariadb reachable (proves pdo_mysql + the DB wiring), then deletes it.
 - `cd src-tauri && cargo run --example docker_smoke [-- run|clean]` — plan-22
   E2E for the generic Docker app kind against real Docker (scratch data dir):
   writes a trivial nginx+mariadb compose fixture, inspects it, imports it as a
@@ -260,8 +267,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - **Ports:** site port = first free from 8081; DB host port = site port + 10000.
 - **Versions:** WP/PHP versions come from allowlists in `site.rs`
   (`WP_VERSIONS`, `PHP_VERSIONS`) — the UI reads them via the `app_info` command.
-- **Site kinds & capabilities (plan 22):** every site has a `kind`
-  (`wordpress` | `docker`; `php` arrives with plan 26) and a `SiteConfig`
+- **Site kinds & capabilities (plan 22, 26):** every site has a `kind`
+  (`wordpress` | `docker` | `php`) and a `SiteConfig`
   (`config_json`, migration 6) carrying the de-hardcoded WordPress assumptions:
   `service` (terminal/logs), `sync_path` (code archive), `app_port` (router
   upstream), and a detected `db_engine`/`db_service`. `Site::capabilities` is
@@ -269,7 +276,12 @@ src-tauri/               Rust backend (also a cargo workspace root)
   gates on it instead of assuming WordPress: WP claims all of
   `domains, terminal, logs, snapshots, db_gui, db_sync, code_sync,
   one_click_login, wp_tools, search_replace`; docker claims
-  `domains, terminal, logs, snapshots, code_sync`. WordPress is the zero-change
+  `domains, terminal, logs, snapshots, code_sync`; **php** (plan 26) claims
+  everything WP does **except** the WP-only trio (`one_click_login`, `wp_tools`,
+  `search_replace`) — so it keeps `db_gui` + `db_sync` (engine-native, not
+  wp-cli) via its generated mariadb + Adminer. `render_compose`,
+  `db_name`/`db_user` and the Adminer/SiteDetail DB creds are kind-aware (read
+  from `.env`, WP defaults preserved). WordPress is the zero-change
   path — the config defaults ARE the old literals. Backend commands refuse a
   missing capability via `Site::require(cap, action)` ("… not supported for
   <kind> sites"); both frontends **hide** rather than error (gate on

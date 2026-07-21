@@ -6,7 +6,7 @@ import { useBlueprints } from "../stores/blueprints";
 import { useDialog } from "../hooks/useDialog";
 import type { AppInfo, Blueprint, DockerProjectInspection } from "../lib/types";
 
-type Mode = "wordpress" | "docker";
+type Mode = "wordpress" | "php" | "docker";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -22,6 +22,7 @@ function formatBytes(n: number): string {
 
 export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   const createSite = useSites((s) => s.createSite);
+  const createPhpSite = useSites((s) => s.createPhpSite);
   const blueprints = useBlueprints((s) => s.blueprints);
   const refreshBlueprints = useBlueprints((s) => s.refresh);
   const removeBlueprint = useBlueprints((s) => s.remove);
@@ -49,6 +50,10 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   const [dockerService, setDockerService] = useState("");
   const [dockerPort, setDockerPort] = useState<number>(0);
   const [includeAll, setIncludeAll] = useState(false);
+
+  // PHP/Laravel stack (plan 26): empty skeleton, or import an existing folder.
+  const [phpImport, setPhpImport] = useState(false);
+  const [phpPath, setPhpPath] = useState("");
 
   useEffect(() => {
     ipc
@@ -110,6 +115,12 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
           dockerPort,
           includeAll
         );
+      } else if (mode === "php") {
+        site = await createPhpSite(
+          name.trim(),
+          phpVersion,
+          phpImport ? phpPath.trim() : undefined
+        );
       } else if (blueprint) {
         site = await createFromBlueprint(blueprint.id, name);
       } else {
@@ -137,7 +148,9 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   const canSubmit =
     mode === "docker"
       ? !!inspection && !!name.trim() && !!dockerService && dockerPort > 0
-      : !!name.trim();
+      : mode === "php"
+        ? !!name.trim() && (!phpImport || !!phpPath.trim())
+        : !!name.trim();
   const primaryLabel =
     mode === "docker"
       ? busy
@@ -165,15 +178,18 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
 
         <div className="mt-3 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950/60 p-1">
           {tab("wordpress", "WordPress")}
+          {tab("php", "PHP / Laravel")}
           {tab("docker", "Docker project")}
         </div>
 
         <p className="mt-3 text-sm text-zinc-500">
           {mode === "docker"
             ? "LocalKit copies an existing Docker Compose project into a managed site — with a local domain, terminal and logs."
-            : blueprint
-              ? "LocalKit will stamp out a new site from this blueprint — its database, files, plugins and theme."
-              : "LocalKit will create a Docker project, start it, and install WordPress automatically."}
+            : mode === "php"
+              ? "LocalKit generates a php-fpm + nginx + MariaDB stack. Start from an empty Laravel-ready webroot, or import an existing PHP project."
+              : blueprint
+                ? "LocalKit will stamp out a new site from this blueprint — its database, files, plugins and theme."
+                : "LocalKit will create a Docker project, start it, and install WordPress automatically."}
         </p>
 
         <div className="mt-5 flex min-h-0 flex-col gap-4 overflow-y-auto">
@@ -195,6 +211,18 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
               onPort={setDockerPort}
               includeAll={includeAll}
               onIncludeAll={setIncludeAll}
+            />
+          ) : mode === "php" ? (
+            <PhpFields
+              name={name}
+              onName={setName}
+              phpVersion={phpVersion}
+              onPhpVersion={setPhpVersion}
+              phpVersions={versions.php_versions}
+              importing={phpImport}
+              onImporting={setPhpImport}
+              path={phpPath}
+              onPath={setPhpPath}
             />
           ) : (
             <>
@@ -285,6 +313,92 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** The "PHP / Laravel" fields (plan 26): a name, a PHP version, and the choice
+ * between an empty Laravel-ready skeleton and importing an existing folder. */
+function PhpFields({
+  name,
+  onName,
+  phpVersion,
+  onPhpVersion,
+  phpVersions,
+  importing,
+  onImporting,
+  path,
+  onPath,
+}: {
+  name: string;
+  onName: (v: string) => void;
+  phpVersion: string;
+  onPhpVersion: (v: string) => void;
+  phpVersions: string[];
+  importing: boolean;
+  onImporting: (v: boolean) => void;
+  path: string;
+  onPath: (v: string) => void;
+}) {
+  const input =
+    "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600";
+  const seg = (on: boolean, label: string, sub: string, onClick: () => void) => (
+    <button
+      onClick={onClick}
+      className={`flex-1 rounded-md border px-3 py-2 text-left transition-colors ${
+        on
+          ? "border-violet-600 bg-violet-950/30"
+          : "border-zinc-800 bg-zinc-950/60 hover:border-zinc-700"
+      }`}
+    >
+      <span className="block text-sm font-medium text-zinc-100">{label}</span>
+      <span className="block text-xs text-zinc-500">{sub}</span>
+    </button>
+  );
+  return (
+    <>
+      <label className="block">
+        <span className="mb-1 block text-sm text-zinc-400">Site name</span>
+        <input
+          value={name}
+          onChange={(e) => onName(e.target.value)}
+          placeholder="My App"
+          autoFocus
+          className={input}
+        />
+      </label>
+
+      <label className="block">
+        <span className="mb-1 block text-sm text-zinc-400">PHP</span>
+        <select value={phpVersion} onChange={(e) => onPhpVersion(e.target.value)} className={input}>
+          {phpVersions.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div className="flex gap-2">
+        {seg(!importing, "Empty skeleton", "A Laravel-ready public/ webroot", () => onImporting(false))}
+        {seg(importing, "Import a folder", "Copy existing PHP code in", () => onImporting(true))}
+      </div>
+
+      {importing && (
+        <label className="block">
+          <span className="mb-1 block text-sm text-zinc-400">Project folder</span>
+          <input
+            value={path}
+            onChange={(e) => onPath(e.target.value)}
+            placeholder="C:\\path\\to\\my-php-app"
+            className={input}
+          />
+          <span className="mt-1 block text-xs text-zinc-600">
+            The folder is copied into LocalKit's <code className="font-mono">app/</code> directory —
+            the original is left untouched.
+          </span>
+        </label>
+      )}
+    </>
   );
 }
 

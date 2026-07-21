@@ -1,6 +1,8 @@
-/** Site kinds (plan 22). Mirrors `site::KIND_*` in the backend. */
+/** Site kinds. Mirrors `site::KIND_*` in the backend. */
 export const KIND_WORDPRESS = "wordpress";
 export const KIND_DOCKER = "docker";
+/** PHP/Laravel generated stack (plan 26). */
+export const KIND_PHP = "php";
 
 /**
  * What a site's kind (+ config) supports (plan 22). Every capability the UI

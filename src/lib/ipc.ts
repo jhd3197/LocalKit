@@ -35,6 +35,10 @@ export const ipc = {
   getSite: (id: string) => invoke<SiteDetail>("get_site", { id }),
   createSite: (name: string, wpVersion: string, phpVersion: string) =>
     invoke<Site>("create_site", { name, wpVersion, phpVersion }),
+  /** Create a PHP/Laravel stack site (plan 26): an empty skeleton, or import an
+   * existing PHP project folder when `path` is given. */
+  createPhpSite: (name: string, phpVersion: string, path?: string, includeAll = false) =>
+    invoke<Site>("create_php_site", { name, phpVersion, path, includeAll }),
   /** Inspect a folder as a candidate Docker project (plan 22). */
   inspectDockerProject: (path: string) =>
     invoke<DockerProjectInspection>("inspect_docker_project", { path }),

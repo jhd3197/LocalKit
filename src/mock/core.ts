@@ -220,6 +220,62 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return site;
     }
 
+    case "create_php_site": {
+      const name = String(a.name ?? "").trim();
+      if (!name) throw "Site name is required.";
+      const slug = slugify(name);
+      const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
+      const id = `site-${slug}`;
+      const importing = !!(a.path && String(a.path).trim());
+      const stages: Array<[string, string]> = [
+        ["files", "Writing project files…"],
+        ["pulling", "Building the PHP image (first run can take a few minutes)…"],
+        ["containers", "Starting containers…"],
+        ["waiting", "Waiting for the app to come online…"],
+        ["done", `Site "${name}" is ready at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id, stage, message } satisfies SiteEvent);
+          await sleep(900);
+        }
+      })();
+      const site: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: "",
+        php_version: String(a.phpVersion ?? "8.3"),
+        status: "creating",
+        admin_user: "",
+        admin_pass: "",
+        created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+        kind: "php",
+        config: {
+          service: "app",
+          sync_path: "app",
+          db_engine: "mariadb",
+          db_service: "db",
+        },
+        capabilities: data.PHP_CAPS,
+      };
+      void importing; // the mock ignores the source folder; real backend copies it
+      data.sites.push({ ...site, live_status: "creating", db_password: "laravel-demo-0000" });
+      void (async () => {
+        await sleep(900 * stages.length);
+        const s = data.sites.find((x) => x.id === id);
+        if (s) {
+          s.status = "running";
+          s.live_status = "running";
+        }
+      })();
+      return site;
+    }
+
     case "clone_site": {
       const source = data.sites.find((s) => s.id === a.id);
       if (!source) throw `site not found: ${a.id}`;

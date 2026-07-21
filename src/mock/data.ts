@@ -40,6 +40,19 @@ export const DOCKER_CAPS: Capabilities = {
   wp_tools: false,
   search_replace: false,
 };
+/** PHP/Laravel stack (plan 26): everything but the WordPress-only trio. */
+export const PHP_CAPS: Capabilities = {
+  domains: true,
+  terminal: true,
+  logs: true,
+  snapshots: true,
+  db_gui: true,
+  db_sync: true,
+  code_sync: true,
+  one_click_login: false,
+  wp_tools: false,
+  search_replace: false,
+};
 
 // Keep in sync with WP_VERSIONS / PHP_VERSIONS in src-tauri/src/site.rs.
 export const appInfo: AppInfo = {
@@ -50,6 +63,7 @@ export const appInfo: AppInfo = {
   kinds: [
     { kind: "wordpress", capabilities: WP_CAPS },
     { kind: "docker", capabilities: DOCKER_CAPS },
+    { kind: "php", capabilities: PHP_CAPS },
   ],
 };
 
@@ -205,15 +219,39 @@ export const sites: MockSite[] = [
     config: { service: "api", sync_path: ".", app_port: 4000, db_engine: "postgres", db_service: "db" },
     capabilities: DOCKER_CAPS,
   },
+  // A PHP/Laravel stack (plan 26) — like WordPress it has a database (Adminer,
+  // engine-native sync), but none of the WP-only tools (no WP Admin, no
+  // search-replace, no wp-config editor).
+  {
+    id: "site-checkout-api",
+    name: "Checkout API",
+    slug: "checkout-api",
+    path: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites\\checkout-api",
+    port: 8086,
+    wp_version: "",
+    php_version: "8.3",
+    status: "running",
+    live_status: "running",
+    admin_user: "",
+    admin_pass: "",
+    created_at: "2026-07-16T09:05:00Z",
+    db_password: "laravel-Rb7Kq2mZ",
+    connection_id: null,
+    remote_site_id: null,
+    kind: "php",
+    config: { service: "app", sync_path: "app", db_engine: "mariadb", db_service: "db" },
+    capabilities: PHP_CAPS,
+  },
 ];
 
 export function siteDetail(site: MockSite): SiteDetail {
+  const dbUser = site.kind === "php" ? "laravel" : "wordpress";
   return {
     ...site,
     db_host: "127.0.0.1",
     db_port: site.port + 10000,
-    db_name: "wordpress",
-    db_user: "wordpress",
+    db_name: dbUser,
+    db_user: dbUser,
   };
 }
 

@@ -16,6 +16,12 @@ interface SitesState {
   wpInfo: Record<string, WpInfo | null>;
   refresh: () => Promise<void>;
   createSite: (name: string, wpVersion: string, phpVersion: string) => Promise<Site>;
+  createPhpSite: (
+    name: string,
+    phpVersion: string,
+    path?: string,
+    includeAll?: boolean,
+  ) => Promise<Site>;
   cloneSite: (id: string, newName: string) => Promise<Site>;
   start: (id: string) => Promise<void>;
   stop: (id: string) => Promise<void>;
@@ -109,6 +115,20 @@ export const useSites = create<SitesState>((set, get) => ({
       return site;
     } catch (e) {
       toastError(e, "Create site");
+      throw e;
+    } finally {
+      set({ creating: false });
+    }
+  },
+
+  createPhpSite: async (name, phpVersion, path, includeAll) => {
+    set({ creating: true, progress: null });
+    try {
+      const site = await ipc.createPhpSite(name, phpVersion, path, includeAll);
+      await get().refresh();
+      return site;
+    } catch (e) {
+      toastError(e, "Create PHP site");
       throw e;
     } finally {
       set({ creating: false });
