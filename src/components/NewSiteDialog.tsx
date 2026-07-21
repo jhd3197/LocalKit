@@ -170,6 +170,26 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+/**
+ * A generated initial-letter tile standing in for a blueprint thumbnail
+ * (plan 20 phase 3 — screenshots are dev-only, so v1 is a letter tile). The
+ * hue is derived from the name so a blueprint keeps a stable colour.
+ */
+function LetterTile({ name }: { name: string }) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  const hue = Math.abs(hash) % 360;
+  return (
+    <div
+      aria-hidden
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-sm font-semibold text-white"
+      style={{ backgroundColor: `hsl(${hue} 42% 42%)` }}
+    >
+      {name.trim().charAt(0).toUpperCase() || "?"}
+    </div>
+  );
+}
+
 /** Theme + plugin chips for a blueprint (active plugins first, then a "+N"). */
 function BlueprintChips({ blueprint }: { blueprint: Blueprint }) {
   const active = blueprint.plugins.filter((p) => p.status === "active");
@@ -202,12 +222,17 @@ function BlueprintRow({
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 transition-colors hover:border-zinc-700">
       <div className="flex items-start justify-between gap-2">
-        <button onClick={onUse} className="min-w-0 flex-1 text-left">
-          <p className="truncate text-sm font-medium text-zinc-100">{blueprint.name}</p>
-          <p className="truncate text-xs text-zinc-600">
-            from {blueprint.source_site_name} · WP {blueprint.wp_version} · PHP{" "}
-            {blueprint.php_version}
-          </p>
+        <button onClick={onUse} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+          <LetterTile name={blueprint.name} />
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-medium text-zinc-100">
+              {blueprint.name}
+            </span>
+            <span className="block truncate text-xs text-zinc-600">
+              from {blueprint.source_site_name} · WP {blueprint.wp_version} · PHP{" "}
+              {blueprint.php_version}
+            </span>
+          </span>
         </button>
         <div className="flex shrink-0 gap-1">
           <button

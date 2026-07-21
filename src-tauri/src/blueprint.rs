@@ -637,6 +637,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn make_tgz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut enc);
+            for (name, data) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                builder.append_data(&mut header, name, *data).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        enc.finish().unwrap()
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("localkit-bp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn import_extracts_the_three_known_artifacts() {
+        let tmp = scratch("extract-ok");
+        let tgz = make_tgz(&[
+            ("blueprint.json", b"{}"),
+            ("db.sql.gz", b"db"),
+            ("wp-content.tar.gz", b"code"),
+        ]);
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&tgz[..]));
+        extract_artifacts(&mut archive, &tmp).unwrap();
+        for f in ["blueprint.json", "db.sql.gz", "wp-content.tar.gz"] {
+            assert!(tmp.join(f).exists(), "missing {f}");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_refuses_an_unexpected_entry() {
+        // A `.lkbp` may be shared by a teammate: anything but the three known
+        // filenames is refused rather than written.
+        let tmp = scratch("extract-evil");
+        let tgz = make_tgz(&[("blueprint.json", b"{}"), ("evil.txt", b"pwned")]);
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&tgz[..]));
+        let err = extract_artifacts(&mut archive, &tmp).unwrap_err();
+        assert!(err.contains("unexpected entry"), "unexpected error: {err}");
+        assert!(!tmp.join("evil.txt").exists(), "the rejected entry was written anyway");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn copy_fallback_reproduces_the_bytes() {
         // The branch hardlink_or_copy takes when the filesystem refuses a link.
