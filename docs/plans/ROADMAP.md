@@ -32,7 +32,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 22 | `22_multi-stack-core` | ✅ shipped | Kind/capability site model + bring-your-own-compose Docker apps — before 23–25 so new features are capability-aware from day one. |
 | 23 | `23_reconciliation` | ✅ shipped | Settle DB site status against Docker ground truth (forward-only, 60s reconciler); `degraded` status; recover half-created sites (Resume/Clean up); Docker-health pill. |
 | 24 | `24_site-tools` | ✅ shipped | Tools tab: Adminer sidecar, serialization-safe search-replace, WP_DEBUG + log viewer, config editor. |
-| 25 | `25_release-polish-completion` | ⬜ | M5 remainder: update checker, OS keyring for API keys, OS notifications, real test suite. |
+| 25 | `25_release-polish-completion` | ✅ | M5 remainder: update checker, OS keyring for API keys, OS notifications, real test suite. |
 | 26 | `26_php-laravel-stack` | ⬜ | Generated PHP/Laravel stack + per-kind ServerKit sync parity (needs 22, 17–19). |
 
 Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferred
@@ -89,11 +89,13 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 
 ## Track C — Product (M5–M6)
 
-- ⬜ `npm run tauri build` installers per platform
-- ⬜ Update awareness (plan 25 — checker first, Tauri updater if releases get signed)
-- ⬜ OS keyring for ServerKit API keys (plan 25; plaintext SQLite accepted for v1)
-- ⬜ Real test suite (plan 25; today: `cargo check` + router hosts-block unit tests +
-  the `smoke` / `m4_smoke` / `m6_smoke` examples)
+- ✅ `npm run tauri build` installers per platform (release.yml, all platforms + lk)
+- ✅ Update awareness (plan 25): GitHub-release checker → Settings row + launch
+  toast + `lk doctor` line; Tauri updater is a drop-in if releases get signed
+- ✅ OS keyring for ServerKit API keys (plan 25; `keystore.rs`, degrades to SQLite)
+- ✅ Real test suite (plan 25): `cargo test --workspace` (per-module unit tests) +
+  `npm run test` (vitest), both in CI; the `smoke`/`m4_smoke`/`m6_smoke` examples
+  stay as the E2E layer
 - ✅ Local domains: `http(s)://<slug>.test` via a shared Caddy router +
   managed hosts block + local CA trust (plan 6), layered on top of the
   always-working `localhost:<port>` URLs
@@ -154,7 +156,8 @@ Faro paths referenced in each plan):
   fuzzy palette (mod+K), global shortcuts with editable-target guards,
   remappable bindings in Settings → Keyboard, cheat-sheet, shared
   `useDialog` for modals
-- ⬜ Later candidates from the survey (unplanned): OS desktop
-  notifications, auto-updater (Track C), context menus, structured
+- ✅ OS desktop notifications (plan 25): fired on long-op completion only when
+  the window is unfocused/closed-to-tray, `osNotifications` toggle
+- ⬜ Later candidates from the survey (unplanned): context menus, structured
   `{kind, message}` IPC errors, snippets, light theme (needs a CSS-var
   token layer first)

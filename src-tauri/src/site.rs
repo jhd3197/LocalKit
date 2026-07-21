@@ -1147,6 +1147,29 @@ pub async fn logs(state: &AppState, id: &str, tail: u32) -> Result<String, Strin
 mod tests {
     use super::*;
 
+    #[test]
+    fn slugify_lowercases_and_dashes_word_boundaries() {
+        assert_eq!(slugify("My Blog"), "my-blog");
+        assert_eq!(slugify("  Trim Me  "), "trim-me");
+        assert_eq!(slugify("Hello, World!"), "hello-world");
+        assert_eq!(slugify("foo   bar"), "foo-bar"); // runs collapse to one dash
+        assert_eq!(slugify("v1.2"), "v1-2");
+        assert_eq!(slugify("A"), "a");
+    }
+
+    #[test]
+    fn slugify_never_yields_an_empty_or_edge_dashed_slug() {
+        // A slug is a table key and a directory name — it must never be empty
+        // and never lead/trail with a dash.
+        assert_eq!(slugify(""), "site");
+        assert_eq!(slugify("---"), "site");
+        assert_eq!(slugify("!!!"), "site");
+        assert_eq!(slugify("  "), "site");
+        assert_eq!(slugify("-lead and trail-"), "lead-and-trail");
+        // Non-ASCII is dropped (acts as a separator), never transliterated.
+        assert_eq!(slugify("café"), "caf");
+    }
+
     /// The WordPress reference stack claims every capability — the whole point
     /// of the model is that WP is not an `if` branch but the maximal kind.
     #[test]

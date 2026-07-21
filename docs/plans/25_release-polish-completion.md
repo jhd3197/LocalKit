@@ -1,6 +1,8 @@
 # 25 — Release polish completion: updater, keyring, notifications, test suite
 
-Status: ⬜ planned
+Status: ✅ implemented (on `dev`) — all four phases: update checker,
+OS keyring for API keys, OS notifications, and the automated test suite
+(Rust `cargo test --workspace` + frontend `vitest`, both wired into CI).
 
 Finish the genuinely remaining M5 work (plan 5 predates the CI/release
 workflows, which shipped separately): in-app update awareness, OS-keyring

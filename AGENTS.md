@@ -99,7 +99,11 @@ src-tauri/               Rust backend (also a cargo workspace root)
 ## Build / test commands
 
 - `npm install && npm run build` — type-check (tsc) + Vite build
-- `cd src-tauri && cargo check` — Rust compile check (no tests exist yet)
+- `npm run test` — frontend unit tests (vitest + jsdom, plan 25): `lib/fuzzy`,
+  `lib/shortcuts`, `lib/keybindings`, `lib/errors` toast dedupe, settings-store
+  parsing. Tauri APIs are aliased to `src/mock/*` (see `vitest.config.ts`), so
+  tests never touch a real IPC bridge.
+- `cd src-tauri && cargo check` — Rust compile check
 - `npm run tauri dev` — full app (opens a GUI window; don't run headless)
 - `npm run dev:mock` — Vite in mock mode (port 1426): vite.config.ts aliases
   `@tauri-apps/api/core|event` + `@tauri-apps/plugin-opener` to `src/mock/`,
@@ -218,8 +222,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   bad-key refusal, the push/pull argument errors, and completions for all four
   shells. The Docker-backed push/pull path is covered by `m4_smoke`.
 - CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
-  build`, `cargo check --workspace --all-targets`, `cargo test --workspace`
-  (matches Faro's CI shape).
+  build`, `npm run test` (vitest), `cargo check --workspace --all-targets`,
+  `cargo test --workspace`. Linux jobs install `libdbus-1-dev` for the plan-25
+  keyring secret-service backend.
 - Releases: `.github/workflows/release.yml` — every push to `main` (i.e. a
   dev→main merge) auto-bumps the patch version, tags `vX.Y.Z`, builds the
   desktop app (macOS universal / Windows / Linux) **and** the `lk` CLI for all
