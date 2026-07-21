@@ -307,6 +307,69 @@ fn clear_site_debug_log(state: State<AppState>, id: String) -> Result<(), String
     wordpress::clear_debug_log(&s.dir())
 }
 
+/// Confirm the site's app container is running (for actions that need a live
+/// container — terminal, one-click login, wp-config editing).
+async fn ensure_running(s: &Site) -> Result<(), String> {
+    let containers = docker::compose_ps(&s.dir()).await?;
+    if containers
+        .iter()
+        .any(|c| c.service == s.app_service() && c.state == "running")
+    {
+        Ok(())
+    } else {
+        Err(format!("\"{}\" is not running — start the site first.", s.name))
+    }
+}
+
+/// Read a site config file for the editor: `file` is `wp-config` or `env` (plan 24).
+#[tauri::command]
+async fn read_site_config_file(
+    state: State<'_, AppState>,
+    id: String,
+    file: String,
+) -> Result<String, String> {
+    let s = site::get(&state, &id)?;
+    s.require(s.capabilities.wp_tools, "The config editor")?;
+    match file.as_str() {
+        // wp-config.php lives in the volume — copied out of the running container.
+        "wp-config" => {
+            ensure_running(&s).await?;
+            wordpress::read_wp_config(&s.dir(), s.app_service()).await
+        }
+        "env" => site::read_env_file(&s.dir()),
+        other => Err(format!("unknown config file: {other}")),
+    }
+}
+
+/// Overwrite a site config file (plan 24). `.env` changes need a restart to take
+/// effect (the editor offers one); `wp-config.php` is read live by PHP.
+#[tauri::command]
+async fn write_site_config_file(
+    state: State<'_, AppState>,
+    id: String,
+    file: String,
+    contents: String,
+) -> Result<(), String> {
+    let s = site::get(&state, &id)?;
+    s.require(s.capabilities.wp_tools, "The config editor")?;
+    match file.as_str() {
+        "wp-config" => {
+            ensure_running(&s).await?;
+            wordpress::write_wp_config(&s.dir(), s.app_service(), &contents).await
+        }
+        "env" => site::write_env_file(&s.dir(), &contents),
+        other => Err(format!("unknown config file: {other}")),
+    }
+}
+
+/// Restart a site (recreate) so an edited `.env` takes effect (plan 24).
+#[tauri::command]
+async fn restart_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Site, String> {
+    let site = site::restart(&state, &id).await?;
+    tray::refresh(&app);
+    Ok(site)
+}
+
 // ---------------------------------------------------------------------------
 // One-click WP Admin login (one-time token + MU plugin)
 // ---------------------------------------------------------------------------
@@ -779,6 +842,9 @@ pub fn run() {
             set_site_debug,
             read_site_debug_log,
             clear_site_debug_log,
+            read_site_config_file,
+            write_site_config_file,
+            restart_site,
             login_site,
             site_wp_users,
             list_snapshots,

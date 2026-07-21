@@ -1,7 +1,7 @@
 //! End-to-end smoke test driver for the real LocalKit site lifecycle.
 //! Runs outside the Tauri runtime (no AppHandle; events are skipped).
 //!
-//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|delete|cleanup>
+//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|delete|cleanup>
 //!
 //! Uses a fixed smoke data dir + site name so subcommands can run as separate
 //! invocations (each one reconstructs the same AppState).
@@ -561,6 +561,48 @@ async fn tools_smoke(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Config-editor verification (plan 24), split from `tools` so it runs fast
+/// (a couple of `compose cp` calls, not a chain of wpcli spin-ups):
+///   - wp-config.php reads out of the running container and a write round-trips
+///     without breaking the site;
+///   - the `.env` reads/writes as a plain host file.
+async fn config_smoke(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    if s.status != "running" {
+        site::start(state, &s.id).await?;
+    }
+    let dir = s.dir();
+    let svc = s.app_service();
+
+    let wpconfig = wordpress::read_wp_config(&dir, svc).await?;
+    assert!(wpconfig.contains("<?php"), "wp-config.php read did not return PHP");
+    assert!(wpconfig.contains("DB_NAME"), "wp-config.php missing expected define");
+    println!("read wp-config.php ({} bytes)", wpconfig.len());
+
+    // Write a harmless comment back, confirm it persists, confirm the site still
+    // serves (valid PHP preserved), then restore the original.
+    let marker = "// localkit smoke marker";
+    let edited = format!("{}\n{marker}\n", wpconfig.trim_end());
+    wordpress::write_wp_config(&dir, svc, &edited).await?;
+    let reread = wordpress::read_wp_config(&dir, svc).await?;
+    assert!(reread.contains(marker), "wp-config.php edit did not persist");
+    let home = http_code(&format!("http://localhost:{}/", s.port));
+    assert!(["200", "301", "302"].contains(&home.as_str()), "site broke after wp-config write: {home}");
+    wordpress::write_wp_config(&dir, svc, &wpconfig).await?;
+    let restored = wordpress::read_wp_config(&dir, svc).await?;
+    assert!(!restored.contains(marker), "wp-config.php was not restored");
+    println!("wp-config.php write round-trip OK");
+
+    // .env is a plain host file.
+    let env = site::read_env_file(&dir)?;
+    assert!(env.contains("WP_PORT"), ".env missing WP_PORT");
+    site::write_env_file(&dir, &env)?; // no-op rewrite, must not error
+    println!("read/write .env OK");
+
+    println!("CONFIG OK (wp-config.php cp round-trip + .env)");
+    Ok(())
+}
+
 async fn delete(state: &AppState) -> Result<(), String> {
     let s = find_site(state)?;
     let dir = s.dir();
@@ -624,6 +666,7 @@ async fn main() {
         "clone" => clone(&state).await,
         "blueprint" => blueprint_smoke(&state).await,
         "tools" => tools_smoke(&state).await,
+        "config" => config_smoke(&state).await,
         "delete" => delete(&state).await,
         "cleanup" => cleanup(&state).await,
         other => Err(format!("unknown command: {other}")),

@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
+use uuid::Uuid;
 
 use crate::docker;
 use crate::site::{self, Site};
@@ -543,6 +544,42 @@ pub fn clear_debug_log(dir: &Path) -> Result<(), String> {
         std::fs::write(&path, b"").map_err(|e| format!("failed to clear the debug log: {e}"))?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Config editor (plan 24) — wp-config.php lives in the wp-data volume, not on
+// the host, so it is copied in/out of the running wordpress container with
+// `docker compose cp` (which runs through the daemon as root, so it can
+// overwrite the root-owned file). Requires the container to exist — the command
+// layer gates this on the site running.
+// ---------------------------------------------------------------------------
+
+/// Path of `wp-config.php` inside the wordpress containers.
+const WP_CONFIG_PATH: &str = "/var/www/html/wp-config.php";
+
+/// A short-lived host path for staging a `wp-config.php` copy.
+fn wp_config_tmp() -> PathBuf {
+    std::env::temp_dir().join(format!("localkit-wpconfig-{}.php", Uuid::new_v4().simple()))
+}
+
+/// Read `wp-config.php` by copying it out of the wordpress container.
+pub async fn read_wp_config(dir: &Path, service: &str) -> Result<String, String> {
+    let tmp = wp_config_tmp();
+    docker::compose_cp(dir, service, WP_CONFIG_PATH, &tmp).await?;
+    let content = std::fs::read_to_string(&tmp).map_err(|e| format!("failed to read wp-config.php: {e}"));
+    let _ = std::fs::remove_file(&tmp);
+    content
+}
+
+/// Overwrite `wp-config.php` by copying a staged host file into the container.
+/// `docker compose cp` runs as the daemon (root), so it can replace the
+/// root-owned file — no fragile stdin piping.
+pub async fn write_wp_config(dir: &Path, service: &str, contents: &str) -> Result<(), String> {
+    let tmp = wp_config_tmp();
+    std::fs::write(&tmp, contents).map_err(|e| format!("failed to stage wp-config.php: {e}"))?;
+    let result = docker::compose_cp_into(dir, &tmp, service, WP_CONFIG_PATH).await;
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 /// Point home/siteurl at the site's local URL.

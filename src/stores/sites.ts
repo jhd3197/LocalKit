@@ -18,6 +18,7 @@ interface SitesState {
   cloneSite: (id: string, newName: string) => Promise<Site>;
   start: (id: string) => Promise<void>;
   stop: (id: string) => Promise<void>;
+  restart: (id: string) => Promise<void>;
   resume: (id: string) => Promise<void>;
   remove: (id: string, deleteSnapshots?: boolean) => Promise<void>;
   fetchLogs: (id: string) => Promise<void>;
@@ -148,6 +149,19 @@ export const useSites = create<SitesState>((set, get) => ({
       toast.success("Site stopped", siteName(get().sites, id));
     } catch (e) {
       toastError(e, "Stop site");
+    } finally {
+      set({ busyId: null });
+    }
+  },
+
+  restart: async (id) => {
+    set({ busyId: id });
+    try {
+      await ipc.restartSite(id);
+      await get().refresh();
+      toast.success("Site restarted", siteName(get().sites, id));
+    } catch (e) {
+      toastError(e, "Restart site");
     } finally {
       set({ busyId: null });
     }

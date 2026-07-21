@@ -289,6 +289,17 @@ pub async fn compose_cp(dir: &Path, service: &str, src: &str, dest: &Path) -> Re
     compose(dir, &["cp", &from, &dest_arg]).await.map(|_| ())
 }
 
+/// Copy a host file INTO a service container:
+/// `docker compose cp <src> <service>:<dest>`. The copy runs through the Docker
+/// daemon (root), so it can overwrite a root-owned file inside a volume that the
+/// cli user cannot — which is why the config editor writes `wp-config.php` this
+/// way rather than piping into the container (plan 24).
+pub async fn compose_cp_into(dir: &Path, src: &Path, service: &str, dest: &str) -> Result<(), String> {
+    let src_arg = src.to_string_lossy().to_string();
+    let to = format!("{service}:{dest}");
+    compose(dir, &["cp", &src_arg, &to]).await.map(|_| ())
+}
+
 pub async fn compose_ps(dir: &Path) -> Result<Vec<ContainerInfo>, String> {
     let stdout = compose(dir, &["ps", "--format", "json"]).await?;
     parse_ps(&stdout)

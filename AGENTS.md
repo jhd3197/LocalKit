@@ -110,7 +110,7 @@ src-tauri/               Rust backend (also a cargo workspace root)
   one-click recovery, port-bearing site URLs, SiteDetail banner). The mock
   fakes a LocalWP holding 80/443; `window.__LOCALKIT_MOCK__` (mock builds
   only) lets the script reach states the UI can't drive on its own.
-- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|delete|cleanup>`
+- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
   uses a scratch data dir under the OS temp dir. `reconcile` (plan 23) stops the
   containers behind LocalKit's back and asserts the reconciler settles
@@ -125,6 +125,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   baked-in home/siteurl without writing, Apply (with a `pre_search_replace`
   snapshot) rewrites them and the URL is restored afterward, and the WP_DEBUG
   toggle round-trips through wp-config.php (via the root-capable wpcli runner).
+  `config` (plan 24, split out so it stays fast) reads wp-config.php out of the
+  running container via `compose cp`, round-trips a write without breaking the
+  site, and reads/writes the `.env`.
 - `cd src-tauri && cargo run --example docker_smoke [-- run|clean]` — plan-22
   E2E for the generic Docker app kind against real Docker (scratch data dir):
   writes a trivial nginx+mariadb compose fixture, inspects it, imports it as a
@@ -173,7 +176,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
   Tools tab against the mock server (a WordPress site's Tools tab switching from
   the overview; Search & Replace previewing per-column change counts then
   applying with the snapshot shortcut; the Debug toggle seeding the log viewer
-  and Clear emptying it; a code-only docker site having no Tools tab).
+  and Clear emptying it; the Config editor loading wp-config.php and switching to
+  the .env; a code-only docker site having no Tools tab).
 - `node scripts/verify-multistack.mjs` — headless runtime check of the plan-22
   capability gating against the mock server (the WP/Docker kind badges, a docker
   site's SiteDetail hiding WP Admin / credentials / database / wp-cli / clone /

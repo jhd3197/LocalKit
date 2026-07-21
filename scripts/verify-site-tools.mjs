@@ -202,6 +202,20 @@ async function main() {
     await sleep(400);
     ok("clear empties the log viewer", /No debug output yet/i.test(await bodyText()));
 
+    // 4) Config editor: wp-config.php loads; switching to .env loads it.
+    text = await bodyText();
+    ok("Tools tab shows the Config editor", /Config/i.test(text) && /Editing this can break the site/i.test(text));
+    const textareaValue = () =>
+      page.evaluate(() => {
+        const ta = document.querySelector("textarea");
+        return ta ? ta.value : null;
+      });
+    ok("config editor loads wp-config.php", /<\?php/.test((await textareaValue()) ?? ""));
+    // Switch to .env (a mono button labelled ".env").
+    await clickExact("button", ".env");
+    await sleep(400);
+    ok("config editor loads the .env", /WP_PORT=/.test((await textareaValue()) ?? ""));
+
     await clickByText("button", "Back to sites");
     await sleep(600);
 

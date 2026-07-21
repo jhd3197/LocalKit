@@ -494,6 +494,18 @@ pub fn render_env(site: &Site, db_password: &str) -> String {
     )
 }
 
+/// Read the raw `.env` for the config editor (plan 24). A plain host file —
+/// unlike `wp-config.php`, which lives in the wp-data volume.
+pub fn read_env_file(dir: &Path) -> Result<String, String> {
+    std::fs::read_to_string(dir.join(".env")).map_err(|e| format!("failed to read .env: {e}"))
+}
+
+/// Overwrite the `.env` (plan 24). Compose only picks changes up on the next
+/// `up` (recreate), which is why the editor offers a restart afterward.
+pub fn write_env_file(dir: &Path, contents: &str) -> Result<(), String> {
+    std::fs::write(dir.join(".env"), contents).map_err(|e| format!("failed to write .env: {e}"))
+}
+
 fn read_env_value(dir: &Path, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(dir.join(".env")).ok()?;
     for line in content.lines() {
@@ -899,6 +911,23 @@ pub async fn stop(state: &AppState, id: &str) -> Result<Site, String> {
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.set_status(id, "stopped")?;
+    }
+    router::refresh_routes(state).await;
+    get(state, id)
+}
+
+/// Restart a site so an edited `.env` takes effect (plan 24 config editor).
+///
+/// `docker compose up -d` recreates any service whose resolved config changed —
+/// including `.env` values — which a plain `compose restart` would NOT pick up.
+/// Leaves the site running regardless of its prior state.
+pub async fn restart(state: &AppState, id: &str) -> Result<Site, String> {
+    let _guard = state.in_flight.guard(id);
+    let site = get(state, id)?;
+    docker::compose_up(&site.dir()).await?;
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_status(id, "running")?;
     }
     router::refresh_routes(state).await;
     get(state, id)

@@ -64,6 +64,14 @@ export const ipc = {
   readSiteDebugLog: (id: string) => invoke<string>("read_site_debug_log", { id }),
   /** Truncate the debug log (plan 24). */
   clearSiteDebugLog: (id: string) => invoke<void>("clear_site_debug_log", { id }),
+  /** Read a config file for the editor (plan 24); file = "wp-config" | "env". */
+  readSiteConfigFile: (id: string, file: string) =>
+    invoke<string>("read_site_config_file", { id, file }),
+  /** Overwrite a config file (plan 24). */
+  writeSiteConfigFile: (id: string, file: string, contents: string) =>
+    invoke<void>("write_site_config_file", { id, file, contents }),
+  /** Restart (recreate) a site so an edited .env takes effect (plan 24). */
+  restartSite: (id: string) => invoke<Site>("restart_site", { id }),
   loginSite: (id: string, userId?: number) => invoke<string>("login_site", { id, userId }),
   siteWpUsers: (id: string) => invoke<WpUser[]>("site_wp_users", { id }),
   listSnapshots: (siteId: string) => invoke<Snapshot[]>("list_snapshots", { siteId }),

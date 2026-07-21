@@ -1,6 +1,7 @@
 import type { SiteDetail } from "../lib/types";
 import SearchReplacePanel from "./SearchReplacePanel";
 import DebugPanel from "./DebugPanel";
+import ConfigEditorPanel from "./ConfigEditorPanel";
 
 /**
  * The Tools tab on SiteDetail (plan 24): the inner-loop things a WordPress dev
@@ -24,6 +25,7 @@ export default function SiteTools({
         <SearchReplacePanel siteId={detail.id} running={running} onShowSnapshots={onShowSnapshots} />
       )}
       {caps.wp_tools && <DebugPanel siteId={detail.id} />}
+      {caps.wp_tools && <ConfigEditorPanel siteId={detail.id} />}
     </div>
   );
 }

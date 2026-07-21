@@ -59,6 +59,35 @@ function debugState(id: string): { enabled: boolean; log: string } {
   }
   return s;
 }
+
+/** Per-site config-file contents for the Tools → Config mock. */
+const mockConfigFiles = new Map<string, Record<"wp-config" | "env", string>>();
+function configFiles(id: string): Record<"wp-config" | "env", string> {
+  let f = mockConfigFiles.get(id);
+  if (!f) {
+    const site = data.sites.find((s) => s.id === id);
+    const port = site?.port ?? 8080;
+    f = {
+      "wp-config":
+        [
+          "<?php",
+          "define( 'DB_NAME', 'wordpress' );",
+          "define( 'DB_USER', 'wordpress' );",
+          "define( 'DB_PASSWORD', getenv('WORDPRESS_DB_PASSWORD') );",
+          "define( 'DB_HOST', 'db:3306' );",
+          "define( 'WP_DEBUG', false );",
+          "$table_prefix = 'wp_';",
+          "if ( ! defined( 'ABSPATH' ) ) { define( 'ABSPATH', __DIR__ . '/' ); }",
+          "require_once ABSPATH . 'wp-settings.php';",
+        ].join("\n") + "\n",
+      env: `WP_PORT=${port}\nDB_PORT=${port + 10000}\nDB_NAME=wordpress\nDB_USER=wordpress\nDB_PASSWORD=${
+        site?.db_password ?? "changeme"
+      }\n`,
+    };
+    mockConfigFiles.set(id, f);
+  }
+  return f;
+}
 /** Site ids whose in-flight mock transfer has been asked to stop (plan 19). */
 const mockCancels = new Set<string>();
 const prompt = (slug: string) =>
@@ -597,6 +626,27 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "clear_site_debug_log": {
       debugState(String(a.id)).log = "";
       return null;
+    }
+
+    // Plan 24: config editor for wp-config.php + .env.
+    case "read_site_config_file": {
+      const which = String(a.file);
+      if (which !== "wp-config" && which !== "env") throw `unknown config file: ${which}`;
+      return configFiles(String(a.id))[which];
+    }
+
+    case "write_site_config_file": {
+      const which = String(a.file);
+      if (which !== "wp-config" && which !== "env") throw `unknown config file: ${which}`;
+      configFiles(String(a.id))[which] = String(a.contents);
+      return null;
+    }
+
+    case "restart_site": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      site.status = site.live_status = "running";
+      return site;
     }
 
     case "save_serverkit_connection": {
