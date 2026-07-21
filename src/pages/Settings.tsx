@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../lib/ipc";
-import type { AppInfo, DockerStatus } from "../lib/types";
+import { checkForUpdate, getLastUpdateResult } from "../lib/update";
+import type { AppInfo, DockerStatus, UpdateInfo } from "../lib/types";
 import { useDocker } from "../stores/docker";
 import { useNav } from "../stores/nav";
 import { useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
@@ -98,6 +100,9 @@ function GeneralSection() {
   const [checking, setChecking] = useState(false);
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [runInBackground, setRunInBackground] = useState(true);
+  const [update, setUpdate] = useState<UpdateInfo | null>(getLastUpdateResult());
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateError, setUpdateError] = useState(false);
 
   const checkDocker = useCallback(async (force = false) => {
     setChecking(true);
@@ -111,6 +116,18 @@ function GeneralSection() {
     }
   }, []);
 
+  const checkUpdate = useCallback(async () => {
+    setCheckingUpdate(true);
+    setUpdateError(false);
+    try {
+      setUpdate(await checkForUpdate());
+    } catch {
+      setUpdateError(true);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }, []);
+
   useEffect(() => {
     void checkDocker();
     ipc.appInfo().then(setInfo).catch(() => {});
@@ -118,7 +135,9 @@ function GeneralSection() {
       .getAppSetting("run_in_background")
       .then((v) => setRunInBackground(v !== "false"))
       .catch(() => {});
-  }, [checkDocker]);
+    // Only reach for GitHub if the launch check hasn't already cached a result.
+    if (!getLastUpdateResult()) void checkUpdate();
+  }, [checkDocker, checkUpdate]);
 
   const toggleRunInBackground = () => {
     const next = !runInBackground;
@@ -150,6 +169,48 @@ function GeneralSection() {
             </span>
           ) : (
             <span className="text-red-300">{docker.error ?? "Docker is unavailable"}</span>
+          )}
+        </div>
+      </section>
+
+      {/* Updates (plan 25) — a checker, not an auto-updater; links out. */}
+      <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Updates</h2>
+          <button
+            onClick={() => void checkUpdate()}
+            disabled={checkingUpdate}
+            className="text-xs text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+          >
+            {checkingUpdate ? "Checking…" : "Check now"}
+          </button>
+        </div>
+        <div className="mt-2.5 flex items-center gap-2 text-sm">
+          {update?.update_available ? (
+            <>
+              <span className="h-2.5 w-2.5 rounded-full bg-violet-400" />
+              <span className="text-zinc-300">
+                Version {update.latest} is available — you have {update.current}.
+              </span>
+              <button
+                onClick={() => void openUrl(update.url).catch(() => {})}
+                className="ml-auto rounded-md border border-violet-700 px-2.5 py-1 text-xs text-violet-300 hover:border-violet-600 hover:text-violet-200"
+              >
+                View release
+              </button>
+            </>
+          ) : updateError ? (
+            <>
+              <span className="h-2.5 w-2.5 rounded-full bg-zinc-600" />
+              <span className="text-zinc-500">Couldn’t check for updates right now.</span>
+            </>
+          ) : update ? (
+            <>
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+              <span className="text-zinc-300">You’re up to date (v{update.current}).</span>
+            </>
+          ) : (
+            <span className="text-zinc-500">{checkingUpdate ? "Checking for updates…" : "—"}</span>
           )}
         </div>
       </section>

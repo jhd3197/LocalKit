@@ -148,6 +148,16 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "check_docker":
       return { available: true, version: "27.5.1", error: null };
 
+    case "check_for_update":
+      // Pretend a newer release exists so the Settings row + launch toast are
+      // exercisable in mock mode.
+      return {
+        current: "0.1.0",
+        latest: "0.2.0",
+        url: "https://github.com/jhd3197/LocalKit/releases/latest",
+        update_available: true,
+      };
+
     case "app_info":
       return data.appInfo;
 

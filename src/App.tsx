@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { onSiteEvent, onSitesChanged } from "./lib/ipc";
+import { checkForUpdateOnLaunch } from "./lib/update";
 import { useDocker } from "./stores/docker";
 import { useNav } from "./stores/nav";
 import { useRouter } from "./stores/router";
@@ -28,6 +29,9 @@ export default function App() {
     void useSites.getState().refresh();
     void useRouter.getState().refresh();
     void useDocker.getState().refresh();
+    // Update awareness (plan 25): a throttled, best-effort GitHub check that
+    // may raise a one-time "update available" toast. Never blocks startup.
+    void checkForUpdateOnLaunch();
     const unlisten = onSiteEvent(handleEvent);
     // The reconciler settles status in the background; re-fetch when it does
     // so an external stop/start corrects itself without a manual refresh.

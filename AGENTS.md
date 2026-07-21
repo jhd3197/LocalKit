@@ -74,6 +74,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
   src/serverkit.rs       ServerKit API client (X-API-Key) + connection model
   src/keystore.rs        plan-25 OS keyring for API keys (Credential Manager /
                          Keychain / Secret Service); degrades to SQLite
+  src/update.rs          plan-25 update checker: latest GitHub release tag vs
+                         CARGO_PKG_VERSION (pure `is_newer`); never downloads
   src/sync.rs            push/pull orchestration + SyncRecord (sync_history) +
                          plan 18 import (clone a remote site to a new local one)
   src/transfer.rs        plan 19 chunked transfers: chunk planning + resume
@@ -297,6 +299,16 @@ src-tauri/               Rust backend (also a cargo workspace root)
   (and not in flight) reports `incomplete` on `SiteWithStatus`/`SiteDetail`; the
   dashboard shows "Setup incomplete" + Resume / Clean up, `site::resume` re-runs
   the create tail, `lk resume` / `lk list` mirror it.
+- **Update awareness (plan 25):** unsigned releases rule out
+  `tauri-plugin-updater`, so `update.rs` is a *checker*: `check()` GETs
+  `api/.../releases/latest`, and the pure, unit-tested `is_newer` compares its
+  tag to `env!("CARGO_PKG_VERSION")` — never downloads. Surfaced three ways off
+  one command (`check_for_update`): a Settings → General "Updates" row, a
+  once-per-version launch toast with a "View release" opener (throttle
+  `update.lastChecked` + snooze `update.snoozed` in the settings KV, scheduled
+  frontend-side in `lib/update.ts`), and an informational `lk doctor` line. If
+  releases ever get signed, swap the checker for the real updater behind the
+  same Settings row.
 - **wp-cli:** the stock `wordpress` image has no wp-cli; use the profile-gated
   `wpcli` service (`wordpress:cli-php<ver>`) via `docker::compose_run`, and
   always pass `wp` as the first argument (the cli image's `wp` CMD is replaced

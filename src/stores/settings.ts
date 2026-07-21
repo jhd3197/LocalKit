@@ -155,3 +155,30 @@ export function useTerminalScrollback(): [number, (lines: number) => void] {
   const set = useSettings((s) => s.set);
   return [lines, (n) => set("terminalScrollback", String(n))];
 }
+
+// ---------------------------------------------------------------------------
+// Update awareness (plan 25) — throttle + per-version snooze in the KV
+// ---------------------------------------------------------------------------
+
+const UPDATE_LAST_CHECKED = "update.lastChecked";
+const UPDATE_SNOOZED = "update.snoozed";
+/** Check GitHub for a new release at most once a day on launch. */
+export const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/** Epoch ms of the last launch update check (0 = never). */
+export function getUpdateLastChecked(): number {
+  const raw = useSettings.getState().values[UPDATE_LAST_CHECKED];
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+export function markUpdateChecked(nowMs: number): void {
+  useSettings.getState().set(UPDATE_LAST_CHECKED, String(nowMs));
+}
+
+/** The version whose launch toast was already shown (nudge once per version). */
+export function getSnoozedUpdate(): string | undefined {
+  return useSettings.getState().values[UPDATE_SNOOZED] || undefined;
+}
+export function snoozeUpdate(version: string): void {
+  useSettings.getState().set(UPDATE_SNOOZED, version);
+}

@@ -1613,10 +1613,31 @@ async fn cmd_doctor(data_dir_override: Option<PathBuf>) -> Result<(), String> { 
     // code that scripts gate their local setup on.
     doctor_connections(&data_dir).await;
 
+    // Same rule for the update check: an available update (or a GitHub outage)
+    // is informational, never a reason for `doctor` to exit non-zero.
+    doctor_update().await;
+
     if !ok {
         return Err("one or more checks failed".into());
     }
     Ok(())
+}
+
+/// Update section of `doctor` (plan 25): report whether a newer LocalKit
+/// release exists. Never downloads and never flips the exit code — a GitHub
+/// outage is not a local misconfiguration.
+async fn doctor_update() {
+    match localkit_lib::update::check().await {
+        Ok(u) if u.update_available => {
+            check_line(true, &format!("update available: v{} (you have v{})", u.latest, u.current));
+            eprintln!("  {} download it from {}", info("→"), u.url);
+        }
+        Ok(u) => check_line(true, &format!("up to date (v{})", u.current)),
+        Err(e) => {
+            check_line(true, "update check skipped");
+            eprintln!("  {e}");
+        }
+    }
 }
 
 /// ServerKit section of `doctor` (plan 21): for each stored connection, run the

@@ -12,6 +12,7 @@ pub mod sync;
 pub mod terminal;
 pub mod transfer;
 pub mod tray;
+pub mod update;
 pub mod wordpress;
 
 use std::path::PathBuf;
@@ -58,6 +59,14 @@ struct AppInfo {
 async fn check_docker(force: Option<bool>) -> docker::DockerStatus {
     // Cached for 30 s (plan 23); the sidebar polls this. `force` re-checks now.
     docker::check_cached(force.unwrap_or(false)).await
+}
+
+/// Check GitHub for a newer release (plan 25). Never downloads — the frontend
+/// links to the release page. Throttle/snooze live in the settings KV, so this
+/// command is a pure "check now".
+#[tauri::command]
+async fn check_for_update() -> Result<update::UpdateInfo, String> {
+    update::check().await
 }
 
 #[tauri::command]
@@ -870,6 +879,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             check_docker,
+            check_for_update,
             app_info,
             list_sites,
             get_site,

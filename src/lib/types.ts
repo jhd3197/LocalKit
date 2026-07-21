@@ -80,6 +80,15 @@ export interface DockerStatus {
   error: string | null;
 }
 
+/** Result of an update check (plan 25). Mirrors `update::UpdateInfo`. */
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  /** The GitHub release page for `latest`, to open in a browser. */
+  url: string;
+  update_available: boolean;
+}
+
 export interface PluginInfo {
   name: string;
   status: string;

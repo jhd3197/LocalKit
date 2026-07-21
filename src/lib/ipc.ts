@@ -20,6 +20,7 @@ import type {
   SyncRecord,
   TerminalDataEvent,
   TerminalExitEvent,
+  UpdateInfo,
   WpInfo,
   WpUser,
 } from "./types";
@@ -27,6 +28,8 @@ import type {
 /** Typed wrappers around the Tauri commands exposed by the Rust backend. */
 export const ipc = {
   checkDocker: (force = false) => invoke<DockerStatus>("check_docker", { force }),
+  /** Check GitHub for a newer LocalKit release (plan 25); never downloads. */
+  checkForUpdate: () => invoke<UpdateInfo>("check_for_update"),
   appInfo: () => invoke<AppInfo>("app_info"),
   listSites: () => invoke<SiteWithStatus[]>("list_sites"),
   getSite: (id: string) => invoke<SiteDetail>("get_site", { id }),
