@@ -162,6 +162,56 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return site;
     }
 
+    case "clone_site": {
+      const source = data.sites.find((s) => s.id === a.id);
+      if (!source) throw `site not found: ${a.id}`;
+      const name = String(a.newName ?? "").trim();
+      if (!name) throw "Site name is required";
+      const slug = slugify(name);
+      const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
+      const id = `site-${slug}`;
+      // Same stages the Rust clone emits; the `snapshot` one carries the
+      // *source* id (that's the site being read), the rest the new clone.
+      const stages: Array<[string, string, string]> = [
+        [a.id as string, "snapshot", "Exporting database…"],
+        [a.id as string, "snapshot", "Archiving wp-content…"],
+        [id, "files", "Writing project files…"],
+        [id, "containers", "Starting Docker containers…"],
+        [id, "waiting", "Waiting for WordPress to come online…"],
+        [id, "import", `Copying ${source.name}'s content…`],
+        [id, "import", "Rewriting URLs to the clone…"],
+        [id, "done", `${name} cloned from ${source.name} — now running at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [eid, stage, message] of stages) {
+          emit("site-event", { id: eid, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        const s = data.sites.find((x) => x.id === id);
+        if (s) s.status = s.live_status = "running";
+      })();
+
+      const clone: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: source.wp_version,
+        php_version: source.php_version,
+        status: "creating",
+        // The cloned database carries the source's login, so its admin
+        // credentials work on the copy; ports and DB secrets are fresh.
+        admin_user: source.admin_user,
+        admin_pass: source.admin_pass,
+        created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+      };
+      data.sites.push({ ...clone, live_status: "creating", db_password: "m4ri4-cl0ne-0001" });
+      return clone;
+    }
+
     case "start_site": {
       const site = data.sites.find((s) => s.id === a.id);
       if (!site) throw `site not found: ${a.id}`;

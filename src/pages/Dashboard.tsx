@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { siteUrl } from "../lib/domains";
 import { useNav } from "../stores/nav";
@@ -8,6 +8,7 @@ import { useServerKit } from "../stores/serverkit";
 import { useSites } from "../stores/sites";
 import type { SiteWithStatus } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
+import CloneSiteDialog from "../components/CloneSiteDialog";
 import { GridIcon, LinkIcon, ListIcon, PlusIcon } from "../components/icons";
 
 export default function Dashboard() {
@@ -16,6 +17,8 @@ export default function Dashboard() {
   const [siteView, setSiteView] = useSiteView();
   const setNewSiteOpen = useNav((s) => s.setNewSiteOpen);
   const refreshConnections = useServerKit((s) => s.refresh);
+  // Which site the "name your copy" dialog is open for (plan 20).
+  const [cloneTarget, setCloneTarget] = useState<SiteWithStatus | null>(null);
 
   // Imported sites name their origin connection, so the labels have to be
   // loaded even if the user never opens Settings → ServerKit.
@@ -71,9 +74,16 @@ export default function Dashboard() {
           </button>
         </div>
       ) : siteView === "grid" ? (
-        <GridView sites={sites} />
+        <GridView sites={sites} onClone={setCloneTarget} />
       ) : (
-        <ListView sites={sites} />
+        <ListView sites={sites} onClone={setCloneTarget} />
+      )}
+
+      {cloneTarget && (
+        <CloneSiteDialog
+          source={{ id: cloneTarget.id, name: cloneTarget.name }}
+          onClose={() => setCloneTarget(null)}
+        />
       )}
     </div>
   );
@@ -130,17 +140,29 @@ function ImportedBadge({ site }: { site: SiteWithStatus }) {
 const dangerBtn =
   "rounded-md border border-red-900 px-2.5 py-1 text-xs font-medium text-red-400 hover:border-red-700 disabled:opacity-50";
 
-function GridView({ sites }: { sites: SiteWithStatus[] }) {
+function GridView({
+  sites,
+  onClone,
+}: {
+  sites: SiteWithStatus[];
+  onClone: (site: SiteWithStatus) => void;
+}) {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">
       {sites.map((site) => (
-        <GridCard key={site.id} site={site} />
+        <GridCard key={site.id} site={site} onClone={onClone} />
       ))}
     </div>
   );
 }
 
-function GridCard({ site }: { site: SiteWithStatus }) {
+function GridCard({
+  site,
+  onClone,
+}: {
+  site: SiteWithStatus;
+  onClone: (site: SiteWithStatus) => void;
+}) {
   const a = useSiteActions(site);
   const running = site.live_status === "running";
   return (
@@ -178,6 +200,13 @@ function GridCard({ site }: { site: SiteWithStatus }) {
         <button onClick={a.details} className={ghostBtn}>
           Details
         </button>
+        <button
+          onClick={() => onClone(site)}
+          disabled={a.busy || site.live_status === "creating"}
+          className={ghostBtn}
+        >
+          Clone
+        </button>
         <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
           Delete
         </button>
@@ -186,7 +215,13 @@ function GridCard({ site }: { site: SiteWithStatus }) {
   );
 }
 
-function ListView({ sites }: { sites: SiteWithStatus[] }) {
+function ListView({
+  sites,
+  onClone,
+}: {
+  sites: SiteWithStatus[];
+  onClone: (site: SiteWithStatus) => void;
+}) {
   return (
     <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/60">
       <table className="w-full text-sm">
@@ -201,7 +236,7 @@ function ListView({ sites }: { sites: SiteWithStatus[] }) {
         </thead>
         <tbody>
           {sites.map((site) => (
-            <ListRow key={site.id} site={site} />
+            <ListRow key={site.id} site={site} onClone={onClone} />
           ))}
         </tbody>
       </table>
@@ -209,7 +244,13 @@ function ListView({ sites }: { sites: SiteWithStatus[] }) {
   );
 }
 
-function ListRow({ site }: { site: SiteWithStatus }) {
+function ListRow({
+  site,
+  onClone,
+}: {
+  site: SiteWithStatus;
+  onClone: (site: SiteWithStatus) => void;
+}) {
   const a = useSiteActions(site);
   const running = site.live_status === "running";
   return (
@@ -248,6 +289,13 @@ function ListRow({ site }: { site: SiteWithStatus }) {
           </button>
           <button onClick={a.details} className={ghostBtn}>
             Details
+          </button>
+          <button
+            onClick={() => onClone(site)}
+            disabled={a.busy || site.live_status === "creating"}
+            className={ghostBtn}
+          >
+            Clone
           </button>
           <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
             Delete

@@ -27,6 +27,8 @@ export const ipc = {
   getSite: (id: string) => invoke<SiteDetail>("get_site", { id }),
   createSite: (name: string, wpVersion: string, phpVersion: string) =>
     invoke<Site>("create_site", { name, wpVersion, phpVersion }),
+  cloneSite: (id: string, newName: string) =>
+    invoke<Site>("clone_site", { id, newName }),
   startSite: (id: string) => invoke<Site>("start_site", { id }),
   stopSite: (id: string) => invoke<Site>("stop_site", { id }),
   deleteSite: (id: string, deleteSnapshots = false) =>

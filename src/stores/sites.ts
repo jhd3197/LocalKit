@@ -15,6 +15,7 @@ interface SitesState {
   wpInfo: Record<string, WpInfo | null>;
   refresh: () => Promise<void>;
   createSite: (name: string, wpVersion: string, phpVersion: string) => Promise<Site>;
+  cloneSite: (id: string, newName: string) => Promise<Site>;
   start: (id: string) => Promise<void>;
   stop: (id: string) => Promise<void>;
   remove: (id: string, deleteSnapshots?: boolean) => Promise<void>;
@@ -108,6 +109,20 @@ export const useSites = create<SitesState>((set, get) => ({
       throw e;
     } finally {
       set({ creating: false });
+    }
+  },
+
+  cloneSite: async (id, newName) => {
+    // The clone streams the same site-event stages as create, so the pinned
+    // progress toast covers feedback; the dialog owns its own submitting flag.
+    set({ progress: null });
+    try {
+      const site = await ipc.cloneSite(id, newName);
+      await get().refresh();
+      return site;
+    } catch (e) {
+      toastError(e, "Clone site");
+      throw e;
     }
   },
 
