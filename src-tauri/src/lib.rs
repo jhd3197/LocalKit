@@ -200,6 +200,75 @@ async fn wp_cli_info(state: State<'_, AppState>, id: String) -> Result<wordpress
 }
 
 // ---------------------------------------------------------------------------
+// Site tools (plan 24) — search-replace, debug mode + log, config editor
+// ---------------------------------------------------------------------------
+
+/// Serialization-safe search-replace across all tables (plan 24).
+///
+/// `dry_run` counts without writing — the UI runs it first so the cost is
+/// visible before committing. An applied run (`dry_run = false`) takes a
+/// `pre_search_replace` snapshot first, so it is reversible from the Snapshots
+/// panel; the snapshot emits its own `snapshot` progress and this resolves the
+/// pinned toast with a `done`/`error` of its own.
+#[tauri::command]
+async fn site_search_replace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    from: String,
+    to: String,
+    dry_run: bool,
+) -> Result<wordpress::SearchReplaceResult, String> {
+    let s = site::get(&state, &id)?;
+    s.require(s.capabilities.search_replace, "Search & replace")?;
+    if from.is_empty() {
+        return Err("The search value is required.".into());
+    }
+
+    if dry_run {
+        // No snapshot, no events — a dry run mutates nothing.
+        return wordpress::search_replace_report(&s.dir(), &from, &to, true).await;
+    }
+
+    if let Err(e) = snapshot::create(
+        Some(&app),
+        &state,
+        &id,
+        snapshot::KIND_PRE_SEARCH_REPLACE,
+        Some(format!("before replacing \"{from}\" → \"{to}\"")),
+    )
+    .await
+    {
+        let msg = format!("Snapshot before search-replace failed, nothing was changed: {e}");
+        site::emit(Some(&app), &id, "error", &msg);
+        return Err(msg);
+    }
+
+    site::emit(Some(&app), &id, "search-replace", "Replacing across all tables...");
+    match wordpress::search_replace_report(&s.dir(), &from, &to, false).await {
+        Ok(result) => {
+            site::emit(
+                Some(&app),
+                &id,
+                "done",
+                &format!(
+                    "Replaced {} occurrence{} across {} column{}",
+                    result.total,
+                    if result.total == 1 { "" } else { "s" },
+                    result.changes.len(),
+                    if result.changes.len() == 1 { "" } else { "s" },
+                ),
+            );
+            Ok(result)
+        }
+        Err(e) => {
+            site::emit(Some(&app), &id, "error", &format!("Search-replace failed: {e}"));
+            Err(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // One-click WP Admin login (one-time token + MU plugin)
 // ---------------------------------------------------------------------------
 
@@ -666,6 +735,7 @@ pub fn run() {
             delete_site,
             site_logs,
             wp_cli_info,
+            site_search_replace,
             login_site,
             site_wp_users,
             list_snapshots,

@@ -110,7 +110,7 @@ src-tauri/               Rust backend (also a cargo workspace root)
   one-click recovery, port-bearing site URLs, SiteDetail banner). The mock
   fakes a LocalWP holding 80/443; `window.__LOCALKIT_MOCK__` (mock builds
   only) lets the script reach states the UI can't drive on its own.
-- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|delete|cleanup>`
+- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
   uses a scratch data dir under the OS temp dir. `reconcile` (plan 23) stops the
   containers behind LocalKit's back and asserts the reconciler settles
@@ -120,7 +120,10 @@ src-tauri/               Rust backend (also a cargo workspace root)
   then resumes it back to running/complete. `clone` and `blueprint` (plan 20)
   create a marker post on the smoke site, then assert a one-click clone / a
   save-then-create-from-blueprint carries the content across with fresh
-  ports/secrets; both clean up after themselves.
+  ports/secrets; both clean up after themselves. `tools` (plan 24) exercises the
+  site-tools backend against the smoke site: a search-replace dry-run finds the
+  baked-in home/siteurl without writing, Apply (with a `pre_search_replace`
+  snapshot) rewrites them, and the URL is restored afterward.
 - `cd src-tauri && cargo run --example docker_smoke [-- run|clean]` — plan-22
   E2E for the generic Docker app kind against real Docker (scratch data dir):
   writes a trivial nginx+mariadb compose fixture, inspects it, imports it as a
@@ -165,6 +168,11 @@ src-tauri/               Rust backend (also a cargo workspace root)
   clone + blueprint flows against the mock server (the New Site "From blueprint"
   section with plugin/theme chips, selecting one to create-from, a one-click
   Clone under a new name, and Save-as-blueprint round-tripping into the dialog).
+- `node scripts/verify-site-tools.mjs` — headless runtime check of the plan-24
+  Tools tab against the mock server (a WordPress site's Tools tab switching from
+  the overview; Search & Replace previewing per-column change counts then
+  applying with the snapshot shortcut; a code-only docker site having no Tools
+  tab).
 - `node scripts/verify-multistack.mjs` — headless runtime check of the plan-22
   capability gating against the mock server (the WP/Docker kind badges, a docker
   site's SiteDetail hiding WP Admin / credentials / database / wp-cli / clone /

@@ -7,6 +7,7 @@ import type {
   DockerStatus,
   RemoteWpSite,
   RouterStatus,
+  SearchReplaceResult,
   ServerKitConnection,
   ServerKitInfo,
   Site,
@@ -50,6 +51,9 @@ export const ipc = {
     invoke<void>("delete_site", { id, deleteSnapshots }),
   siteLogs: (id: string, tail = 200) => invoke<string>("site_logs", { id, tail }),
   wpCliInfo: (id: string) => invoke<WpInfo>("wp_cli_info", { id }),
+  /** Serialization-safe search-replace (plan 24); dryRun counts without writing. */
+  siteSearchReplace: (id: string, from: string, to: string, dryRun: boolean) =>
+    invoke<SearchReplaceResult>("site_search_replace", { id, from, to, dryRun }),
   loginSite: (id: string, userId?: number) => invoke<string>("login_site", { id, userId }),
   siteWpUsers: (id: string) => invoke<WpUser[]>("site_wp_users", { id }),
   listSnapshots: (siteId: string) => invoke<Snapshot[]>("list_snapshots", { siteId }),

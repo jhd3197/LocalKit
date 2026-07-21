@@ -14,6 +14,7 @@ import SnapshotsPanel from "../components/SnapshotsPanel";
 import DeleteSiteDialog from "../components/DeleteSiteDialog";
 import CloneSiteDialog from "../components/CloneSiteDialog";
 import SaveBlueprintDialog from "../components/SaveBlueprintDialog";
+import SiteTools from "../components/SiteTools";
 import { describeConflicts } from "../components/DomainsSettings";
 
 export default function SiteDetail({ id }: { id: string }) {
@@ -38,6 +39,7 @@ export default function SiteDetail({ id }: { id: string }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [blueprintOpen, setBlueprintOpen] = useState(false);
+  const [tab, setTab] = useState<"overview" | "tools">("overview");
   const logRef = useRef<HTMLPreElement>(null);
 
   const loadDetail = useCallback(() => {
@@ -101,6 +103,9 @@ export default function SiteDetail({ id }: { id: string }) {
   // Stop control treats a degraded site as stoppable.
   const up = running || detail.live_status === "degraded";
   const caps = detail.capabilities;
+  // Tools tab (plan 24): only shown when the site's kind supports at least one
+  // of the tools — a code-only docker app has none, so it stays a flat page.
+  const hasTools = caps.db_gui || caps.search_replace || caps.wp_tools;
 
   // WP Admin one-click login: default to the install admin, picker overrides.
   const defaultUserId =
@@ -214,6 +219,29 @@ export default function SiteDetail({ id }: { id: string }) {
 
       <RouterConflictBanner slug={detail.slug} port={sitePort(detail)} />
 
+      {hasTools && (
+        <div className="mt-6 flex gap-1 border-b border-zinc-800">
+          {(["overview", "tools"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium capitalize transition-colors ${
+                tab === t
+                  ? "border-violet-500 text-white"
+                  : "border-transparent text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {hasTools && tab === "tools" && (
+        <SiteTools detail={detail} running={running} onShowSnapshots={() => setTab("overview")} />
+      )}
+
+      <div className={hasTools && tab !== "overview" ? "hidden" : ""}>
       <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* URL */}
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
@@ -394,6 +422,7 @@ export default function SiteDetail({ id }: { id: string }) {
           {logs || "No logs yet."}
         </pre>
       </section>
+      </div>
     </div>
   );
 }

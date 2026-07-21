@@ -523,6 +523,43 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       ];
     }
 
+    // Plan 24: serialization-safe search-replace with a dry-run-first flow. A
+    // fake per-column breakdown so the preview table + Apply are reviewable; an
+    // applied run snapshots first (pre_search_replace) and streams the stages.
+    case "site_search_replace": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      const from = String(a.from ?? "");
+      const to = String(a.to ?? "");
+      if (!from) throw "The search value is required.";
+      const dryRun = Boolean(a.dryRun);
+      const changes = [
+        { table: "wp_options", column: "option_value", count: 3 },
+        { table: "wp_posts", column: "post_content", count: 12 },
+        { table: "wp_postmeta", column: "meta_value", count: 4 },
+      ];
+      const total = changes.reduce((n, c) => n + c.count, 0);
+      if (!dryRun) {
+        pushSnapshot(site.id, "pre_search_replace", `before replacing "${from}" → "${to}"`);
+        void (async () => {
+          for (const message of [
+            "Exporting database…",
+            "Archiving wp-content…",
+            "Replacing across all tables…",
+          ]) {
+            emit("site-event", { id: site.id, stage: "search-replace", message } satisfies SiteEvent);
+            await sleep(500);
+          }
+          emit("site-event", {
+            id: site.id,
+            stage: "done",
+            message: `Replaced ${total} occurrences across ${changes.length} columns`,
+          } satisfies SiteEvent);
+        })();
+      }
+      return { dry_run: dryRun, total, changes };
+    }
+
     case "save_serverkit_connection": {
       const conn = {
         id: `conn-${slugify(String(a.label))}`,

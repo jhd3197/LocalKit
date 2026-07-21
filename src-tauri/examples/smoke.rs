@@ -1,7 +1,7 @@
 //! End-to-end smoke test driver for the real LocalKit site lifecycle.
 //! Runs outside the Tauri runtime (no AppHandle; events are skipped).
 //!
-//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|delete|cleanup>
+//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|delete|cleanup>
 //!
 //! Uses a fixed smoke data dir + site name so subcommands can run as separate
 //! invocations (each one reconstructs the same AppState).
@@ -491,6 +491,61 @@ async fn remove_clone(state: &AppState) {
     }
 }
 
+/// Site-tools verification (plan 24) against real Docker. Exercises the
+/// wp-cli-backed tools on the smoke site and asserts the real wp-cli output
+/// parses the way the pure unit tests assume:
+///   - search-replace dry-run finds the baked-in home/siteurl without writing;
+///   - Apply (with a pre_search_replace snapshot) actually rewrites them;
+///   - the URL is restored so later subcommands keep working.
+async fn tools_smoke(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    if s.status != "running" {
+        site::start(state, &s.id).await?;
+    }
+    let dir = s.dir();
+    let from = format!("http://localhost:{}", s.port);
+    let to = "http://smoke-sr.test".to_string();
+
+    // --- Search & replace: dry run must find home/siteurl and write nothing. ---
+    let dry = wordpress::search_replace_report(&dir, &from, &to, true).await?;
+    println!("DRY total={} changes={}", dry.total, dry.changes.len());
+    assert!(dry.total > 0, "dry-run found nothing to replace (expected home/siteurl)");
+    assert!(!dry.changes.is_empty(), "dry-run parsed no per-column rows from real wp-cli output");
+    let home_before = wp(&s, &["option", "get", "home"]).await?;
+    assert_eq!(home_before.trim(), from, "dry-run must not write: home changed");
+
+    // --- Apply, with the pre_search_replace snapshot the command takes. ---
+    let snap = snapshot::create(
+        None,
+        state,
+        &s.id,
+        snapshot::KIND_PRE_SEARCH_REPLACE,
+        Some("smoke search-replace".into()),
+    )
+    .await?;
+    println!("pre_search_replace snapshot {} taken", snap.id);
+    let applied = wordpress::search_replace_report(&dir, &from, &to, false).await?;
+    println!("APPLIED total={} changes={}", applied.total, applied.changes.len());
+    assert!(applied.total > 0, "apply reported no changes");
+    let home_after = wp(&s, &["option", "get", "home"]).await?;
+    assert_eq!(home_after.trim(), to, "apply did not rewrite home");
+
+    let snaps = snapshot::list(state, &s.id)?;
+    assert!(
+        snaps.iter().any(|x| x.kind == snapshot::KIND_PRE_SEARCH_REPLACE),
+        "pre_search_replace snapshot not listed after apply"
+    );
+    println!("pre_search_replace snapshot listed OK");
+
+    // Restore the original URL so the smoke site stays usable for later runs.
+    wordpress::search_replace_report(&dir, &to, &from, false).await?;
+    let home_restored = wp(&s, &["option", "get", "home"]).await?;
+    assert_eq!(home_restored.trim(), from, "failed to restore the original home URL");
+
+    println!("TOOLS OK (search-replace dry-run + apply + snapshot)");
+    Ok(())
+}
+
 async fn delete(state: &AppState) -> Result<(), String> {
     let s = find_site(state)?;
     let dir = s.dir();
@@ -553,6 +608,7 @@ async fn main() {
         "recover" => recover(&state).await,
         "clone" => clone(&state).await,
         "blueprint" => blueprint_smoke(&state).await,
+        "tools" => tools_smoke(&state).await,
         "delete" => delete(&state).await,
         "cleanup" => cleanup(&state).await,
         other => Err(format!("unknown command: {other}")),

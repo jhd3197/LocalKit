@@ -30,6 +30,10 @@ pub const KIND_PRE_PUSH: &str = "pre_push";
 pub const KIND_PRE_PULL: &str = "pre_pull";
 pub const KIND_PRE_DELETE: &str = "pre_delete";
 pub const KIND_PRE_RESTORE: &str = "pre_restore";
+/// Auto snapshot taken before an applied search-replace (plan 24). Like the
+/// other `pre_*` kinds it is the undo button — the dry-run-first flow means the
+/// user has already seen the cost, and this is what makes Apply reversible.
+pub const KIND_PRE_SEARCH_REPLACE: &str = "pre_search_replace";
 /// Transient snapshot a clone takes of its source (plan 20). It exists only to
 /// seed the new site and is deleted the moment the clone finishes — an
 /// implementation detail, not a snapshot the user asked for.
@@ -45,6 +49,7 @@ pub const KINDS: &[&str] = &[
     KIND_PRE_PULL,
     KIND_PRE_DELETE,
     KIND_PRE_RESTORE,
+    KIND_PRE_SEARCH_REPLACE,
     KIND_CLONE_SOURCE,
     KIND_BLUEPRINT_SOURCE,
 ];

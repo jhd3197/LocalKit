@@ -21,6 +21,7 @@ const KIND_META: Record<SnapshotKind, { label: string; className: string }> = {
   pre_pull: { label: "Before pull", className: "bg-zinc-700/50 text-zinc-300" },
   pre_delete: { label: "Before delete", className: "bg-zinc-700/50 text-zinc-300" },
   pre_restore: { label: "Before restore", className: "bg-zinc-700/50 text-zinc-300" },
+  pre_search_replace: { label: "Before search-replace", className: "bg-zinc-700/50 text-zinc-300" },
 };
 
 export function formatBytes(bytes: number): string {

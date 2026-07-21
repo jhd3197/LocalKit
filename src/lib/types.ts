@@ -99,6 +99,20 @@ export interface WpUser {
   roles: string;
 }
 
+/** One `table.column` line of a search-replace report (plan 24). */
+export interface SearchReplaceChange {
+  table: string;
+  column: string;
+  count: number;
+}
+
+/** Outcome of a search-replace: total replacements + per-column breakdown. */
+export interface SearchReplaceResult {
+  dry_run: boolean;
+  total: number;
+  changes: SearchReplaceChange[];
+}
+
 /** A site kind and the capabilities it advertises (plan 22 `app_info`). */
 export interface KindInfo {
   kind: string;
@@ -198,7 +212,8 @@ export type SnapshotKind =
   | "pre_push"
   | "pre_pull"
   | "pre_delete"
-  | "pre_restore";
+  | "pre_restore"
+  | "pre_search_replace";
 
 /** A point-in-time copy of a site: DB dump + wp-content archive on disk. */
 export interface Snapshot {
