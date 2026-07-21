@@ -500,7 +500,7 @@ fn extract_wp_content<R: Read>(tgz: R, site_dir: &Path) -> Result<usize, String>
 /// not, so the match is on `major.minor`. Returns the chosen version and
 /// whether it was an exact match — an inexact one is surfaced as a warning
 /// rather than an error, because a small version gap almost always still runs.
-fn match_version(available: &[&str], remote: Option<&str>) -> (String, bool) {
+pub(crate) fn match_version(available: &[&str], remote: Option<&str>) -> (String, bool) {
     let newest = available[0].to_string();
     let Some(remote) = remote.map(str::trim).filter(|v| !v.is_empty()) else {
         return (newest, false);

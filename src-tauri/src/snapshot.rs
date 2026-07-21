@@ -34,6 +34,10 @@ pub const KIND_PRE_RESTORE: &str = "pre_restore";
 /// seed the new site and is deleted the moment the clone finishes — an
 /// implementation detail, not a snapshot the user asked for.
 pub const KIND_CLONE_SOURCE: &str = "clone_source";
+/// Transient snapshot `save_blueprint` takes to capture consistent artifacts
+/// (plan 20). Like `clone_source`, its bytes are hardlinked into the blueprint
+/// and the snapshot itself is deleted — not a user snapshot.
+pub const KIND_BLUEPRINT_SOURCE: &str = "blueprint_source";
 
 pub const KINDS: &[&str] = &[
     KIND_MANUAL,
@@ -42,7 +46,15 @@ pub const KINDS: &[&str] = &[
     KIND_PRE_DELETE,
     KIND_PRE_RESTORE,
     KIND_CLONE_SOURCE,
+    KIND_BLUEPRINT_SOURCE,
 ];
+
+/// Transient kinds hidden from the user-facing listing: they back the clone
+/// and blueprint flows and are deleted the instant they have served their
+/// purpose, so surfacing them would only confuse.
+fn is_transient(kind: &str) -> bool {
+    kind == KIND_CLONE_SOURCE || kind == KIND_BLUEPRINT_SOURCE
+}
 
 /// How many auto snapshots to keep per site per kind.
 const RETENTION: usize = 5;
@@ -207,12 +219,13 @@ fn list_all(state: &AppState, site_id: &str) -> Result<Vec<Snapshot>, String> {
     Ok(out)
 }
 
-/// User-facing snapshot listing, newest first. Hides `clone_source` snapshots:
-/// they are an internal detail of the clone flow, not something the user took.
+/// User-facing snapshot listing, newest first. Hides the transient `*_source`
+/// snapshots the clone/blueprint flows use — internal details, not user
+/// snapshots.
 pub fn list(state: &AppState, site_id: &str) -> Result<Vec<Snapshot>, String> {
     Ok(list_all(state, site_id)?
         .into_iter()
-        .filter(|s| s.kind != KIND_CLONE_SOURCE)
+        .filter(|s| !is_transient(&s.kind))
         .collect())
 }
 
@@ -439,19 +452,38 @@ pub async fn restore_into(
     snapshot_id: &str,
     target: &site::Site,
 ) -> Result<(), String> {
-    let src = snapshot_dir(&state.data_dir, source_id, snapshot_id);
-    let db_gz = std::fs::read(src.join(DB_FILE))
-        .map_err(|e| format!("failed to read the source snapshot's database dump: {e}"))?;
-    let sql = gunzip(&db_gz)?;
-    let code_tgz = std::fs::read(src.join(CODE_FILE))
-        .map_err(|e| format!("failed to read the source snapshot's wp-content archive: {e}"))?;
+    let (db_gz, code_tgz) = artifact_paths(&state.data_dir, source_id, snapshot_id);
+    restore_archives_into(&db_gz, &code_tgz, target).await
+}
+
+/// Lay a `(db.sql.gz, wp-content.tar.gz)` pair down onto a target site, by
+/// path. The shared core of `restore_into` (snapshot dir) and the blueprint
+/// create flow (blueprint dir) — same archive format, one implementation. The
+/// target must already be running (the DB import needs the stack up).
+pub async fn restore_archives_into(
+    db_gz: &Path,
+    code_tgz: &Path,
+    target: &site::Site,
+) -> Result<(), String> {
+    let db_bytes = std::fs::read(db_gz)
+        .map_err(|e| format!("failed to read the database dump: {e}"))?;
+    let sql = gunzip(&db_bytes)?;
+    let code = std::fs::read(code_tgz)
+        .map_err(|e| format!("failed to read the wp-content archive: {e}"))?;
 
     let dir = target.dir();
     wordpress::import_db(&dir, &sql).await?;
-    restore_wp_content(&dir, &code_tgz)?;
+    restore_wp_content(&dir, &code)?;
     // Object/transient caches from the fresh install can outlive the import.
     let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
     Ok(())
+}
+
+/// Absolute paths of a snapshot's two archive files (DB dump, wp-content).
+/// The blueprint flow hardlinks these out of the snapshot dir (plan 20).
+pub fn artifact_paths(data_dir: &Path, site_id: &str, snapshot_id: &str) -> (PathBuf, PathBuf) {
+    let dir = snapshot_dir(data_dir, site_id, snapshot_id);
+    (dir.join(DB_FILE), dir.join(CODE_FILE))
 }
 
 // ---------------------------------------------------------------------------

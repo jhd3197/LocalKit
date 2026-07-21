@@ -1,3 +1,4 @@
+pub mod blueprint;
 pub mod db;
 pub mod docker;
 pub mod router;
@@ -221,6 +222,44 @@ async fn restore_snapshot(
 #[tauri::command]
 fn delete_snapshot(state: State<AppState>, site_id: String, snapshot_id: String) -> Result<(), String> {
     snapshot::delete(&state, &site_id, &snapshot_id)
+}
+
+// ---------------------------------------------------------------------------
+// Blueprints (plan 20) — save a site as a reusable template, create from one
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn save_blueprint(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    site_id: String,
+    name: String,
+    description: Option<String>,
+) -> Result<blueprint::Blueprint, String> {
+    blueprint::save(Some(&app), &state, &site_id, name, description).await
+}
+
+#[tauri::command]
+fn list_blueprints(state: State<AppState>) -> Result<Vec<blueprint::Blueprint>, String> {
+    blueprint::list(&state)
+}
+
+#[tauri::command]
+fn delete_blueprint(state: State<AppState>, id: String) -> Result<(), String> {
+    blueprint::delete(&state, &id)
+}
+
+#[tauri::command]
+async fn create_site_from_blueprint(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    blueprint_id: String,
+    name: Option<String>,
+) -> Result<Site, String> {
+    let site = blueprint::create_site(Some(&app), &state, &blueprint_id, name).await?;
+    // A new running site has to reach the tray menu like any other.
+    tray::refresh(&app);
+    Ok(site)
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +586,10 @@ pub fn run() {
             create_snapshot,
             restore_snapshot,
             delete_snapshot,
+            save_blueprint,
+            list_blueprints,
+            delete_blueprint,
+            create_site_from_blueprint,
             save_serverkit_connection,
             list_serverkit_connections,
             delete_serverkit_connection,
