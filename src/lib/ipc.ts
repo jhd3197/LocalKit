@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
+  Blueprint,
   DockerStatus,
   RemoteWpSite,
   RouterStatus,
@@ -44,6 +45,12 @@ export const ipc = {
     invoke<void>("restore_snapshot", { siteId, snapshotId }),
   deleteSnapshot: (siteId: string, snapshotId: string) =>
     invoke<void>("delete_snapshot", { siteId, snapshotId }),
+  listBlueprints: () => invoke<Blueprint[]>("list_blueprints"),
+  saveBlueprint: (siteId: string, name: string, description?: string) =>
+    invoke<Blueprint>("save_blueprint", { siteId, name, description }),
+  deleteBlueprint: (id: string) => invoke<void>("delete_blueprint", { id }),
+  createSiteFromBlueprint: (blueprintId: string, name?: string) =>
+    invoke<Site>("create_site_from_blueprint", { blueprintId, name }),
   saveServerkitConnection: (label: string, url: string, apiKey: string) =>
     invoke<ServerKitConnection>("save_serverkit_connection", { label, url, apiKey }),
   listServerkitConnections: () => invoke<ServerKitConnection[]>("list_serverkit_connections"),

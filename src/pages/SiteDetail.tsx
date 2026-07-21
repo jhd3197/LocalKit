@@ -12,6 +12,7 @@ import PushPanel from "../components/PushPanel";
 import SnapshotsPanel from "../components/SnapshotsPanel";
 import DeleteSiteDialog from "../components/DeleteSiteDialog";
 import CloneSiteDialog from "../components/CloneSiteDialog";
+import SaveBlueprintDialog from "../components/SaveBlueprintDialog";
 import { describeConflicts } from "../components/DomainsSettings";
 
 export default function SiteDetail({ id }: { id: string }) {
@@ -35,6 +36,7 @@ export default function SiteDetail({ id }: { id: string }) {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
+  const [blueprintOpen, setBlueprintOpen] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
   const loadDetail = useCallback(() => {
@@ -155,6 +157,14 @@ export default function SiteDetail({ id }: { id: string }) {
             Clone
           </button>
           <button
+            onClick={() => setBlueprintOpen(true)}
+            disabled={busyId === id}
+            title="Save this site's stack as a reusable blueprint"
+            className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+          >
+            Save as blueprint
+          </button>
+          <button
             onClick={() => setConfirmDelete(true)}
             disabled={busyId === id}
             className="rounded-md border border-red-900 px-4 py-2 text-sm text-red-400 hover:border-red-700 disabled:opacity-50"
@@ -180,6 +190,13 @@ export default function SiteDetail({ id }: { id: string }) {
         <CloneSiteDialog
           source={{ id, name: detail.name }}
           onClose={() => setCloneOpen(false)}
+        />
+      )}
+
+      {blueprintOpen && (
+        <SaveBlueprintDialog
+          source={{ id, name: detail.name }}
+          onClose={() => setBlueprintOpen(false)}
         />
       )}
 

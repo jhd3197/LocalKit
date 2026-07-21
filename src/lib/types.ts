@@ -141,6 +141,32 @@ export interface Snapshot {
   wp_version: string;
 }
 
+/** A plugin captured in a blueprint (plan 20) — display metadata only. */
+export interface BlueprintPlugin {
+  name: string;
+  status: string;
+  version: string;
+}
+
+/**
+ * A saved site recipe (plan 20): a database + wp-content copy plus the plugin
+ * and theme list captured at save time. New sites can be stamped out of one.
+ */
+export interface Blueprint {
+  /** Directory slug — the stable id for create-from / delete / export. */
+  id: string;
+  name: string;
+  description: string;
+  wp_version: string;
+  php_version: string;
+  plugins: BlueprintPlugin[];
+  theme: string;
+  created_at: string;
+  source_site_name: string;
+  db_bytes: number;
+  code_bytes: number;
+}
+
 /** A router port held by another program (plan 16 pre-flight probe). */
 export interface PortConflict {
   port: number;

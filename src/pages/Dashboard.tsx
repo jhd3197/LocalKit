@@ -6,6 +6,7 @@ import { useSiteView } from "../stores/settings";
 import { useRouter } from "../stores/router";
 import { useServerKit } from "../stores/serverkit";
 import { useSites } from "../stores/sites";
+import { useBlueprints } from "../stores/blueprints";
 import type { SiteWithStatus } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
 import CloneSiteDialog from "../components/CloneSiteDialog";
@@ -17,14 +18,18 @@ export default function Dashboard() {
   const [siteView, setSiteView] = useSiteView();
   const setNewSiteOpen = useNav((s) => s.setNewSiteOpen);
   const refreshConnections = useServerKit((s) => s.refresh);
+  const blueprints = useBlueprints((s) => s.blueprints);
+  const refreshBlueprints = useBlueprints((s) => s.refresh);
   // Which site the "name your copy" dialog is open for (plan 20).
   const [cloneTarget, setCloneTarget] = useState<SiteWithStatus | null>(null);
 
   // Imported sites name their origin connection, so the labels have to be
-  // loaded even if the user never opens Settings → ServerKit.
+  // loaded even if the user never opens Settings → ServerKit. Blueprints feed
+  // the empty-state hint and the New Site dialog.
   useEffect(() => {
     void refreshConnections();
-  }, [refreshConnections]);
+    void refreshBlueprints();
+  }, [refreshConnections, refreshBlueprints]);
 
   return (
     <div className="p-6">
@@ -64,7 +69,11 @@ export default function Dashboard() {
       {sites.length === 0 && !loading ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800 py-20 text-center">
           <p className="text-zinc-400">No sites yet.</p>
-          <p className="mt-1 text-sm text-zinc-600">Create your first local WordPress site in one click.</p>
+          <p className="mt-1 text-sm text-zinc-600">
+            {blueprints.length > 0
+              ? `Create your first site in one click — blank, or from one of your ${blueprints.length} blueprints.`
+              : "Create your first local WordPress site in one click."}
+          </p>
           <button
             onClick={() => setNewSiteOpen(true)}
             className="mt-4 flex items-center gap-1.5 rounded-md bg-violet-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-violet-500"

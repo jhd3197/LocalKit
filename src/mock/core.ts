@@ -5,6 +5,7 @@
 import * as data from "./data";
 import { emit } from "./event";
 import type {
+  Blueprint,
   PortConflict,
   RouterStatus,
   ServerKitInfo,
@@ -294,6 +295,99 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       if (i < 0) throw `snapshot \`${a.snapshotId}\` not found`;
       list.splice(i, 1);
       return null;
+    }
+
+    case "list_blueprints":
+      return data.blueprints;
+
+    case "save_blueprint": {
+      const site = data.sites.find((s) => s.id === a.siteId);
+      if (!site) throw `site not found: ${a.siteId}`;
+      const name = String(a.name ?? "").trim();
+      if (!name) throw "Blueprint name is required";
+      const bp: Blueprint = {
+        id: slugify(name),
+        name,
+        description: String(a.description ?? ""),
+        wp_version: site.wp_version,
+        php_version: site.php_version,
+        plugins: data.wpInfo[site.id]?.plugins ?? [],
+        theme: "twentytwentyfive",
+        created_at: new Date().toISOString(),
+        source_site_name: site.name,
+        db_bytes: 2_400_000 + Math.floor(Math.random() * 2_000_000),
+        code_bytes: 40_000_000 + Math.floor(Math.random() * 120_000_000),
+      };
+      data.blueprints.unshift(bp);
+      // Mirror the backend: a snapshot's stages, then a terminal `done`.
+      void (async () => {
+        for (const message of ["Exporting database…", "Archiving wp-content…"]) {
+          emit("site-event", { id: site.id, stage: "snapshot", message } satisfies SiteEvent);
+          await sleep(500);
+        }
+        emit("site-event", {
+          id: site.id,
+          stage: "done",
+          message: `Saved "${site.name}" as the blueprint "${name}"`,
+        } satisfies SiteEvent);
+      })();
+      return bp;
+    }
+
+    case "delete_blueprint": {
+      const i = data.blueprints.findIndex((b) => b.id === a.id);
+      if (i < 0) throw `blueprint \`${a.id}\` not found`;
+      data.blueprints.splice(i, 1);
+      return null;
+    }
+
+    case "create_site_from_blueprint": {
+      const bp = data.blueprints.find((b) => b.id === a.blueprintId);
+      if (!bp) throw `blueprint not found: ${a.blueprintId}`;
+      const name = String(a.name ?? "").trim() || bp.name;
+      const slug = slugify(name);
+      const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
+      const id = `site-${slug}`;
+      const stages: Array<[string, string]> = [
+        ["files", "Writing project files…"],
+        ["pulling", "Downloading WordPress images (first run can take a few minutes)…"],
+        ["containers", "Starting Docker containers…"],
+        ["waiting", "Waiting for WordPress to come online…"],
+        ["import", "Laying down the blueprint's content…"],
+        ["import", "Rewriting URLs to the new site…"],
+        ["done", `${name} created from blueprint "${bp.name}" — now running at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        const s = data.sites.find((x) => x.id === id);
+        if (s) s.status = s.live_status = "running";
+      })();
+
+      const site: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: data.appInfo.wp_versions.includes(bp.wp_version)
+          ? bp.wp_version
+          : data.appInfo.wp_versions[0],
+        php_version: data.appInfo.php_versions.includes(bp.php_version)
+          ? bp.php_version
+          : data.appInfo.php_versions[0],
+        status: "creating",
+        // Login comes from the blueprint's database; no password stored.
+        admin_user: "admin",
+        admin_pass: "",
+        created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+      };
+      data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-bp-0001" });
+      return site;
     }
 
     case "site_logs":

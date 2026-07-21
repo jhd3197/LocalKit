@@ -3,6 +3,7 @@
 // populated for screenshots and manual previews, with no Docker or Tauri.
 import type {
   AppInfo,
+  Blueprint,
   RemoteWpSite,
   RouterStatus,
   ServerKitConnection,
@@ -297,6 +298,46 @@ export const snapshots: Record<string, Snapshot[]> = {
     },
   ],
 };
+
+/**
+ * Plan 20 blueprints: reusable site recipes, so the NewSiteDialog "From
+ * blueprint" section and its plugin/theme chips are reviewable without Docker.
+ */
+export const blueprints: Blueprint[] = [
+  {
+    id: "starter-shop",
+    name: "Starter Shop",
+    description: "WooCommerce storefront with our base theme and a set of starter products.",
+    wp_version: "6.7",
+    php_version: "8.3",
+    plugins: [
+      { name: "woocommerce", status: "active", version: "9.6.0" },
+      { name: "contact-form-7", status: "active", version: "6.0.3" },
+      { name: "akismet", status: "inactive", version: "5.3.5" },
+    ],
+    theme: "storefront",
+    created_at: "2026-07-10T09:00:00Z",
+    source_site_name: "Pixel Bakery",
+    db_bytes: 3_120_400,
+    code_bytes: 168_442_000,
+  },
+  {
+    id: "agency-base",
+    name: "Agency Base",
+    description: "ACF + our block library and brand theme — the starting point for a client build.",
+    wp_version: "6.6",
+    php_version: "8.2",
+    plugins: [
+      { name: "advanced-custom-fields", status: "active", version: "6.3.12" },
+      { name: "wordfence", status: "active", version: "8.0.3" },
+    ],
+    theme: "twentytwentyfive",
+    created_at: "2026-06-28T14:30:00Z",
+    source_site_name: "Acme Corporate",
+    db_bytes: 1_902_880,
+    code_bytes: 52_004_120,
+  },
+];
 
 export const syncHistory: Record<string, SyncRecord[]> = {
   "site-pixel-bakery": [
