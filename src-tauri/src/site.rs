@@ -922,6 +922,32 @@ async fn do_clone(
     Ok(site)
 }
 
+/// Remove a site's project directory, retrying briefly on a transient lock.
+///
+/// On Windows, `docker compose down` can return while Docker Desktop still holds
+/// a handle on a bind-mounted file for a moment, so an immediate `remove_dir_all`
+/// fails with "The process cannot access the file because it is being used by
+/// another process" (os error 32). A few short retries clear it; using
+/// `tokio::time::sleep` (not `thread::sleep`) keeps the executor thread free.
+pub(crate) async fn remove_site_dir(dir: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 10;
+    let mut last = None;
+    for attempt in 1..=ATTEMPTS {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            // Already gone (e.g. a prior partial attempt finished the job).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                if attempt < ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+            }
+        }
+    }
+    Err(last.expect("loop runs at least once"))
+}
+
 /// Undo a partial creation: tear the compose project down, remove the files,
 /// and drop the DB row. Shared with the import flow — a failed import must not
 /// leave a half-built site on the dashboard.
@@ -929,7 +955,7 @@ pub(crate) async fn cleanup(state: &AppState, site: &Site) -> Result<(), String>
     let dir = site.dir();
     if dir.exists() {
         let _ = docker::compose_down(&dir, true).await;
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = remove_site_dir(&dir).await;
     }
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.delete_site(&site.id)
@@ -1137,7 +1163,11 @@ pub async fn delete(
     if dir.exists() {
         // Best effort: even if Docker is down we still remove local state.
         let _ = docker::compose_down(&dir, true).await;
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to remove site directory: {e}"))?;
+        // Retry through the transient Windows bind-mount lock `compose down`
+        // can leave behind (see `remove_site_dir`).
+        remove_site_dir(&dir)
+            .await
+            .map_err(|e| format!("failed to remove site directory: {e}"))?;
     }
     if delete_snapshots {
         let _ = crate::snapshot::delete_all(&state.data_dir, id);

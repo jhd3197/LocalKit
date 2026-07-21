@@ -339,24 +339,52 @@ pub async fn export_db(dir: &Path, dest: &Path) -> Result<(), String> {
     std::fs::write(dest, sql).map_err(|e| format!("failed to write database dump: {e}"))
 }
 
-/// Import a SQL dump through wp-cli's stdin (`wp db import -`).
+/// Import a SQL dump.
+///
+/// The dump is staged to a transient file inside the bind-mounted `wp-content`
+/// and imported with `wp db import <file>` — **not** piped to `wp db import -`
+/// on stdin. `docker compose run -T` does not reliably propagate stdin EOF into
+/// the container on all platforms (observed hanging indefinitely on Windows —
+/// the same reason the config editor writes `wp-config.php` via `compose cp`
+/// rather than piped stdin), so a piped import can wait forever for input that
+/// already ended. Reading a file has no EOF to lose.
 pub async fn import_db(dir: &Path, sql: &[u8]) -> Result<(), String> {
-    docker::compose_run_stdin(dir, "wpcli", &["wp", "db", "import", "-"], sql)
-        .await
-        .map(|_| ())
+    import_db_via_file(dir, |path| std::fs::write(path, sql)).await
 }
 
-/// Import a gzipped dump straight off disk, decompressing into the pipe.
-///
-/// The streaming counterpart of `import_db`, used by the pull/import flows so
-/// a remote database never has to exist decompressed in memory (plan 19).
+/// Import a gzipped dump, decompressing it to the transient file on the way in
+/// (streamed off disk, never held decompressed in memory — plan 19).
 pub async fn import_db_from_gz(dir: &Path, gz_path: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(gz_path)
-        .map_err(|e| format!("failed to open the downloaded dump: {e}"))?;
-    let mut reader = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
-    docker::compose_run_reader(dir, "wpcli", &["wp", "db", "import", "-"], &mut reader)
-        .await
-        .map(|_| ())
+    import_db_via_file(dir, |path| {
+        let src = std::fs::File::open(gz_path)?;
+        let mut reader = flate2::read::GzDecoder::new(std::io::BufReader::new(src));
+        let mut out = std::fs::File::create(path)?;
+        std::io::copy(&mut reader, &mut out)?;
+        Ok(())
+    })
+    .await
+}
+
+/// Stage a SQL dump into a transient file under the bind-mounted `wp-content`
+/// (the one host-writable path the wpcli container sees), run `wp db import` on
+/// it, and remove it — always, even on failure. This is what sidesteps the
+/// piped-stdin hang (see `import_db`).
+async fn import_db_via_file(
+    dir: &Path,
+    write_dump: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let wp_content = dir.join("wp-content");
+    std::fs::create_dir_all(&wp_content)
+        .map_err(|e| format!("failed to prepare the import staging dir: {e}"))?;
+    let name = format!(".localkit-import-{}.sql", Uuid::new_v4().simple());
+    let host_path = wp_content.join(&name);
+    write_dump(&host_path).map_err(|e| format!("failed to stage the database dump: {e}"))?;
+    // The wpcli container's workdir is /var/www/html and wp-content is mounted
+    // there, so this relative path resolves to the staged file inside it.
+    let rel = format!("wp-content/{name}");
+    let result = docker::compose_run(dir, "wpcli", &["wp", "db", "import", &rel]).await;
+    let _ = std::fs::remove_file(&host_path);
+    result.map(|_| ())
 }
 
 /// Serialization-safe URL rewrite across all tables.
