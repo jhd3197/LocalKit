@@ -3,7 +3,9 @@
 ## What this is
 
 Desktop app (Tauri 2) that manages local WordPress sites via per-site Docker
-Compose projects. v1 = milestones M1–M4 (local sites + ServerKit push/pull).
+Compose projects. Since plan 22 it also manages generic bring-your-own-compose
+**Docker projects** via a capability-gated `kind` model (WordPress is the
+reference kind). v1 = milestones M1–M4 (local sites + ServerKit push/pull).
 Push/pull talks to the `serverkit-localkit` extension on the server
 (`/api/v1/localkit`, in the ServerKit repo).
 
@@ -54,8 +56,13 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          thin clap wrapper over localkit_lib, shares the GUI's
                          data dir + SQLite DB. Run with `cargo run -p lk -- <cmd>`
   src/db.rs              rusqlite, forward-only migrations via PRAGMA user_version
-  src/docker.rs          `docker compose` CLI wrapper (check/up/down/run/ps/logs)
-  src/site.rs            Site model + lifecycle + compose/env templates
+  src/docker.rs          `docker compose` CLI wrapper (check/up/down/run/ps/logs
+                         + config-json inspect for plan-22 docker apps)
+  src/site.rs            Site model + lifecycle + compose/env templates; the
+                         plan-22 kind/capability model (SiteConfig, Capabilities)
+  src/dockerapp.rs       plan-22 generic Docker app kind: inspect a compose
+                         project (services/ports/DB engine) + import (copy the
+                         folder, record app service/port, bring it up)
   src/wordpress.rs       wp-cli via `docker compose run --rm wpcli wp ...`
   src/router.rs          M6 local domains: shared Caddy router (`*.test`),
                          hosts-file block + elevated writer, CA trust, status
@@ -109,6 +116,13 @@ src-tauri/               Rust backend (also a cargo workspace root)
   create a marker post on the smoke site, then assert a one-click clone / a
   save-then-create-from-blueprint carries the content across with fresh
   ports/secrets; both clean up after themselves.
+- `cd src-tauri && cargo run --example docker_smoke [-- run|clean]` — plan-22
+  E2E for the generic Docker app kind against real Docker (scratch data dir):
+  writes a trivial nginx+mariadb compose fixture, inspects it, imports it as a
+  `docker` site (asserting `.git` is excluded and `.env` gets a
+  COMPOSE_PROJECT_NAME), checks the app answers HTTP on its published port, the
+  chosen service is exec-able (the terminal target), a code-only snapshot
+  (db_bytes 0), then stop/start/delete.
 - `node scripts/verify-snapshots.mjs` — headless runtime check of the plan-17
   snapshot UX against the mock server (listing + kind badges, take-with-note,
   restore taking a pre-restore snapshot first, delete, a DB pull leaving a
@@ -146,6 +160,11 @@ src-tauri/               Rust backend (also a cargo workspace root)
   clone + blueprint flows against the mock server (the New Site "From blueprint"
   section with plugin/theme chips, selecting one to create-from, a one-click
   Clone under a new name, and Save-as-blueprint round-tripping into the dialog).
+- `node scripts/verify-multistack.mjs` — headless runtime check of the plan-22
+  capability gating against the mock server (the WP/Docker kind badges, a docker
+  site's SiteDetail hiding WP Admin / credentials / database / wp-cli / clone /
+  blueprint / push while keeping snapshots+logs+terminal, the WP detail
+  unchanged, and the New Site "Docker project" tab's inspect→import flow).
 - `cd src-tauri && cargo test --lib router` — unit tests for the M6 hosts-file
   block logic (insert/replace/remove idempotency, CRLF preservation) plus the
   plan-16 port probe, listener-table parsing, compose port mapping and
@@ -202,12 +221,32 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - **Errors:** commands return `Result<T, String>` with user-displayable
   messages; `docker::friendly_error` maps common "Docker not running" stderr.
 - **DB:** forward-only migrations only — bump `user_version` and add an
-  `if version < N` block; never edit migration 1.
+  `if version < N` block; never edit migration 1. (Latest is migration 6:
+  plan-22 `kind` + `config_json` columns, constant defaults so legacy rows
+  migrate to the WordPress stack.)
 - **Async:** never hold the `Db` mutex guard across `.await` (futures must be Send);
   lock in a short scope, drop, then await.
 - **Ports:** site port = first free from 8081; DB host port = site port + 10000.
 - **Versions:** WP/PHP versions come from allowlists in `site.rs`
   (`WP_VERSIONS`, `PHP_VERSIONS`) — the UI reads them via the `app_info` command.
+- **Site kinds & capabilities (plan 22):** every site has a `kind`
+  (`wordpress` | `docker`; `php` arrives with plan 26) and a `SiteConfig`
+  (`config_json`, migration 6) carrying the de-hardcoded WordPress assumptions:
+  `service` (terminal/logs), `sync_path` (code archive), `app_port` (router
+  upstream), and a detected `db_engine`/`db_service`. `Site::capabilities` is
+  **derived** from kind+config on every read (never stored), and every feature
+  gates on it instead of assuming WordPress: WP claims all of
+  `domains, terminal, logs, snapshots, db_gui, db_sync, code_sync,
+  one_click_login, wp_tools, search_replace`; docker claims
+  `domains, terminal, logs, snapshots, code_sync`. WordPress is the zero-change
+  path — the config defaults ARE the old literals. Backend commands refuse a
+  missing capability via `Site::require(cap, action)` ("… not supported for
+  <kind> sites"); both frontends **hide** rather than error (gate on
+  `site.capabilities.*` / `app_info.kinds`). A new kind ships only when every
+  capability it claims works — docker is code-only until engine-native DB dumps
+  land (so `db_sync` is off), and clone/blueprints/ServerKit sync stay
+  WordPress-only (plan 26). Docker apps are **copied** into the managed site dir
+  (`dockerapp.rs`), never referenced.
 - **wp-cli:** the stock `wordpress` image has no wp-cli; use the profile-gated
   `wpcli` service (`wordpress:cli-php<ver>`) via `docker::compose_run`, and
   always pass `wp` as the first argument (the cli image's `wp` CMD is replaced

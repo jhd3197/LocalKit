@@ -1,6 +1,15 @@
 # 22 — Multi-stack core: kind/capability model + generic Docker apps
 
-Status: ⬜ planned
+Status: ✅ shipped
+
+**Shipped as migration 6** (the plan said "migration 7" before the actual
+numbering settled; 6 was the next free `user_version`). Docker apps ship
+**code-only**: `config.db_engine`/`db_service` are detected and stored, but
+`db_sync` stays off until engine-native dumps land — a kind must not claim a
+capability it can't deliver (see Risks). Clone, blueprints and ServerKit
+push/pull stay WordPress-only (per-kind support is plan 26) and reject a docker
+site with a clean error. The import dialog takes a **typed folder path** rather
+than a native picker (a `tauri-plugin-dialog` folder picker is a follow-up).
 
 Generalize LocalKit's core from "WordPress site manager" to "local project
 manager" in two steps: a `kind` + capability model that makes every feature
@@ -98,3 +107,29 @@ WordPress as the polished reference implementation — not an `if` branch.
 - `cargo test --lib site`: capability matrix tests (every kind × every
   capability is an explicit, tested decision), compose-copy ignore list,
   `config_json` serde defaults.
+
+## Phase 1 grep-audit gate (verdicts)
+
+Every `wordpress` / `wp-content` / `wpcli` literal in `src-tauri/src`, with a
+verdict. `cargo check` + the full WP smoke (`create`/`verify`/`info`/`clone`)
+and `snapshot_smoke` all pass unmodified — WordPress is the zero-change path.
+
+- **config-driven** (now read from `SiteConfig`, WP default = the old literal):
+  - `terminal.rs` shell service — `config.service` (default `wordpress`).
+  - `site.rs`/`snapshot.rs`/`sync.rs` archive + restore path — `config.sync_path`
+    (default `wp-content`), threaded through `build/write_wp_content_tgz` and
+    `restore_wp_content`.
+  - `router.rs` upstream port — `config.upstream_port(site.port)`.
+  - every "is the app running" `c.service == "wordpress"` check —
+    `c.service == site.app_service()` (site.rs `list`, lib.rs `login`/`terminal`,
+    snapshot.rs `is_running`).
+- **capability-gated** (WP-only; a non-WP site gets a clean refusal, UI hides):
+  `wp_cli_info`, `login`/`site_wp_users`, `lk wp`, `lk login` (via `require`),
+  the router WP-URL rewrite (`search_replace`), clone / blueprint save /
+  ServerKit push+pull (kind guard), and the snapshot DB dump (`db_sync`).
+- **legitimately WP-only** (left as literals — these ARE WordPress by nature):
+  `site.rs render_compose`/`render_env` (the generated WP compose + `.env`);
+  the whole of `wordpress.rs` (wp-cli, the MU login plugin, `wp db`/
+  `search-replace`); `sync.rs` `safe_entry_path`/`extract_wp_content` (the WP
+  ServerKit import archive contract, plan 26 for other kinds); `blueprint.rs`
+  wp-cli steps; the `snapshot.rs` `wp cache flush` (gated on `wp_tools`).

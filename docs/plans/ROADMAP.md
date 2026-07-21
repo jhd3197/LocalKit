@@ -29,7 +29,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 19 | `19_sync-v2-chunked` | ✅ shipped | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). Server-side job-queue handoff deferred — see the plan. |
 | 20 | `20_clone-and-blueprints` | ✅ shipped | One-click site clone + save-site-as-blueprint creation flows, portable `.lkbp` export/import (needs 17). |
 | 21 | `21_cli-serverkit` | ✅ shipped | `lk connection/push/pull` + remote listing + shell completions (Track D). |
-| 22 | `22_multi-stack-core` | ⬜ | Kind/capability site model + bring-your-own-compose Docker apps — before 23–25 so new features are capability-aware from day one. |
+| 22 | `22_multi-stack-core` | ✅ shipped | Kind/capability site model + bring-your-own-compose Docker apps — before 23–25 so new features are capability-aware from day one. |
 | 23 | `23_reconciliation` | ⬜ | Settle DB site status against Docker ground truth; recover half-created sites; Docker-health gating. |
 | 24 | `24_site-tools` | ⬜ | Tools tab: Adminer sidecar, serialization-safe search-replace, WP_DEBUG + log viewer, config editor. |
 | 25 | `25_release-polish-completion` | ⬜ | M5 remainder: update checker, OS keyring for API keys, OS notifications, real test suite. |
@@ -116,13 +116,16 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 
 ## Track F — Multi-stack (M9)
 
-- ⬜ Kind/capability site model (`wordpress` | `docker`, `config_json`,
-  capability-gated features in both frontends) — plan 22, placed before the
-  remaining feature plans so they're capability-aware from day one
-- ⬜ Generic Docker apps: import an existing compose project → lifecycle,
-  logs, terminal, local domain, snapshots (plan 22)
+- ✅ Kind/capability site model (`wordpress` | `docker`, `config_json` via
+  migration 6, capability-gated features in both frontends) — plan 22, placed
+  before the remaining feature plans so they're capability-aware from day one
+- ✅ Generic Docker apps (plan 22): import an existing compose project (copied,
+  not referenced; `.git`/`node_modules`/`vendor` excluded) → lifecycle, logs,
+  terminal, local domain (`<slug>.test` → the app's published port), tray,
+  code-only snapshots. Code-only for now — engine-native DB dumps (which would
+  flip `db_sync` on) are a follow-up
 - ⬜ PHP/Laravel generated stack + engine-native DB sync + per-kind
-  ServerKit push/pull/import parity (plan 26)
+  ServerKit push/pull/import parity, and per-kind clone/blueprints (plan 26)
 - 🅿️ Node/Python kinds (unplanned; same capability shape when there's demand)
 
 ## Track E — UX ports from Faro (M12–M14)
