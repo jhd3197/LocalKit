@@ -8,7 +8,7 @@
 
 use std::sync::Mutex;
 
-use localkit_lib::{db::Db, docker, serverkit::ServerKitConnection, site, sync, AppState};
+use localkit_lib::{db::Db, docker, php, serverkit::ServerKitConnection, site, sync, AppState};
 
 const MOCK_URL: &str = "http://127.0.0.1:9872";
 const REMOTE_URL: &str = "https://blog.example.com";
@@ -99,7 +99,94 @@ async fn main() {
     // 7) Sync v2: chunked upload, interrupted and resumed (plan 19).
     chunked_smoke(&state, &site).await;
 
+    // 8) PHP/Laravel stack: engine-native push/pull DB over ServerKit (plan 26).
+    php_sync_smoke(&state).await;
+
     println!("M4 SMOKE OK");
+}
+
+// ---------------------------------------------------------------------------
+// Plan 26 — php stack ServerKit parity (engine-native db sync, no wp-cli)
+// ---------------------------------------------------------------------------
+
+/// Create a real local php site, push its database to the mock's php remote
+/// (id 4), wipe a marker row, pull it back, and assert the marker returns —
+/// proving the whole push/pull DB path runs engine-native (a php site has no
+/// wpcli service, so any wp-cli fallback would simply fail). Also asserts the
+/// per-kind gate: a server that stops advertising php refuses the push.
+async fn php_sync_smoke(state: &AppState) {
+    println!("--- php ServerKit cycle (plan 26) ---");
+    const PHP_REMOTE: i64 = 4;
+
+    // Drop any leftover php-sync site from a prior run.
+    let prior: Vec<site::Site> = {
+        let db = state.db.lock().unwrap();
+        db.list_sites().unwrap().into_iter().filter(|s| s.slug == "php-sync").collect()
+    };
+    for s in prior {
+        let _ = site::delete(None, state, &s.id, true).await;
+    }
+
+    let s = php::create_php_site(None, state, "PHP Sync".into(), "8.3".into(), None, false)
+        .await
+        .expect("create php site");
+    let dir = s.dir();
+    let pw = site::db_password(&dir);
+
+    php_sql(
+        &dir,
+        &pw,
+        "CREATE TABLE lk_sync (id INT PRIMARY KEY, note VARCHAR(64)); \
+         INSERT INTO lk_sync VALUES (1, 'pushed');",
+    )
+    .await;
+
+    // Gate: a server that drops php from /pair must refuse the push before dumping.
+    control(serde_json::json!({ "kinds": ["wordpress"] })).await;
+    let refused = sync::push_db(None, state, "mock-conn", &s.id, PHP_REMOTE).await;
+    assert!(refused.is_err(), "a server without php support must refuse the push");
+    println!("PHP GATE OK ({})", refused.unwrap_err());
+    control(serde_json::json!({ "kinds": null })).await; // restore php support
+
+    // Engine-native push (mysqldump) — no wp-cli anywhere.
+    sync::push_db(None, state, "mock-conn", &s.id, PHP_REMOTE).await.expect("php push_db");
+    println!("PHP PUSH DB OK");
+    sync::push_code(None, state, "mock-conn", &s.id, PHP_REMOTE).await.expect("php push_code");
+    println!("PHP PUSH CODE OK");
+
+    // Wipe the row, then pull it back from the mock (which serves the pushed dump).
+    php_sql(&dir, &pw, "DELETE FROM lk_sync;").await;
+    let gone = php_query(&dir, &pw, "SELECT COUNT(*) FROM lk_sync;").await;
+    assert_eq!(gone.trim(), "0", "marker not wiped before pull");
+
+    sync::pull_db(None, state, "mock-conn", &s.id, PHP_REMOTE, None).await.expect("php pull_db");
+    let restored = php_query(&dir, &pw, "SELECT note FROM lk_sync WHERE id=1;").await;
+    assert_eq!(
+        restored.trim(),
+        "pushed",
+        "engine-native pull did not restore the marker row"
+    );
+    println!("PHP PULL DB OK (engine-native round-trip)");
+
+    site::delete(None, state, &s.id, true).await.expect("delete php site");
+    println!("PHP SYNC SMOKE OK");
+}
+
+async fn php_sql(dir: &std::path::Path, pw: &str, sql: &str) {
+    docker::compose_exec_env(dir, "db", &[("MYSQL_PWD", pw)], &["mariadb", "-u", "laravel", "laravel", "-e", sql])
+        .await
+        .expect("php sql failed");
+}
+
+async fn php_query(dir: &std::path::Path, pw: &str, sql: &str) -> String {
+    docker::compose_exec_env(
+        dir,
+        "db",
+        &[("MYSQL_PWD", pw)],
+        &["mariadb", "-N", "-B", "-u", "laravel", "laravel", "-e", sql],
+    )
+    .await
+    .expect("php query failed")
 }
 
 // ---------------------------------------------------------------------------

@@ -66,7 +66,7 @@ function resetStats() {
  * - syncV2: drop "sync-v2" from /pair, so a v2-capable client is forced down
  *   the v1 path — that is how the fallback gets exercised.
  */
-const control = { failChunksAfter: null, chunksSinceControl: 0, syncV2: true };
+const control = { failChunksAfter: null, chunksSinceControl: 0, syncV2: true, kinds: null };
 
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
@@ -147,7 +147,11 @@ function acceptCodeArchive(buf) {
   } catch (e) {
     return { error: `not gzip: ${e.message}` };
   }
-  if (!tar.includes(Buffer.from("wp-content"))) return { error: "No wp-content found in the archive" };
+  // A WordPress push is prefixed wp-content/; a php push (plan 26) is prefixed
+  // with the app sync_path (app/). Accept either — the wire is kind-agnostic.
+  if (!tar.includes(Buffer.from("wp-content")) && !tar.includes(Buffer.from("app/"))) {
+    return { error: "No wp-content or app/ found in the archive" };
+  }
   receivedTgz = buf.length;
   return null;
 }
@@ -233,6 +237,7 @@ const server = http.createServer(async (req, res) => {
     control.failChunksAfter = cfg.failChunksAfter ?? null;
     control.chunksSinceControl = 0;
     if (cfg.syncV2 !== undefined) control.syncV2 = cfg.syncV2;
+    if (cfg.kinds !== undefined) control.kinds = cfg.kinds; // null = default (wordpress+php)
     if (cfg.resetStats) resetStats();
     if (cfg.forgetTransfers) transfers.clear();
     return json(200, { ok: true, ...control });
@@ -240,15 +245,20 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/v1/localkit/pair") {
     const features = control.syncV2 ? FEATURES : FEATURES.filter((f) => f !== "sync-v2");
-    return json(200, { status: "ok", service: "serverkit-localkit", panel: "ServerKit", version: "1.7.0", user: "admin", canonical_domain: "panel.example.com", canonical_origin: "https://panel.example.com", features });
+    // Kinds this extension can sync (plan 26). `control.kinds` lets a test drop
+    // php to exercise the old-server ↔ new-client gate.
+    const kinds = control.kinds || ["wordpress", "php"];
+    return json(200, { status: "ok", service: "serverkit-localkit", panel: "ServerKit", version: "1.7.0", user: "admin", canonical_domain: "panel.example.com", canonical_origin: "https://panel.example.com", features, kinds });
   }
 
   if (url.pathname === "/api/v1/localkit/sites" && req.method === "GET") {
     return json(200, { sites: [
-      { id: 1, name: "client-blog", url: REMOTE_URL, site_url: REMOTE_URL, status: "running", wp_version: "6.7.2", php_version: "8.3", multisite: false, environment_count: 0 },
-      { id: 2, name: "woo-store", url: null, site_url: null, status: "stopped", wp_version: "6.6.4", php_version: "8.1", multisite: false, environment_count: 1 },
+      { id: 1, name: "client-blog", url: REMOTE_URL, site_url: REMOTE_URL, status: "running", wp_version: "6.7.2", php_version: "8.3", kind: "wordpress", multisite: false, environment_count: 0 },
+      { id: 2, name: "woo-store", url: null, site_url: null, status: "stopped", wp_version: "6.6.4", php_version: "8.1", kind: "wordpress", multisite: false, environment_count: 1 },
       // Refused by the import flow — one compose project cannot be a network.
-      { id: 3, name: "network-hq", url: "https://network.example.com", status: "running", wp_version: "6.7.2", php_version: "8.2", multisite: true, environment_count: 0 },
+      { id: 3, name: "network-hq", url: "https://network.example.com", status: "running", wp_version: "6.7.2", php_version: "8.2", kind: "wordpress", multisite: true, environment_count: 0 },
+      // A PHP/Laravel remote (plan 26) — engine-native db sync, no wp-cli.
+      { id: 4, name: "checkout-service", url: null, site_url: null, status: "running", wp_version: null, php_version: "8.3", kind: "php", multisite: false, environment_count: 0 },
     ]});
   }
 
