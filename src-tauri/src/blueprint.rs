@@ -206,6 +206,10 @@ pub async fn save(
     description: Option<String>,
 ) -> Result<Blueprint, String> {
     let s = site::get(state, site_id)?;
+    // Blueprints are WordPress recipes (per-kind blueprints arrive with plan
+    // 26); saving a docker app through this WP-shaped flow would produce a
+    // broken template.
+    s.require(s.kind == site::KIND_WORDPRESS, "Saving a blueprint")?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Blueprint name is required".into());

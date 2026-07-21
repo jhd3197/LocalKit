@@ -150,6 +150,7 @@ pub async fn push_code(
     remote_site_id: i64,
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
+    site.require(site.kind == site::KIND_WORDPRESS, "ServerKit push")?;
     let v2 = supports_v2(&conn).await;
     let cancel = state.transfers.begin(site_id);
     run(app, state, connection_id, site_id, "push", "code", async {
@@ -251,6 +252,7 @@ pub async fn push_db(
     remote_site_id: i64,
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
+    site.require(site.kind == site::KIND_WORDPRESS, "ServerKit push")?;
     pre_sync_snapshot(app, state, site_id, snapshot::KIND_PRE_PUSH, &conn, remote_site_id).await?;
 
     // Whatever the site is actually served at — its `.test` domain (with the
@@ -318,6 +320,7 @@ pub async fn pull_db(
     remote_url: Option<String>,
 ) -> Result<(), String> {
     let (conn, site) = load(state, connection_id, site_id)?;
+    site.require(site.kind == site::KIND_WORDPRESS, "ServerKit pull")?;
     let v2 = supports_v2(&conn).await;
 
     // v1 snapshots before the download because it has no way to stop one

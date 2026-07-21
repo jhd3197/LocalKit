@@ -663,6 +663,9 @@ pub async fn clone_site(
     new_name: String,
 ) -> Result<Site, String> {
     let source = get(state, source_id)?;
+    // Clone provisions a WordPress-shaped target (compose/env/wp-cli); a docker
+    // project is not clonable through this flow yet (plan 26).
+    source.require(source.kind == KIND_WORDPRESS, "Cloning")?;
 
     // 1. Snapshot the source. This reuses the retry-heavy DB export and the
     //    shared archive format, and gives the clone a consistent point-in-time
