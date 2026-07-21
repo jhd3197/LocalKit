@@ -41,7 +41,8 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            libdbus-1-dev
 
       - name: Install npm deps
         run: npm ci

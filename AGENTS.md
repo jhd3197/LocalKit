@@ -72,6 +72,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          running `docker compose exec wordpress bash`; events
                          `terminal://data` / `terminal://exit`
   src/serverkit.rs       ServerKit API client (X-API-Key) + connection model
+  src/keystore.rs        plan-25 OS keyring for API keys (Credential Manager /
+                         Keychain / Secret Service); degrades to SQLite
   src/sync.rs            push/pull orchestration + SyncRecord (sync_history) +
                          plan 18 import (clone a remote site to a new local one)
   src/transfer.rs        plan 19 chunked transfers: chunk planning + resume
@@ -497,8 +499,12 @@ src-tauri/               Rust backend (also a cargo workspace root)
   .sql.gz → gunzip → `wp db import -` via `docker::compose_run_stdin` →
   `wp search-replace` remote → local. Ops emit `site-event` stages and record
   rows in `sync_history` (migration 3). Connections live in
-  `serverkit_connections` (migration 2); **API keys in plaintext SQLite** —
-  accepted for v1, revisit with a keyring later. `sync::emit` delegates to
+  `serverkit_connections` (migration 2); **API keys live in the OS keyring**
+  (plan 25, `keystore.rs`) — `db.rs` stores new keys there and blanks the
+  `api_key` column, migrating any legacy plaintext key into the keyring the
+  first time the connection is read. Keyring unavailable (headless Linux,
+  locked keychain, `LOCALKIT_DISABLE_KEYRING`) degrades to the plaintext
+  column, never a hard failure. `sync::emit` delegates to
   `site::emit`, so sync progress prints to stderr in the CLI/examples instead
   of vanishing. Bulk transfers use `serverkit::transfer_client` (30 min), not
   the 15 s probe client — reqwest's `timeout` is a *total* request budget, so

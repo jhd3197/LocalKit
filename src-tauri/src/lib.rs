@@ -2,6 +2,7 @@ pub mod blueprint;
 pub mod db;
 pub mod docker;
 pub mod dockerapp;
+pub mod keystore;
 pub mod reconcile;
 pub mod router;
 pub mod serverkit;

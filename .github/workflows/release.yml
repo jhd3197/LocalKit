@@ -155,6 +155,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
+            libdbus-1-dev \
             build-essential \
             curl \
             wget \
@@ -223,6 +224,7 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             libssl-dev \
+            libdbus-1-dev \
             pkg-config
 
       # localkit_lib's `run()` calls `tauri::generate_context!`, which validates

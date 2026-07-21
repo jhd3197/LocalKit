@@ -34,3 +34,7 @@ tar = "0.4"
 flate2 = "1"
 sha2 = "0.10"
 portable-pty = "0.8"
+# OS keyring for ServerKit API keys (plan 25). Per-platform native backends;
+# Linux uses the pure-Rust secret-service + crypto so no system libs are needed
+# to build (a headless box with no Secret Service just degrades to SQLite).
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }

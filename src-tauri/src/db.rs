@@ -54,8 +54,12 @@ impl Db {
                 .map_err(|e| format!("migration 1 failed: {e}"))?;
         }
         if version < 2 {
-            // NOTE: API keys are stored in plaintext in the local SQLite DB —
-            // acceptable for v1 (documented); a keyring migration can come later.
+            // NOTE: the `api_key` column predates the OS keyring (plan 25). New
+            // connections keep their key in the keyring and store `''` here; a
+            // legacy plaintext key is migrated into the keyring the first time
+            // the connection is read (see `resolve_api_key`). The column stays
+            // as the fallback for keyring-less machines and for downgrades — so
+            // no migration is needed, we just stop writing real keys into it.
             self.conn
                 .execute_batch(
                     "
@@ -411,37 +415,55 @@ impl Db {
     }
 
     pub fn insert_connection(&self, conn: &ServerKitConnection) -> Result<(), String> {
+        // Prefer the OS keyring; only when it is unavailable does the key fall
+        // back into the plaintext column (plan 25 graceful degradation).
+        let column_key = if crate::keystore::store(&conn.id, &conn.api_key) {
+            ""
+        } else {
+            conn.api_key.as_str()
+        };
         self.conn
             .execute(
                 "INSERT INTO serverkit_connections (id, label, url, api_key, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![conn.id, conn.label, conn.url, conn.api_key, conn.created_at],
+                params![conn.id, conn.label, conn.url, column_key, conn.created_at],
             )
             .map_err(|e| format!("failed to insert connection: {e}"))?;
         Ok(())
     }
 
     pub fn get_connection(&self, id: &str) -> Result<ServerKitConnection, String> {
-        self.conn
+        let mut conn = self
+            .conn
             .query_row(
                 "SELECT * FROM serverkit_connections WHERE id = ?1",
                 params![id],
                 Self::row_to_connection,
             )
-            .map_err(|_| "connection not found".to_string())
+            .map_err(|_| "connection not found".to_string())?;
+        self.resolve_api_key(&mut conn);
+        Ok(conn)
     }
 
     pub fn list_connections(&self) -> Result<Vec<ServerKitConnection>, String> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM serverkit_connections ORDER BY created_at ASC")
-            .map_err(|e| format!("failed to list connections: {e}"))?;
-        let rows = stmt
-            .query_map([], Self::row_to_connection)
-            .map_err(|e| format!("failed to list connections: {e}"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(|e| format!("failed to read connection row: {e}"))?);
+        let mut out = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM serverkit_connections ORDER BY created_at ASC")
+                .map_err(|e| format!("failed to list connections: {e}"))?;
+            let rows = stmt
+                .query_map([], Self::row_to_connection)
+                .map_err(|e| format!("failed to list connections: {e}"))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(|e| format!("failed to read connection row: {e}"))?);
+            }
+            out
+        };
+        // The prepared statement is dropped above, so `resolve_api_key` is free
+        // to write back (blank the column) while migrating a legacy key.
+        for conn in &mut out {
+            self.resolve_api_key(conn);
         }
         Ok(out)
     }
@@ -450,6 +472,34 @@ impl Db {
         self.conn
             .execute("DELETE FROM serverkit_connections WHERE id = ?1", params![id])
             .map_err(|e| format!("failed to delete connection: {e}"))?;
+        // Best-effort — a keyring-less machine simply has nothing to remove.
+        crate::keystore::delete(id);
+        Ok(())
+    }
+
+    /// Fill in a connection's `api_key` from the keyring, migrating a legacy
+    /// plaintext key on the way. The keyring wins when present; otherwise a
+    /// non-empty column is a pre-plan-25 key that we move into the keyring and
+    /// then blank here, so the keyring becomes the only copy. If the keyring is
+    /// unavailable the column value is left untouched and used as-is.
+    fn resolve_api_key(&self, conn: &mut ServerKitConnection) {
+        if let Some(key) = crate::keystore::retrieve(&conn.id) {
+            conn.api_key = key;
+            return;
+        }
+        if !conn.api_key.is_empty() && crate::keystore::store(&conn.id, &conn.api_key) {
+            let _ = self.clear_connection_api_key(&conn.id);
+        }
+    }
+
+    /// Blank the plaintext column after a key has been migrated to the keyring.
+    fn clear_connection_api_key(&self, id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE serverkit_connections SET api_key = '' WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|e| format!("failed to clear stored api key: {e}"))?;
         Ok(())
     }
 
@@ -673,6 +723,37 @@ mod tests {
         assert!(!back.capabilities.db_sync, "docker is code-only until native dumps land");
         assert!(!back.capabilities.wp_tools);
         assert!(!back.capabilities.one_click_login);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_connection_round_trips_its_api_key_through_either_backend() {
+        let path = temp_db_path("conn-key");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let db = Db::open(&path).unwrap();
+
+        let conn = ServerKitConnection {
+            id: "conn-key-1".into(),
+            label: "prod".into(),
+            url: "https://panel.example.com".into(),
+            api_key: "sk-secret-123".into(),
+            created_at: "2026-07-20T00:00:00Z".into(),
+        };
+        db.insert_connection(&conn).unwrap();
+
+        // The key comes back whole regardless of where it landed — keyring on a
+        // desktop, the SQLite column on a headless box. The plaintext column is
+        // never the guaranteed source of truth anymore, only the resolved value.
+        assert_eq!(db.get_connection("conn-key-1").unwrap().api_key, "sk-secret-123");
+        let listed = db.list_connections().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].api_key, "sk-secret-123");
+
+        // Delete removes the row and (best-effort) the keyring entry, so a
+        // dev-box run leaves nothing behind in the real credential store.
+        db.delete_connection("conn-key-1").unwrap();
+        assert!(db.list_connections().unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
