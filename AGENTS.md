@@ -123,7 +123,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
   ports/secrets; both clean up after themselves. `tools` (plan 24) exercises the
   site-tools backend against the smoke site: a search-replace dry-run finds the
   baked-in home/siteurl without writing, Apply (with a `pre_search_replace`
-  snapshot) rewrites them, and the URL is restored afterward.
+  snapshot) rewrites them and the URL is restored afterward, and the WP_DEBUG
+  toggle round-trips through wp-config.php (via the root-capable wpcli runner).
 - `cd src-tauri && cargo run --example docker_smoke [-- run|clean]` — plan-22
   E2E for the generic Docker app kind against real Docker (scratch data dir):
   writes a trivial nginx+mariadb compose fixture, inspects it, imports it as a
@@ -171,8 +172,8 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - `node scripts/verify-site-tools.mjs` — headless runtime check of the plan-24
   Tools tab against the mock server (a WordPress site's Tools tab switching from
   the overview; Search & Replace previewing per-column change counts then
-  applying with the snapshot shortcut; a code-only docker site having no Tools
-  tab).
+  applying with the snapshot shortcut; the Debug toggle seeding the log viewer
+  and Clear emptying it; a code-only docker site having no Tools tab).
 - `node scripts/verify-multistack.mjs` — headless runtime check of the plan-22
   capability gating against the mock server (the WP/Docker kind badges, a docker
   site's SiteDetail hiding WP Admin / credentials / database / wp-cli / clone /

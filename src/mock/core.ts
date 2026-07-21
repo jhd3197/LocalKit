@@ -49,6 +49,16 @@ function mockConflict(conflicts: PortConflict[], keepEnabled = false): RouterSta
 
 // Fake interactive shells for the Terminal page (terminal_open/write/close).
 const mockShells = new Map<string, { slug: string; buffer: string }>();
+/** Per-site WP_DEBUG state + a fake debug.log for the Tools → Debug mock. */
+const mockDebug = new Map<string, { enabled: boolean; log: string }>();
+function debugState(id: string): { enabled: boolean; log: string } {
+  let s = mockDebug.get(id);
+  if (!s) {
+    s = { enabled: false, log: "" };
+    mockDebug.set(id, s);
+  }
+  return s;
+}
 /** Site ids whose in-flight mock transfer has been asked to stop (plan 19). */
 const mockCancels = new Set<string>();
 const prompt = (slug: string) =>
@@ -558,6 +568,35 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         })();
       }
       return { dry_run: dryRun, total, changes };
+    }
+
+    // Plan 24: WP_DEBUG toggle + debug.log viewer. Enabling seeds a couple of
+    // fake log lines so the viewer + clear button are reviewable.
+    case "site_debug_status": {
+      const s = debugState(String(a.id));
+      return { enabled: s.enabled, log_bytes: s.log.length };
+    }
+
+    case "set_site_debug": {
+      const s = debugState(String(a.id));
+      s.enabled = Boolean(a.enabled);
+      if (s.enabled && !s.log) {
+        s.log =
+          [
+            "[21-Jul-2026 17:40:02 UTC] PHP Notice:  Undefined variable $greeting in /var/www/html/wp-content/themes/pixel-bakery/functions.php on line 42",
+            "[21-Jul-2026 17:40:03 UTC] PHP Warning:  Use of undefined constant CACHE_TTL in /var/www/html/wp-content/plugins/demo/demo.php on line 8",
+            "[21-Jul-2026 17:40:04 UTC] PHP Fatal error:  Uncaught Error: Call to undefined function demo_boot() in /var/www/html/wp-content/mu-plugins/demo-check.php:11",
+          ].join("\n") + "\n";
+      }
+      return { enabled: s.enabled, log_bytes: s.log.length };
+    }
+
+    case "read_site_debug_log":
+      return debugState(String(a.id)).log;
+
+    case "clear_site_debug_log": {
+      debugState(String(a.id)).log = "";
+      return null;
     }
 
     case "save_serverkit_connection": {

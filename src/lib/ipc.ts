@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
   Blueprint,
+  DebugStatus,
   DockerProjectInspection,
   DockerStatus,
   RemoteWpSite,
@@ -54,6 +55,15 @@ export const ipc = {
   /** Serialization-safe search-replace (plan 24); dryRun counts without writing. */
   siteSearchReplace: (id: string, from: string, to: string, dryRun: boolean) =>
     invoke<SearchReplaceResult>("site_search_replace", { id, from, to, dryRun }),
+  /** WP_DEBUG state + debug-log size (plan 24). */
+  siteDebugStatus: (id: string) => invoke<DebugStatus>("site_debug_status", { id }),
+  /** Toggle WP_DEBUG + WP_DEBUG_LOG (log to file, never screen) (plan 24). */
+  setSiteDebug: (id: string, enabled: boolean) =>
+    invoke<DebugStatus>("set_site_debug", { id, enabled }),
+  /** Tail of wp-content/debug.log (plan 24). */
+  readSiteDebugLog: (id: string) => invoke<string>("read_site_debug_log", { id }),
+  /** Truncate the debug log (plan 24). */
+  clearSiteDebugLog: (id: string) => invoke<void>("clear_site_debug_log", { id }),
   loginSite: (id: string, userId?: number) => invoke<string>("login_site", { id, userId }),
   siteWpUsers: (id: string) => invoke<WpUser[]>("site_wp_users", { id }),
   listSnapshots: (siteId: string) => invoke<Snapshot[]>("list_snapshots", { siteId }),

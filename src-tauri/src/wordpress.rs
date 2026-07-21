@@ -6,7 +6,7 @@
 //! `docker compose run --rm -T wpcli wp <args...>`.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
 use crate::docker;
@@ -215,6 +215,17 @@ async fn wp(dir: &Path, args: &[&str]) -> Result<String, String> {
     full.push("wp");
     full.extend_from_slice(args);
     docker::compose_run(dir, "wpcli", &full).await
+}
+
+/// Run wp-cli as root, for commands that write `wp-config.php` (root-owned in
+/// the wp-data volume — see `docker::compose_run_root`). `--allow-root` is
+/// appended because wp-cli refuses to run as root without it.
+async fn wp_root(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let mut full: Vec<&str> = Vec::with_capacity(args.len() + 2);
+    full.push("wp");
+    full.extend_from_slice(args);
+    full.push("--allow-root");
+    docker::compose_run_root(dir, "wpcli", &full).await
 }
 
 /// Auto-install WordPress with generated admin credentials.
@@ -463,6 +474,75 @@ fn parse_search_replace_table(output: &str) -> (u64, Vec<SearchReplaceChange>) {
         });
     }
     (total, changes)
+}
+
+// ---------------------------------------------------------------------------
+// Debug mode + log viewer (plan 24)
+// ---------------------------------------------------------------------------
+
+/// WP_DEBUG state + the size of the debug log, for the Tools → Debug UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugStatus {
+    pub enabled: bool,
+    /// Bytes in `wp-content/debug.log` (0 when absent), so the UI can say
+    /// "empty" without shipping the whole file just to check.
+    pub log_bytes: u64,
+}
+
+/// Host path of the WordPress debug log. `WP_DEBUG_LOG = true` logs to
+/// `WP_CONTENT_DIR/debug.log`, and `wp-content` is bind-mounted, so this is a
+/// plain host file — read/cleared without touching the container.
+fn debug_log_path(dir: &Path) -> PathBuf {
+    dir.join("wp-content").join("debug.log")
+}
+
+/// Read WP_DEBUG. `wp config get WP_DEBUG` *evaluates* the constant, so a true
+/// value prints `1` and a false/undefined one prints empty.
+pub async fn debug_status(dir: &Path) -> Result<DebugStatus, String> {
+    let value = wp(dir, &["config", "get", "WP_DEBUG"]).await.unwrap_or_default();
+    let value = value.trim();
+    let enabled = value == "1" || value.eq_ignore_ascii_case("true");
+    let log_bytes = std::fs::metadata(debug_log_path(dir))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    Ok(DebugStatus { enabled, log_bytes })
+}
+
+/// Toggle debug mode: `WP_DEBUG` and `WP_DEBUG_LOG` follow `enabled`, while
+/// `WP_DEBUG_DISPLAY` is pinned false — errors go to the log, never to the
+/// screen (a visible fatal on a shared preview URL is its own footgun). Writing
+/// `wp-config.php` needs the root runner (see `wp_root`).
+pub async fn set_debug(dir: &Path, enabled: bool) -> Result<DebugStatus, String> {
+    let raw = if enabled { "true" } else { "false" };
+    wp_root(dir, &["config", "set", "WP_DEBUG", raw, "--raw"]).await?;
+    wp_root(dir, &["config", "set", "WP_DEBUG_LOG", raw, "--raw"]).await?;
+    wp_root(dir, &["config", "set", "WP_DEBUG_DISPLAY", "false", "--raw"]).await?;
+    debug_status(dir).await
+}
+
+/// The debug log, tailed to the last ~128 KB so a runaway log never blows up
+/// the IPC payload. Empty string when the file does not exist yet.
+pub fn read_debug_log(dir: &Path) -> String {
+    let Ok(bytes) = std::fs::read(debug_log_path(dir)) else {
+        return String::new();
+    };
+    const MAX: usize = 128 * 1024;
+    let slice = if bytes.len() > MAX {
+        &bytes[bytes.len() - MAX..]
+    } else {
+        &bytes[..]
+    };
+    String::from_utf8_lossy(slice).to_string()
+}
+
+/// Truncate the debug log (kept as an empty file so PHP keeps appending to the
+/// same inode). A missing log is a no-op.
+pub fn clear_debug_log(dir: &Path) -> Result<(), String> {
+    let path = debug_log_path(dir);
+    if path.exists() {
+        std::fs::write(&path, b"").map_err(|e| format!("failed to clear the debug log: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Point home/siteurl at the site's local URL.

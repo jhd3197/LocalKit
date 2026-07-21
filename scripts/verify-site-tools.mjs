@@ -182,6 +182,26 @@ async function main() {
     ok("apply reports success", /Replaced 19 occurrences/i.test(text));
     ok("apply offers the snapshot shortcut", /view snapshots/i.test(text));
 
+    // 3) Debug: the section shows, and toggling on seeds the log viewer.
+    ok("Tools tab shows Debug", /Debug/i.test(await bodyText()));
+    const debugSwitch = () =>
+      page.evaluate(() => {
+        const btn = [...document.querySelectorAll('button[role="switch"]')][0];
+        return btn ? btn.getAttribute("aria-checked") : null;
+      });
+    ok("debug starts off", (await debugSwitch()) === "false");
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button[role="switch"]')][0].click();
+    });
+    await sleep(500);
+    ok("debug toggles on", (await debugSwitch()) === "true");
+    text = await bodyText();
+    ok("debug log viewer shows seeded output", /PHP Fatal error/i.test(text));
+    // Clear log empties the viewer.
+    await clickByText("button", "Clear log");
+    await sleep(400);
+    ok("clear empties the log viewer", /No debug output yet/i.test(await bodyText()));
+
     await clickByText("button", "Back to sites");
     await sleep(600);
 

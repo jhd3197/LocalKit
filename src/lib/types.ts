@@ -113,6 +113,12 @@ export interface SearchReplaceResult {
   changes: SearchReplaceChange[];
 }
 
+/** WP_DEBUG state + debug-log size (plan 24 Tools → Debug). */
+export interface DebugStatus {
+  enabled: boolean;
+  log_bytes: number;
+}
+
 /** A site kind and the capabilities it advertises (plan 22 `app_info`). */
 export interface KindInfo {
   kind: string;

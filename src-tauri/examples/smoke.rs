@@ -541,8 +541,23 @@ async fn tools_smoke(state: &AppState) -> Result<(), String> {
     wordpress::search_replace_report(&dir, &to, &from, false).await?;
     let home_restored = wp(&s, &["option", "get", "home"]).await?;
     assert_eq!(home_restored.trim(), from, "failed to restore the original home URL");
+    println!("search-replace OK");
 
-    println!("TOOLS OK (search-replace dry-run + apply + snapshot)");
+    // --- Debug mode: toggle round-trips through wp-config.php (root writer). ---
+    let before = wordpress::debug_status(&dir).await?;
+    let on = wordpress::set_debug(&dir, true).await?;
+    println!("DEBUG on -> enabled={} log_bytes={}", on.enabled, on.log_bytes);
+    assert!(on.enabled, "set_debug(true) did not enable WP_DEBUG");
+    let off = wordpress::set_debug(&dir, false).await?;
+    assert!(!off.enabled, "set_debug(false) did not disable WP_DEBUG");
+    // Restore whatever the site started with.
+    wordpress::set_debug(&dir, before.enabled).await?;
+    // The log helpers never error even when the file is absent.
+    let _ = wordpress::read_debug_log(&dir);
+    wordpress::clear_debug_log(&dir)?;
+    println!("debug toggle OK");
+
+    println!("TOOLS OK (search-replace + debug)");
     Ok(())
 }
 

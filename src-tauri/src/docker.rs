@@ -181,6 +181,18 @@ pub async fn compose_run(dir: &Path, service: &str, args: &[&str]) -> Result<Str
     compose(dir, &full).await
 }
 
+/// Like `compose_run`, but runs the one-off container as **root**
+/// (`--user root`). Needed for commands that mutate root-owned files inside a
+/// named volume: the wordpress image writes `wp-config.php` as root into the
+/// `wp-data` volume, so the cli image's default `www-data` user cannot edit it —
+/// `wp config set` fails with "wp-config.php is not writable" (plan 24). The
+/// caller must also pass wp-cli's `--allow-root` (it refuses root otherwise).
+pub async fn compose_run_root(dir: &Path, service: &str, args: &[&str]) -> Result<String, String> {
+    let mut full: Vec<&str> = vec!["run", "--rm", "-T", "--user", "root", service];
+    full.extend_from_slice(args);
+    compose(dir, &full).await
+}
+
 /// Like `compose_run`, but pipes `input` to the command's stdin
 /// (used for `wp db import -`).
 pub async fn compose_run_stdin(

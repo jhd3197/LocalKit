@@ -268,6 +268,45 @@ async fn site_search_replace(
     }
 }
 
+/// WP_DEBUG state + debug-log size (plan 24).
+#[tauri::command]
+async fn site_debug_status(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<wordpress::DebugStatus, String> {
+    let s = site::get(&state, &id)?;
+    s.require(s.capabilities.wp_tools, "Debug mode")?;
+    wordpress::debug_status(&s.dir()).await
+}
+
+/// Toggle WP_DEBUG + WP_DEBUG_LOG (log to file, never to screen) (plan 24).
+#[tauri::command]
+async fn set_site_debug(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<wordpress::DebugStatus, String> {
+    let s = site::get(&state, &id)?;
+    s.require(s.capabilities.wp_tools, "Debug mode")?;
+    wordpress::set_debug(&s.dir(), enabled).await
+}
+
+/// Tail of `wp-content/debug.log` (plain host read — it is bind-mounted) (plan 24).
+#[tauri::command]
+fn read_site_debug_log(state: State<AppState>, id: String) -> Result<String, String> {
+    let s = site::get(&state, &id)?;
+    s.require(s.capabilities.wp_tools, "The debug log")?;
+    Ok(wordpress::read_debug_log(&s.dir()))
+}
+
+/// Truncate the debug log (plan 24).
+#[tauri::command]
+fn clear_site_debug_log(state: State<AppState>, id: String) -> Result<(), String> {
+    let s = site::get(&state, &id)?;
+    s.require(s.capabilities.wp_tools, "The debug log")?;
+    wordpress::clear_debug_log(&s.dir())
+}
+
 // ---------------------------------------------------------------------------
 // One-click WP Admin login (one-time token + MU plugin)
 // ---------------------------------------------------------------------------
@@ -736,6 +775,10 @@ pub fn run() {
             site_logs,
             wp_cli_info,
             site_search_replace,
+            site_debug_status,
+            set_site_debug,
+            read_site_debug_log,
+            clear_site_debug_log,
             login_site,
             site_wp_users,
             list_snapshots,
