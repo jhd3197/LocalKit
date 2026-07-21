@@ -941,16 +941,14 @@ pub async fn list(state: &AppState) -> Result<Vec<SiteWithStatus>, String> {
     let mut out = Vec::new();
     for site in sites {
         let live_status = match docker::compose_ps(&site.dir()).await {
-            Ok(containers) => {
-                if containers
-                    .iter()
-                    .any(|c| c.service == site.app_service() && c.state == "running")
-                {
-                    "running".to_string()
-                } else {
-                    "stopped".to_string()
-                }
-            }
+            // Same classifier the reconciler uses, so a running-but-unhealthy
+            // container reads as `degraded` in the live view too (plan 23) — not
+            // as a plain `running` that hides the problem.
+            Ok(containers) => match crate::reconcile::classify(&containers, site.app_service()) {
+                crate::reconcile::Observed::Running => "running".to_string(),
+                crate::reconcile::Observed::Degraded => "degraded".to_string(),
+                crate::reconcile::Observed::Down => "stopped".to_string(),
+            },
             // Docker unavailable/off: fall back to the stored status.
             Err(_) => site.status.clone(),
         };

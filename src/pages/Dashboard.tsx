@@ -115,14 +115,17 @@ function useSiteActions(site: SiteWithStatus) {
   const navigate = useNav((s) => s.navigate);
   const router = useRouter((s) => s.status);
   const busy = busyId === site.id;
-  const running = site.live_status === "running";
+  // "up" covers degraded (containers running but unhealthy, plan 23): it can
+  // still be opened and stopped, so it toggles and links like a running site.
+  const up = site.live_status === "running" || site.live_status === "degraded";
   const url = siteUrl(site.slug, sitePort(site), router);
 
   return {
     busy,
+    up,
     url,
     open: () => void openUrl(url),
-    toggle: () => void (running ? stop(site.id) : start(site.id)),
+    toggle: () => void (up ? stop(site.id) : start(site.id)),
     details: () => navigate({ name: "site", id: site.id }),
     remove: () => {
       if (window.confirm(`Delete "${site.name}"? This removes its containers, database and files.`)) {
@@ -182,7 +185,6 @@ function GridCard({
   onClone: (site: SiteWithStatus) => void;
 }) {
   const a = useSiteActions(site);
-  const running = site.live_status === "running";
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 transition-colors hover:border-zinc-700">
       <div className="flex items-start justify-between gap-2">
@@ -204,7 +206,7 @@ function GridCard({
       </div>
 
       <div className="mt-3.5 flex flex-wrap gap-1.5">
-        {running && (
+        {a.up && (
           <button onClick={a.open} className={ghostBtn}>
             Open
           </button>
@@ -214,7 +216,7 @@ function GridCard({
           disabled={a.busy || site.live_status === "creating"}
           className={ghostBtn}
         >
-          {running ? "Stop" : "Start"}
+          {a.up ? "Stop" : "Start"}
         </button>
         <button onClick={a.details} className={ghostBtn}>
           Details
@@ -273,7 +275,6 @@ function ListRow({
   onClone: (site: SiteWithStatus) => void;
 }) {
   const a = useSiteActions(site);
-  const running = site.live_status === "running";
   return (
     <tr className="border-b border-zinc-800/60 transition-colors last:border-0 hover:bg-zinc-900">
       <td className="px-4 py-2.5">
@@ -295,7 +296,7 @@ function ListRow({
       </td>
       <td className="px-4 py-2.5">
         <div className="flex justify-end gap-1.5">
-          {running && (
+          {a.up && (
             <button onClick={a.open} className={ghostBtn}>
               Open
             </button>
@@ -305,7 +306,7 @@ function ListRow({
             disabled={a.busy || site.live_status === "creating"}
             className={ghostBtn}
           >
-            {running ? "Stop" : "Start"}
+            {a.up ? "Stop" : "Start"}
           </button>
           <button onClick={a.details} className={ghostBtn}>
             Details

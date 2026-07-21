@@ -606,6 +606,8 @@ async fn cmd_list(state: &AppState, json: bool) -> Result<(), String> {
             let padded = format!("{:<w$}", c, w = w[i]);
             let cell = match (i, c.as_str()) {
                 (1, "running") => ok(&padded),
+                // Degraded = up but unhealthy (plan 23) — amber, not dim.
+                (1, "degraded") => warn(&padded),
                 (1, _) => dim(&padded),
                 _ => padded,
             };

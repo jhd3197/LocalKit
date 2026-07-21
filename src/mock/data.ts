@@ -103,6 +103,27 @@ export const sites: MockSite[] = [
     remote_site_id: 12,
     ...WP_KIND,
   },
+  // Up but unhealthy (plan 23): containers are running yet the app is failing
+  // its health check, so the reconciler settled it to `degraded` — amber badge,
+  // still openable and stoppable, distinct from both running and stopped.
+  {
+    id: "site-recipe-vault",
+    name: "Recipe Vault",
+    slug: "recipe-vault",
+    path: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites\\recipe-vault",
+    port: 8086,
+    wp_version: "6.6",
+    php_version: "8.2",
+    status: "degraded",
+    live_status: "degraded",
+    admin_user: "admin",
+    admin_pass: "whisk-basil-6620",
+    created_at: "2026-07-11T08:30:00Z",
+    db_password: "m4ri4-r3c1p3-7788",
+    connection_id: null,
+    remote_site_id: null,
+    ...WP_KIND,
+  },
   {
     id: "site-hiking-blog",
     name: "Hiking Blog",

@@ -119,15 +119,21 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         let state = app.state::<AppState>();
         let mut submenu = SubmenuBuilder::with_id(app, "sites", "Sites");
         for site in &sites {
-            let running = site.status == "running";
-            let dot = if running { "●" } else { "○" };
+            // "up" covers degraded (containers running but unhealthy, plan 23):
+            // still openable and stoppable, with its own half-filled dot.
+            let up = site.status == "running" || site.status == "degraded";
+            let dot = match site.status.as_str() {
+                "running" => "●",
+                "degraded" => "◐",
+                _ => "○",
+            };
             let open = MenuItemBuilder::with_id(
                 format!("{ID_OPEN}{}", site.id),
                 format!("Open {} in browser", site_url(&state, site)),
             )
-            .enabled(running)
+            .enabled(up)
             .build(app)?;
-            let toggle = if running {
+            let toggle = if up {
                 MenuItemBuilder::with_id(format!("{ID_STOP}{}", site.id), "Stop").build(app)?
             } else {
                 MenuItemBuilder::with_id(format!("{ID_START}{}", site.id), "Start").build(app)?

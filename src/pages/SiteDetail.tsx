@@ -96,6 +96,10 @@ export default function SiteDetail({ id }: { id: string }) {
 
   const url = siteUrl(detail.slug, sitePort(detail), router);
   const running = detail.live_status === "running";
+  // Up = running or degraded (containers up but unhealthy, plan 23). WP-only
+  // affordances (login, wp-cli) stay gated on a healthy `running`; only the
+  // Stop control treats a degraded site as stoppable.
+  const up = running || detail.live_status === "degraded";
   const caps = detail.capabilities;
 
   // WP Admin one-click login: default to the install admin, picker overrides.
@@ -129,7 +133,7 @@ export default function SiteDetail({ id }: { id: string }) {
           <StatusBadge status={detail.live_status} />
         </div>
         <div className="flex gap-2">
-          {running ? (
+          {up ? (
             <button
               onClick={() => void stop(id)}
               disabled={busyId === id}
