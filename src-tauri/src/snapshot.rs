@@ -277,10 +277,11 @@ pub async fn create(
 
     // WordPress (and any db_sync kind) exports its database; a code-only docker
     // app snapshots its files alone, so `db.sql.gz` is empty and restore knows
-    // to skip the import.
+    // to skip the import. The export is engine-native for php (mysqldump), wp-cli
+    // for WordPress — `dbsync::export_sql` dispatches (plan 26).
     let db_gz = if s.capabilities.db_sync {
         site::emit(app, site_id, "snapshot", "Exporting database...");
-        let sql = export_db(&dir).await?;
+        let sql = crate::dbsync::export_sql(&s, &dir).await?;
         gzip(sql.as_bytes())?
     } else {
         Vec::new()
@@ -323,25 +324,6 @@ pub async fn create(
 
     prune(state, site_id);
     Ok(snap)
-}
-
-/// `wp db export -` with a short retry loop: on a stopped site the first call
-/// races the database container's first boot (same reason `wordpress::install`
-/// retries).
-async fn export_db(dir: &Path) -> Result<String, String> {
-    const ATTEMPTS: u32 = 5;
-    let mut last = String::new();
-    for attempt in 1..=ATTEMPTS {
-        match docker::compose_run(dir, "wpcli", &["wp", "db", "export", "-"]).await {
-            Ok(sql) if !sql.trim().is_empty() => return Ok(sql),
-            Ok(_) => last = "the database export came back empty".into(),
-            Err(e) => last = e,
-        }
-        if attempt < ATTEMPTS {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        }
-    }
-    Err(format!("failed to export the database: {last}"))
 }
 
 /// Apply the retention policy. Best effort — a failed prune must never fail
@@ -409,7 +391,8 @@ pub async fn restore(
 
     if let Some(sql) = &sql {
         site::emit(app, site_id, "restore", "Importing database...");
-        wordpress::import_db(&dir, sql).await?;
+        // Engine-native for php, wp-cli for WordPress (plan 26).
+        crate::dbsync::import_sql(&s, &dir, sql).await?;
     }
 
     let what = if s.config.sync_path == "." {

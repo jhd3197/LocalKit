@@ -300,6 +300,96 @@ pub async fn compose_exec(dir: &Path, service: &str, args: &[&str]) -> Result<St
     compose(dir, &full).await
 }
 
+/// Start a single service and wait for it to be healthy/running:
+/// `docker compose up -d --wait <service>`. Used before an engine-native DB
+/// dump/import (plan 26) so the `db` container is up and past its healthcheck
+/// even when the site itself was stopped — the wp-cli path got this for free via
+/// `compose run`'s `depends_on`, the engine clients need it explicit.
+pub async fn compose_up_wait_service(dir: &Path, service: &str) -> Result<(), String> {
+    compose(dir, &["up", "-d", "--wait", service]).await.map(|_| ())
+}
+
+/// `compose exec -T` with environment variables (`-e K=V`) passed to the
+/// container — the injection-free way to hand a DB client its password
+/// (`MYSQL_PWD` / `PGPASSWORD`) so it never lands on a command line (plan 26).
+pub async fn compose_exec_env(
+    dir: &Path,
+    service: &str,
+    env: &[(&str, &str)],
+    args: &[&str],
+) -> Result<String, String> {
+    let env_flags: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let mut full: Vec<&str> = vec!["exec", "-T"];
+    for e in &env_flags {
+        full.push("-e");
+        full.push(e);
+    }
+    full.push(service);
+    full.extend_from_slice(args);
+    compose(dir, &full).await
+}
+
+/// Like `compose_exec_env`, but pumps `input` into the command's stdin — used to
+/// stream a SQL dump into `mysql`/`psql` running inside the DB container (plan
+/// 26). Mirrors `compose_run_reader`'s stdin pump, but `exec`s into the already
+/// running service rather than a throwaway `run --rm` container.
+pub async fn compose_exec_env_stdin_reader(
+    dir: &Path,
+    service: &str,
+    env: &[(&str, &str)],
+    args: &[&str],
+    input: &mut (dyn std::io::Read + Send),
+) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
+    if !dir.exists() {
+        return Err(format!("site directory not found: {}", dir.display()));
+    }
+    let env_flags: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let mut full: Vec<&str> = vec!["exec", "-T"];
+    for e in &env_flags {
+        full.push("-e");
+        full.push(e);
+    }
+    full.push(service);
+    full.extend_from_slice(args);
+    let mut child = no_window(
+        Command::new("docker")
+            .arg("compose")
+            .args(&full)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .spawn()
+    .map_err(|e| format!("failed to run docker compose: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            match input.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if stdin.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => return Err(format!("failed to read the input stream: {e}")),
+            }
+        }
+        let _ = stdin.shutdown().await;
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("failed to run docker compose: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(friendly_error(&String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
 /// Copy a file out of a service container:
 /// `docker compose cp <service>:<src> <dest>`
 pub async fn compose_cp(dir: &Path, service: &str, src: &str, dest: &Path) -> Result<(), String> {

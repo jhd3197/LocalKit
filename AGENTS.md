@@ -68,6 +68,10 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          profile-gated adminer) + create (empty skeleton or
                          import a code folder into app/)
   src/wordpress.rs       wp-cli via `docker compose run --rm wpcli wp ...`
+  src/dbsync.rs          plan-26 engine-native DB export/import dispatched on
+                         kind+engine: wp-cli for WordPress, mariadb-dump/mariadb
+                         (or mysqldump/mysql, pg_dump/psql) inside the db
+                         container for php; password via MYSQL_PWD/PGPASSWORD
   src/router.rs          M6 local domains: shared Caddy router (`*.test`),
                          hosts-file block + elevated writer, CA trust, status
   src/tray.rs            M8 system tray: close-to-tray, tray menu with quick
@@ -282,7 +286,17 @@ src-tauri/               Rust backend (also a cargo workspace root)
   wp-cli) via its generated mariadb + Adminer. `render_compose`,
   `db_name`/`db_user` and the Adminer/SiteDetail DB creds are kind-aware (read
   from `.env`, WP defaults preserved). WordPress is the zero-change
-  path — the config defaults ARE the old literals. Backend commands refuse a
+  path — the config defaults ARE the old literals.
+- **Engine-native DB sync (plan 26):** `dbsync::export_sql`/`import_sql` are the
+  one dispatch for a site's database — WordPress goes through wp-cli, every
+  other `db_sync` kind dumps engine-native inside its `db` container
+  (`config.db_engine`/`db_service`): mariadb-dump/mariadb, mysqldump/mysql,
+  pg_dump/psql. The DB is brought up + waited on first
+  (`compose up -d --wait <db>`) so a stopped-site snapshot still dumps, and the
+  password is passed as `MYSQL_PWD`/`PGPASSWORD` (never on the command line).
+  `snapshot::create`/`restore` route through it, so php sites get real DB
+  snapshots. Every engine × op has an explicit handler or a clean unsupported
+  error (unit-tested dispatch table). Backend commands refuse a
   missing capability via `Site::require(cap, action)` ("… not supported for
   <kind> sites"); both frontends **hide** rather than error (gate on
   `site.capabilities.*` / `app_info.kinds`). A new kind ships only when every

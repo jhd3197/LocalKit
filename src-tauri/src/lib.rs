@@ -1,5 +1,6 @@
 pub mod blueprint;
 pub mod db;
+pub mod dbsync;
 pub mod docker;
 pub mod dockerapp;
 pub mod keystore;

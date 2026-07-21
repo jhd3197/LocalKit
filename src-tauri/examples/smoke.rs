@@ -697,11 +697,63 @@ async fn php_smoke(state: &AppState) -> Result<(), String> {
     );
     assert_eq!(s.status, "running", "db status should be running");
 
+    // Engine-native DB snapshot round-trip (plan 26 phase 2): mysqldump export +
+    // mysql import, no wp-cli. Write a marker row, snapshot, wipe it, restore,
+    // and assert it is back — proving the mariadb dump/restore path works.
+    let dir = s.dir();
+    let pw = localkit_lib::site::db_password(&dir);
+    php_sql(
+        &dir,
+        &pw,
+        "CREATE TABLE lk_marker (id INT PRIMARY KEY, note VARCHAR(64)); \
+         INSERT INTO lk_marker VALUES (1, 'before-snapshot');",
+    )
+    .await?;
+    let snap = snapshot::create(None, state, &s.id, snapshot::KIND_MANUAL, Some("php smoke".into()))
+        .await?;
+    assert!(snap.db_bytes > 0, "php snapshot captured no database (empty dump)");
+    println!("snapshot took an engine-native dump ({} db bytes)", snap.db_bytes);
+
+    php_sql(&dir, &pw, "DELETE FROM lk_marker;").await?;
+    let gone = php_query(&dir, &pw, "SELECT COUNT(*) FROM lk_marker;").await?;
+    assert_eq!(gone.trim(), "0", "marker row was not deleted before restore");
+
+    snapshot::restore(None, state, &s.id, &snap.id).await?;
+    let restored = php_query(&dir, &pw, "SELECT note FROM lk_marker WHERE id=1;").await?;
+    assert_eq!(
+        restored.trim(),
+        "before-snapshot",
+        "engine-native restore did not bring the marker row back"
+    );
+    println!("engine-native snapshot restore round-trip OK");
+
     // Clean up wholesale (drop snapshots too — this is a throwaway).
     site::delete(None, state, &s.id, true).await?;
     assert!(!s.dir().exists(), "php site dir survived delete");
     println!("PHP SMOKE OK on {url}");
     Ok(())
+}
+
+/// Run a SQL statement against a php site's mariadb via its own client.
+async fn php_sql(dir: &Path, pw: &str, sql: &str) -> Result<String, String> {
+    docker::compose_exec_env(
+        dir,
+        "db",
+        &[("MYSQL_PWD", pw)],
+        &["mariadb", "-u", "laravel", "laravel", "-e", sql],
+    )
+    .await
+}
+
+/// Run a scalar query (no column headers) against a php site's mariadb.
+async fn php_query(dir: &Path, pw: &str, sql: &str) -> Result<String, String> {
+    docker::compose_exec_env(
+        dir,
+        "db",
+        &[("MYSQL_PWD", pw)],
+        &["mariadb", "-N", "-B", "-u", "laravel", "laravel", "-e", sql],
+    )
+    .await
 }
 
 async fn delete(state: &AppState) -> Result<(), String> {
