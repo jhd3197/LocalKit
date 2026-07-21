@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
   Blueprint,
+  DockerProjectInspection,
   DockerStatus,
   RemoteWpSite,
   RouterStatus,
@@ -28,6 +29,17 @@ export const ipc = {
   getSite: (id: string) => invoke<SiteDetail>("get_site", { id }),
   createSite: (name: string, wpVersion: string, phpVersion: string) =>
     invoke<Site>("create_site", { name, wpVersion, phpVersion }),
+  /** Inspect a folder as a candidate Docker project (plan 22). */
+  inspectDockerProject: (path: string) =>
+    invoke<DockerProjectInspection>("inspect_docker_project", { path }),
+  /** Import a Docker project as a new local site (plan 22). */
+  importDockerProject: (
+    name: string,
+    path: string,
+    service: string,
+    appPort: number,
+    includeAll = false
+  ) => invoke<Site>("import_docker_project", { name, path, service, appPort, includeAll }),
   cloneSite: (id: string, newName: string) =>
     invoke<Site>("clone_site", { id, newName }),
   startSite: (id: string) => invoke<Site>("start_site", { id }),

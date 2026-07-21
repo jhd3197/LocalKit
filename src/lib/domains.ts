@@ -1,7 +1,16 @@
-import type { RouterStatus } from "./types";
+import type { RouterStatus, Site } from "./types";
 
 /** TLD for local domains (kept in sync with `router::TLD` in the backend). */
 export const DOMAIN_TLD = "test";
+
+/**
+ * The host port a site is actually reachable at — a docker project's own
+ * published `app_port` when it has one, otherwise the reserved site port
+ * (WordPress). Mirrors `SiteConfig::upstream_port` on the backend (plan 22).
+ */
+export function sitePort(site: Pick<Site, "port" | "config">): number {
+  return site.config?.app_port ?? site.port;
+}
 
 /** Default router host ports — mirrors `router::DEFAULT_*_PORT`. */
 export const DEFAULT_HTTP_PORT = 80;

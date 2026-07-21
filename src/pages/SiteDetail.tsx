@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../lib/ipc";
-import { siteUrl } from "../lib/domains";
+import { siteUrl, sitePort } from "../lib/domains";
 import { useNav } from "../stores/nav";
 import { useRouter } from "../stores/router";
 import { useSites } from "../stores/sites";
 import type { SiteDetail as SiteDetailData, WpUser } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
+import KindBadge from "../components/KindBadge";
 import CopyButton from "../components/CopyButton";
 import PushPanel from "../components/PushPanel";
 import SnapshotsPanel from "../components/SnapshotsPanel";
@@ -69,17 +70,18 @@ export default function SiteDetail({ id }: { id: string }) {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
 
-  // Load WP users for the WP Admin login picker (running sites only).
+  // Load WP users for the WP Admin login picker (running WordPress sites only).
+  const canLogin = detail?.capabilities.one_click_login ?? false;
   useEffect(() => {
     setWpUsers(null);
     setLoginUserId(null);
-    if (detail?.live_status === "running") {
+    if (canLogin && detail?.live_status === "running") {
       ipc
         .siteWpUsers(id)
         .then(setWpUsers)
         .catch(() => setWpUsers(null));
     }
-  }, [id, detail?.live_status]);
+  }, [id, canLogin, detail?.live_status]);
 
   if (!detail) {
     return (
@@ -92,8 +94,9 @@ export default function SiteDetail({ id }: { id: string }) {
     );
   }
 
-  const url = siteUrl(detail.slug, detail.port, router);
+  const url = siteUrl(detail.slug, sitePort(detail), router);
   const running = detail.live_status === "running";
+  const caps = detail.capabilities;
 
   // WP Admin one-click login: default to the install admin, picker overrides.
   const defaultUserId =
@@ -122,6 +125,7 @@ export default function SiteDetail({ id }: { id: string }) {
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-semibold text-white">{detail.name}</h1>
+          <KindBadge kind={detail.kind} />
           <StatusBadge status={detail.live_status} />
         </div>
         <div className="flex gap-2">
@@ -148,22 +152,26 @@ export default function SiteDetail({ id }: { id: string }) {
           >
             Terminal
           </button>
-          <button
-            onClick={() => setCloneOpen(true)}
-            disabled={busyId === id}
-            title="Copy this site's database and files into a new site"
-            className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
-          >
-            Clone
-          </button>
-          <button
-            onClick={() => setBlueprintOpen(true)}
-            disabled={busyId === id}
-            title="Save this site's stack as a reusable blueprint"
-            className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
-          >
-            Save as blueprint
-          </button>
+          {caps.wp_tools && (
+            <button
+              onClick={() => setCloneOpen(true)}
+              disabled={busyId === id}
+              title="Copy this site's database and files into a new site"
+              className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+            >
+              Clone
+            </button>
+          )}
+          {caps.wp_tools && (
+            <button
+              onClick={() => setBlueprintOpen(true)}
+              disabled={busyId === id}
+              title="Save this site's stack as a reusable blueprint"
+              className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+            >
+              Save as blueprint
+            </button>
+          )}
           <button
             onClick={() => setConfirmDelete(true)}
             disabled={busyId === id}
@@ -200,7 +208,7 @@ export default function SiteDetail({ id }: { id: string }) {
         />
       )}
 
-      <RouterConflictBanner slug={detail.slug} port={detail.port} />
+      <RouterConflictBanner slug={detail.slug} port={sitePort(detail)} />
 
       <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* URL */}
@@ -208,7 +216,9 @@ export default function SiteDetail({ id }: { id: string }) {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Site</h2>
           <p className="mt-3 font-mono text-sm text-violet-400">{url}</p>
           <p className="mt-1 text-xs text-zinc-600">
-            WordPress {detail.wp_version} · PHP {detail.php_version}
+            {caps.wp_tools
+              ? `WordPress ${detail.wp_version} · PHP ${detail.php_version}`
+              : `Docker Compose · app service “${detail.config.service}”`}
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <button
@@ -218,15 +228,17 @@ export default function SiteDetail({ id }: { id: string }) {
             >
               Open site
             </button>
-            <button
-              onClick={() => void wpAdminLogin()}
-              disabled={!running || loggingIn}
-              title={running ? "Log straight into wp-admin — no password needed" : "Start the site to log in"}
-              className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
-            >
-              {loggingIn ? "Logging in…" : "WP Admin"}
-            </button>
-            {running && wpUsers && wpUsers.length > 1 && (
+            {caps.one_click_login && (
+              <button
+                onClick={() => void wpAdminLogin()}
+                disabled={!running || loggingIn}
+                title={running ? "Log straight into wp-admin — no password needed" : "Start the site to log in"}
+                className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+              >
+                {loggingIn ? "Logging in…" : "WP Admin"}
+              </button>
+            )}
+            {caps.one_click_login && running && wpUsers && wpUsers.length > 1 && (
               <select
                 value={selectedUserId ?? ""}
                 onChange={(e) => setLoginUserId(Number(e.target.value))}
@@ -244,7 +256,8 @@ export default function SiteDetail({ id }: { id: string }) {
           {loginError && <p className="mt-2 text-xs text-red-400">{loginError}</p>}
         </section>
 
-        {/* Credentials */}
+        {/* Credentials (WordPress only) */}
+        {caps.one_click_login && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">WP Admin credentials</h2>
           <dl className="mt-3 space-y-2 text-sm">
@@ -262,8 +275,10 @@ export default function SiteDetail({ id }: { id: string }) {
             </div>
           </dl>
         </section>
+        )}
 
-        {/* Database */}
+        {/* Database (needs the db_gui capability — hidden for docker apps) */}
+        {caps.db_gui && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Database (MariaDB)</h2>
           <dl className="mt-3 space-y-2 text-sm">
@@ -283,8 +298,10 @@ export default function SiteDetail({ id }: { id: string }) {
             ))}
           </dl>
         </section>
+        )}
 
-        {/* wp-cli info */}
+        {/* wp-cli info (WordPress only) */}
+        {caps.wp_tools && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">WordPress info (wp-cli)</h2>
@@ -330,17 +347,22 @@ export default function SiteDetail({ id }: { id: string }) {
             </>
           )}
         </section>
+        )}
       </div>
 
-      {/* Snapshots + one-click restore (plan 17) */}
-      <div className="mt-4">
-        <SnapshotsPanel siteId={id} />
-      </div>
+      {/* Snapshots + one-click restore (plan 17) — every kind that supports them */}
+      {caps.snapshots && (
+        <div className="mt-4">
+          <SnapshotsPanel siteId={id} />
+        </div>
+      )}
 
-      {/* ServerKit push/pull (M4) */}
-      <div className="mt-4">
-        <PushPanel siteId={id} running={running} />
-      </div>
+      {/* ServerKit push/pull (M4) — WordPress only until plan 26 */}
+      {caps.wp_tools && (
+        <div className="mt-4">
+          <PushPanel siteId={id} running={running} />
+        </div>
+      )}
 
       {/* Logs */}
       <section className="mt-4 rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">

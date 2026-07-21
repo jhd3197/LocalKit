@@ -4,6 +4,7 @@
 import type {
   AppInfo,
   Blueprint,
+  Capabilities,
   RemoteWpSite,
   RouterStatus,
   ServerKitConnection,
@@ -14,13 +15,50 @@ import type {
   WpInfo,
 } from "../lib/types";
 
+/** Capability matrices (plan 22) — mirror `site::Capabilities` in the backend. */
+export const WP_CAPS: Capabilities = {
+  domains: true,
+  terminal: true,
+  logs: true,
+  snapshots: true,
+  db_gui: true,
+  db_sync: true,
+  code_sync: true,
+  one_click_login: true,
+  wp_tools: true,
+  search_replace: true,
+};
+export const DOCKER_CAPS: Capabilities = {
+  domains: true,
+  terminal: true,
+  logs: true,
+  snapshots: true,
+  db_gui: false,
+  db_sync: false,
+  code_sync: true,
+  one_click_login: false,
+  wp_tools: false,
+  search_replace: false,
+};
+
 // Keep in sync with WP_VERSIONS / PHP_VERSIONS in src-tauri/src/site.rs.
 export const appInfo: AppInfo = {
   data_dir: "C:\\Users\\demo\\AppData\\Roaming\\localkit",
   sites_dir: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites",
   wp_versions: ["6.7", "6.6", "6.5"],
   php_versions: ["8.3", "8.2", "8.1"],
+  kinds: [
+    { kind: "wordpress", capabilities: WP_CAPS },
+    { kind: "docker", capabilities: DOCKER_CAPS },
+  ],
 };
+
+/** The WordPress kind fields every WP mock site carries (plan 22). */
+const WP_KIND = {
+  kind: "wordpress",
+  config: { service: "wordpress", sync_path: "wp-content" },
+  capabilities: WP_CAPS,
+} as const;
 
 interface MockSite extends SiteWithStatus {
   db_password: string;
@@ -43,6 +81,7 @@ export const sites: MockSite[] = [
     db_password: "m4ri4-pix3l-9917",
     connection_id: null,
     remote_site_id: null,
+    ...WP_KIND,
   },
   {
     id: "site-acme-corporate",
@@ -62,6 +101,7 @@ export const sites: MockSite[] = [
     // badge on the dashboard.
     connection_id: "conn-prod",
     remote_site_id: 12,
+    ...WP_KIND,
   },
   {
     id: "site-hiking-blog",
@@ -79,6 +119,7 @@ export const sites: MockSite[] = [
     db_password: "m4ri4-h1k3-3308",
     connection_id: null,
     remote_site_id: null,
+    ...WP_KIND,
   },
   {
     id: "site-client-demo",
@@ -96,6 +137,30 @@ export const sites: MockSite[] = [
     db_password: "m4ri4-d3m0-1120",
     connection_id: null,
     remote_site_id: null,
+    ...WP_KIND,
+  },
+  // A generic Docker app (plan 22) — proves the capability gating: no WP Admin,
+  // no credentials/database panels, no clone/blueprint/push, just the generic
+  // lifecycle, logs, terminal, a `.test` domain, and code snapshots.
+  {
+    id: "site-analytics-api",
+    name: "Analytics API",
+    slug: "analytics-api",
+    path: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites\\analytics-api",
+    port: 8085,
+    wp_version: "",
+    php_version: "",
+    status: "running",
+    live_status: "running",
+    admin_user: "",
+    admin_pass: "",
+    created_at: "2026-07-14T16:20:00Z",
+    db_password: "",
+    connection_id: null,
+    remote_site_id: null,
+    kind: "docker",
+    config: { service: "api", sync_path: ".", app_port: 4000, db_engine: "postgres", db_service: "db" },
+    capabilities: DOCKER_CAPS,
   },
 ];
 
@@ -146,6 +211,11 @@ export const siteLogs: Record<string, string> = {
   ].join("\n"),
   "site-hiking-blog": "No logs — containers are stopped.",
   "site-client-demo": "Creating containers…",
+  "site-analytics-api": [
+    'api-1  | {"level":"info","msg":"listening on :4000","ts":"2026-07-14T16:20:41Z"}',
+    'api-1  | {"level":"info","msg":"connected to postgres","ts":"2026-07-14T16:20:42Z"}',
+    'db-1   | 2026-07-14 16:20:40 UTC [1] LOG:  database system is ready to accept connections',
+  ].join("\n"),
 };
 
 // M6 local domains: fictional router state. Enabled + running so dashboard /
@@ -295,6 +365,21 @@ export const snapshots: Record<string, Snapshot[]> = {
       db_bytes: 1_884_204,
       code_bytes: 48_220_118,
       wp_version: "6.5",
+    },
+  ],
+  // A docker app's snapshot is code-only — the DB dump is empty (db_bytes 0).
+  "site-analytics-api": [
+    {
+      id: "20260714-170000-000",
+      site_id: "site-analytics-api",
+      site_name: "Analytics API",
+      site_slug: "analytics-api",
+      created_at: "2026-07-14T17:00:00Z",
+      kind: "manual",
+      note: "before the schema change",
+      db_bytes: 0,
+      code_bytes: 3_204_880,
+      wp_version: "",
     },
   ],
 };

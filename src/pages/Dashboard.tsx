@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { siteUrl } from "../lib/domains";
+import { siteUrl, sitePort } from "../lib/domains";
 import { useNav } from "../stores/nav";
 import { useSiteView } from "../stores/settings";
 import { useRouter } from "../stores/router";
 import { useServerKit } from "../stores/serverkit";
 import { useSites } from "../stores/sites";
 import { useBlueprints } from "../stores/blueprints";
-import type { SiteWithStatus } from "../lib/types";
+import { KIND_DOCKER, type SiteWithStatus } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
+import KindBadge from "../components/KindBadge";
 import CloneSiteDialog from "../components/CloneSiteDialog";
 import { GridIcon, LinkIcon, ListIcon, PlusIcon } from "../components/icons";
 
@@ -98,6 +99,14 @@ export default function Dashboard() {
   );
 }
 
+/** The stack line for a site card/row — versions for WP, the app service for
+ * a docker project (whose wp/php versions are empty). */
+function stackLabel(site: SiteWithStatus): string {
+  return site.kind === KIND_DOCKER
+    ? `Docker · ${site.config.service}`
+    : `WP ${site.wp_version} · PHP ${site.php_version}`;
+}
+
 function useSiteActions(site: SiteWithStatus) {
   const busyId = useSites((s) => s.busyId);
   const start = useSites((s) => s.start);
@@ -107,7 +116,7 @@ function useSiteActions(site: SiteWithStatus) {
   const router = useRouter((s) => s.status);
   const busy = busyId === site.id;
   const running = site.live_status === "running";
-  const url = siteUrl(site.slug, site.port, router);
+  const url = siteUrl(site.slug, sitePort(site), router);
 
   return {
     busy,
@@ -177,19 +186,20 @@ function GridCard({
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 transition-colors hover:border-zinc-700">
       <div className="flex items-start justify-between gap-2">
-        <button
-          onClick={a.details}
-          className="text-left text-[15px] font-semibold tracking-tight text-white hover:text-violet-400"
-        >
-          {site.name}
-        </button>
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            onClick={a.details}
+            className="truncate text-left text-[15px] font-semibold tracking-tight text-white hover:text-violet-400"
+          >
+            {site.name}
+          </button>
+          <KindBadge kind={site.kind} />
+        </div>
         <StatusBadge status={site.live_status} />
       </div>
       <p className="mt-1 font-mono text-xs text-zinc-500">{a.url}</p>
       <div className="mt-1 flex items-center gap-2 text-xs text-zinc-600">
-        <span>
-          WordPress {site.wp_version} · PHP {site.php_version}
-        </span>
+        <span>{stackLabel(site)}</span>
         <ImportedBadge site={site} />
       </div>
 
@@ -209,13 +219,15 @@ function GridCard({
         <button onClick={a.details} className={ghostBtn}>
           Details
         </button>
-        <button
-          onClick={() => onClone(site)}
-          disabled={a.busy || site.live_status === "creating"}
-          className={ghostBtn}
-        >
-          Clone
-        </button>
+        {site.capabilities.wp_tools && (
+          <button
+            onClick={() => onClone(site)}
+            disabled={a.busy || site.live_status === "creating"}
+            className={ghostBtn}
+          >
+            Clone
+          </button>
+        )}
         <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
           Delete
         </button>
@@ -272,13 +284,12 @@ function ListRow({
           >
             {site.name}
           </button>
+          <KindBadge kind={site.kind} />
           <ImportedBadge site={site} />
         </div>
       </td>
       <td className="px-4 py-2.5 font-mono text-xs text-zinc-500">{a.url}</td>
-      <td className="px-4 py-2.5 text-xs text-zinc-500">
-        WP {site.wp_version} · PHP {site.php_version}
-      </td>
+      <td className="px-4 py-2.5 text-xs text-zinc-500">{stackLabel(site)}</td>
       <td className="px-4 py-2.5">
         <StatusBadge status={site.live_status} />
       </td>
@@ -299,13 +310,15 @@ function ListRow({
           <button onClick={a.details} className={ghostBtn}>
             Details
           </button>
-          <button
-            onClick={() => onClone(site)}
-            disabled={a.busy || site.live_status === "creating"}
-            className={ghostBtn}
-          >
-            Clone
-          </button>
+          {site.capabilities.wp_tools && (
+            <button
+              onClick={() => onClone(site)}
+              disabled={a.busy || site.live_status === "creating"}
+              className={ghostBtn}
+            >
+              Clone
+            </button>
+          )}
           <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
             Delete
           </button>

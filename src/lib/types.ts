@@ -1,3 +1,35 @@
+/** Site kinds (plan 22). Mirrors `site::KIND_*` in the backend. */
+export const KIND_WORDPRESS = "wordpress";
+export const KIND_DOCKER = "docker";
+
+/**
+ * What a site's kind (+ config) supports (plan 22). Every capability the UI
+ * gates on lives here — WordPress claims all of them; a docker app claims
+ * domains/terminal/logs/snapshots/code_sync.
+ */
+export interface Capabilities {
+  domains: boolean;
+  terminal: boolean;
+  logs: boolean;
+  snapshots: boolean;
+  db_gui: boolean;
+  db_sync: boolean;
+  code_sync: boolean;
+  one_click_login: boolean;
+  wp_tools: boolean;
+  search_replace: boolean;
+}
+
+/** Per-kind settings (plan 22). Optional fields are omitted by the backend. */
+export interface SiteConfig {
+  service: string;
+  sync_path: string;
+  /** Host port the app is reachable at; absent = the site port (WordPress). */
+  app_port?: number;
+  db_engine?: string | null;
+  db_service?: string | null;
+}
+
 export interface Site {
   id: string;
   name: string;
@@ -13,6 +45,10 @@ export interface Site {
   /** Plan 18 — set together on sites imported from a ServerKit server. */
   connection_id: string | null;
   remote_site_id: number | null;
+  /** Plan 22 — stack kind, its per-kind config, and derived capabilities. */
+  kind: string;
+  config: SiteConfig;
+  capabilities: Capabilities;
 }
 
 export interface SiteWithStatus extends Site {
@@ -53,11 +89,38 @@ export interface WpUser {
   roles: string;
 }
 
+/** A site kind and the capabilities it advertises (plan 22 `app_info`). */
+export interface KindInfo {
+  kind: string;
+  capabilities: Capabilities;
+}
+
 export interface AppInfo {
   data_dir: string;
   sites_dir: string;
   wp_versions: string[];
   php_versions: string[];
+  kinds: KindInfo[];
+}
+
+/** A service found in a candidate Docker project (plan 22 import dialog). */
+export interface DockerService {
+  name: string;
+  image: string;
+  published_ports: number[];
+  db_engine: string | null;
+}
+
+/** Read-only inspection of a Docker project folder before importing it. */
+export interface DockerProjectInspection {
+  compose_file: string;
+  services: DockerService[];
+  suggested_service: string | null;
+  suggested_port: number | null;
+  db_engine: string | null;
+  db_service: string | null;
+  copy_bytes: number;
+  excluded: string[];
 }
 
 export interface SiteEvent {

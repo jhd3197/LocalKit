@@ -83,6 +83,13 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/** The WordPress kind fields every mock-created site carries (plan 22). */
+const WP_SITE_KIND = {
+  kind: "wordpress",
+  config: { service: "wordpress", sync_path: "wp-content" },
+  capabilities: data.WP_CAPS,
+} as const;
+
 // Mock-only escape hatch: lets the headless verification scripts put the fake
 // backend into states the UI alone can't reach (e.g. "the router died while
 // domains were enabled"). Never present in the real app.
@@ -149,6 +156,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         created_at: new Date().toISOString(),
         connection_id: null,
         remote_site_id: null,
+        ...WP_SITE_KIND,
       };
       data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-n3w-0000" });
       // Flip to running once the fake install finishes.
@@ -208,9 +216,73 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         created_at: new Date().toISOString(),
         connection_id: null,
         remote_site_id: null,
+        ...WP_SITE_KIND,
       };
       data.sites.push({ ...clone, live_status: "creating", db_password: "m4ri4-cl0ne-0001" });
       return clone;
+    }
+
+    case "inspect_docker_project": {
+      // Fictional inspection so the "Import a Docker project" flow is reviewable
+      // without a real folder — any path returns a plausible two-service project.
+      const services = [
+        { name: "api", image: "node:20", published_ports: [4000], db_engine: null },
+        { name: "db", image: "postgres:16", published_ports: [], db_engine: "postgres" },
+      ];
+      return {
+        compose_file: "docker-compose.yml",
+        services,
+        suggested_service: "api",
+        suggested_port: 4000,
+        db_engine: "postgres",
+        db_service: "db",
+        copy_bytes: 3_204_880,
+        excluded: [".git", "node_modules", "vendor"],
+      };
+    }
+
+    case "import_docker_project": {
+      const name = String(a.name ?? "").trim();
+      if (!name) throw "Site name is required";
+      const service = String(a.service ?? "app");
+      const port = Number(a.appPort) || 4000;
+      const slug = slugify(name);
+      const id = `site-${slug}`;
+      const stages: Array<[string, string]> = [
+        ["files", "Copying the Docker project…"],
+        ["pulling", "Pulling images (first run can take a few minutes)…"],
+        ["containers", "Starting containers…"],
+        ["waiting", "Waiting for the app to come online…"],
+        ["done", `${name} imported — now running at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        const s = data.sites.find((x) => x.id === id);
+        if (s) s.status = s.live_status = "running";
+      })();
+      const site: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: "",
+        php_version: "",
+        status: "creating",
+        admin_user: "",
+        admin_pass: "",
+        created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+        kind: "docker",
+        config: { service, sync_path: ".", app_port: port, db_engine: "postgres", db_service: "db" },
+        capabilities: data.DOCKER_CAPS,
+      };
+      data.sites.push({ ...site, live_status: "creating", db_password: "" });
+      return site;
     }
 
     case "start_site": {
@@ -385,6 +457,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         created_at: new Date().toISOString(),
         connection_id: null,
         remote_site_id: null,
+        ...WP_SITE_KIND,
       };
       data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-bp-0001" });
       return site;
@@ -533,6 +606,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         created_at: new Date().toISOString(),
         connection_id: connectionId,
         remote_site_id: remoteId,
+        ...WP_SITE_KIND,
       };
       data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-imp0rt-0001" });
       (data.syncHistory[id] ??= []).unshift({

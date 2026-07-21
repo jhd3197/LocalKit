@@ -4,7 +4,21 @@ import { useNav } from "../stores/nav";
 import { useSites } from "../stores/sites";
 import { useBlueprints } from "../stores/blueprints";
 import { useDialog } from "../hooks/useDialog";
-import type { AppInfo, Blueprint } from "../lib/types";
+import type { AppInfo, Blueprint, DockerProjectInspection } from "../lib/types";
+
+type Mode = "wordpress" | "docker";
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit + 1 < units.length) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
 
 export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   const createSite = useSites((s) => s.createSite);
@@ -15,6 +29,7 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   const navigate = useNav((s) => s.navigate);
   const { overlayProps, panelProps } = useDialog(onClose);
 
+  const [mode, setMode] = useState<Mode>("wordpress");
   const [name, setName] = useState("");
   const [wpVersion, setWpVersion] = useState("");
   const [phpVersion, setPhpVersion] = useState("");
@@ -26,6 +41,14 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
   const [blueprint, setBlueprint] = useState<Blueprint | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Docker import (plan 22).
+  const [dockerPath, setDockerPath] = useState("");
+  const [inspecting, setInspecting] = useState(false);
+  const [inspection, setInspection] = useState<DockerProjectInspection | null>(null);
+  const [dockerService, setDockerService] = useState("");
+  const [dockerPort, setDockerPort] = useState<number>(0);
+  const [includeAll, setIncludeAll] = useState(false);
 
   useEffect(() => {
     ipc
@@ -47,13 +70,51 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
     setName(bp ? bp.name : "");
   };
 
+  const switchMode = (m: Mode) => {
+    setMode(m);
+    setError(null);
+    setBlueprint(null);
+  };
+
+  const inspect = async () => {
+    setError(null);
+    setInspection(null);
+    setInspecting(true);
+    try {
+      const info = await ipc.inspectDockerProject(dockerPath.trim());
+      setInspection(info);
+      setDockerService(info.suggested_service ?? info.services[0]?.name ?? "");
+      setDockerPort(info.suggested_port ?? 0);
+      // Default the site name to the folder's basename if none typed yet.
+      if (!name.trim()) {
+        const base = dockerPath.trim().replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "";
+        if (base) setName(base);
+      }
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      setInspecting(false);
+    }
+  };
+
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
-      const site = blueprint
-        ? await createFromBlueprint(blueprint.id, name)
-        : await createSite(name, wpVersion, phpVersion);
+      let site;
+      if (mode === "docker") {
+        site = await ipc.importDockerProject(
+          name.trim(),
+          dockerPath.trim(),
+          dockerService,
+          dockerPort,
+          includeAll
+        );
+      } else if (blueprint) {
+        site = await createFromBlueprint(blueprint.id, name);
+      } else {
+        site = await createSite(name, wpVersion, phpVersion);
+      }
       onClose();
       navigate({ name: "site", id: site.id });
     } catch (e) {
@@ -61,6 +122,32 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
       setBusy(false);
     }
   };
+
+  const tab = (m: Mode, label: string) => (
+    <button
+      onClick={() => switchMode(m)}
+      className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+        mode === m ? "bg-zinc-800 text-violet-300" : "text-zinc-500 hover:text-zinc-300"
+      }`}
+    >
+      {label}
+    </button>
+  );
+
+  const canSubmit =
+    mode === "docker"
+      ? !!inspection && !!name.trim() && !!dockerService && dockerPort > 0
+      : !!name.trim();
+  const primaryLabel =
+    mode === "docker"
+      ? busy
+        ? "Importing…"
+        : "Import project"
+      : busy
+        ? "Creating…"
+        : blueprint
+          ? "Create from blueprint"
+          : "Create site";
 
   return (
     <div
@@ -71,79 +158,110 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
         {...panelProps}
         role="dialog"
         aria-modal="true"
-        aria-label="New WordPress site"
+        aria-label="New site"
         className="flex max-h-[85vh] w-full max-w-md flex-col rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl"
       >
-        <h2 className="text-lg font-semibold text-white">New WordPress site</h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          {blueprint
-            ? "LocalKit will stamp out a new site from this blueprint — its database, files, plugins and theme."
-            : "LocalKit will create a Docker project, start it, and install WordPress automatically."}
+        <h2 className="text-lg font-semibold text-white">New site</h2>
+
+        <div className="mt-3 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950/60 p-1">
+          {tab("wordpress", "WordPress")}
+          {tab("docker", "Docker project")}
+        </div>
+
+        <p className="mt-3 text-sm text-zinc-500">
+          {mode === "docker"
+            ? "LocalKit copies an existing Docker Compose project into a managed site — with a local domain, terminal and logs."
+            : blueprint
+              ? "LocalKit will stamp out a new site from this blueprint — its database, files, plugins and theme."
+              : "LocalKit will create a Docker project, start it, and install WordPress automatically."}
         </p>
 
         <div className="mt-5 flex min-h-0 flex-col gap-4 overflow-y-auto">
-          <label className="block">
-            <span className="mb-1 block text-sm text-zinc-400">Site name</span>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="My Blog"
-              autoFocus
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600"
+          {mode === "docker" ? (
+            <DockerImportFields
+              name={name}
+              onName={setName}
+              path={dockerPath}
+              onPath={(p) => {
+                setDockerPath(p);
+                setInspection(null);
+              }}
+              inspecting={inspecting}
+              inspection={inspection}
+              onInspect={inspect}
+              service={dockerService}
+              onService={setDockerService}
+              port={dockerPort}
+              onPort={setDockerPort}
+              includeAll={includeAll}
+              onIncludeAll={setIncludeAll}
             />
-          </label>
-
-          {blueprint ? (
-            <BlueprintSummary blueprint={blueprint} onClear={() => pickBlueprint(null)} />
           ) : (
-            <div className="grid grid-cols-2 gap-4">
+            <>
               <label className="block">
-                <span className="mb-1 block text-sm text-zinc-400">WordPress</span>
-                <select
-                  value={wpVersion}
-                  onChange={(e) => setWpVersion(e.target.value)}
+                <span className="mb-1 block text-sm text-zinc-400">Site name</span>
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="My Blog"
+                  autoFocus
                   className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600"
-                >
-                  {versions.wp_versions.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
+                />
               </label>
-              <label className="block">
-                <span className="mb-1 block text-sm text-zinc-400">PHP</span>
-                <select
-                  value={phpVersion}
-                  onChange={(e) => setPhpVersion(e.target.value)}
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600"
-                >
-                  {versions.php_versions.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          )}
 
-          {!blueprint && blueprints.length > 0 && (
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                Or start from a blueprint
-              </p>
-              <div className="flex flex-col gap-2">
-                {blueprints.map((bp) => (
-                  <BlueprintRow
-                    key={bp.id}
-                    blueprint={bp}
-                    onUse={() => pickBlueprint(bp)}
-                    onDelete={() => void removeBlueprint(bp.id)}
-                  />
-                ))}
-              </div>
-            </div>
+              {blueprint ? (
+                <BlueprintSummary blueprint={blueprint} onClear={() => pickBlueprint(null)} />
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  <label className="block">
+                    <span className="mb-1 block text-sm text-zinc-400">WordPress</span>
+                    <select
+                      value={wpVersion}
+                      onChange={(e) => setWpVersion(e.target.value)}
+                      className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600"
+                    >
+                      {versions.wp_versions.map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-sm text-zinc-400">PHP</span>
+                    <select
+                      value={phpVersion}
+                      onChange={(e) => setPhpVersion(e.target.value)}
+                      className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600"
+                    >
+                      {versions.php_versions.map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
+
+              {!blueprint && blueprints.length > 0 && (
+                <div>
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                    Or start from a blueprint
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    {blueprints.map((bp) => (
+                      <BlueprintRow
+                        key={bp.id}
+                        blueprint={bp}
+                        onUse={() => pickBlueprint(bp)}
+                        onDelete={() => void removeBlueprint(bp.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           {error && <p className="text-sm text-red-400">{error}</p>}
@@ -159,14 +277,132 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
           </button>
           <button
             onClick={submit}
-            disabled={busy || !name.trim()}
+            disabled={busy || !canSubmit}
             className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
           >
-            {busy ? "Creating…" : blueprint ? "Create from blueprint" : "Create site"}
+            {primaryLabel}
           </button>
         </div>
       </div>
     </div>
+  );
+}
+
+/** The "Import a Docker project" fields — pick a folder, inspect it, choose the
+ * app service and port (plan 22). */
+function DockerImportFields({
+  name,
+  onName,
+  path,
+  onPath,
+  inspecting,
+  inspection,
+  onInspect,
+  service,
+  onService,
+  port,
+  onPort,
+  includeAll,
+  onIncludeAll,
+}: {
+  name: string;
+  onName: (v: string) => void;
+  path: string;
+  onPath: (v: string) => void;
+  inspecting: boolean;
+  inspection: DockerProjectInspection | null;
+  onInspect: () => void;
+  service: string;
+  onService: (v: string) => void;
+  port: number;
+  onPort: (v: number) => void;
+  includeAll: boolean;
+  onIncludeAll: (v: boolean) => void;
+}) {
+  const input =
+    "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-600";
+  return (
+    <>
+      <label className="block">
+        <span className="mb-1 block text-sm text-zinc-400">Project folder</span>
+        <div className="flex gap-2">
+          <input
+            value={path}
+            onChange={(e) => onPath(e.target.value)}
+            placeholder="C:\\path\\to\\my-app  (contains docker-compose.yml)"
+            autoFocus
+            className={input}
+          />
+          <button
+            onClick={onInspect}
+            disabled={inspecting || !path.trim()}
+            className="shrink-0 rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+          >
+            {inspecting ? "Inspecting…" : "Inspect"}
+          </button>
+        </div>
+        <span className="mt-1 block text-xs text-zinc-600">
+          The folder is copied into LocalKit — the original is left untouched.
+        </span>
+      </label>
+
+      {inspection && (
+        <>
+          <label className="block">
+            <span className="mb-1 block text-sm text-zinc-400">Site name</span>
+            <input value={name} onChange={(e) => onName(e.target.value)} placeholder="My App" className={input} />
+          </label>
+
+          <div className="grid grid-cols-2 gap-4">
+            <label className="block">
+              <span className="mb-1 block text-sm text-zinc-400">App service</span>
+              <select value={service} onChange={(e) => onService(e.target.value)} className={input}>
+                {inspection.services.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name} ({s.image || "—"})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-sm text-zinc-400">App port</span>
+              <input
+                type="number"
+                value={port || ""}
+                onChange={(e) => onPort(Number(e.target.value))}
+                placeholder="8080"
+                className={input}
+              />
+            </label>
+          </div>
+
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-xs text-zinc-500">
+            <p>
+              Copying <span className="text-zinc-300">{formatBytes(inspection.copy_bytes)}</span> from{" "}
+              <code className="font-mono">{inspection.compose_file}</code>
+              {inspection.db_engine && (
+                <>
+                  {" "}· detected a <span className="text-sky-300">{inspection.db_engine}</span> database
+                </>
+              )}
+              .
+            </p>
+            <p className="mt-1">
+              Excluding <code className="font-mono">{inspection.excluded.join(", ")}</code> by default.
+            </p>
+            <label className="mt-2 flex items-center gap-1.5 text-zinc-400">
+              <input
+                type="checkbox"
+                checked={includeAll}
+                onChange={(e) => onIncludeAll(e.target.checked)}
+                className="accent-violet-500"
+              />
+              Copy those too
+            </label>
+          </div>
+        </>
+      )}
+    </>
   );
 }
 
