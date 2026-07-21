@@ -1,6 +1,7 @@
 pub mod blueprint;
 pub mod db;
 pub mod docker;
+pub mod dockerapp;
 pub mod router;
 pub mod serverkit;
 pub mod site;
@@ -92,6 +93,41 @@ async fn create_site(
     php_version: String,
 ) -> Result<Site, String> {
     let site = site::create(Some(&app), &state, name, wp_version, php_version).await?;
+    tray::refresh(&app);
+    Ok(site)
+}
+
+/// Inspect a folder as a candidate Docker project (plan 22): its services,
+/// suggested app service + port, DB engine, and copy size. Read-only.
+#[tauri::command]
+async fn inspect_docker_project(
+    path: String,
+) -> Result<dockerapp::DockerProjectInspection, String> {
+    dockerapp::inspect(std::path::Path::new(&path)).await
+}
+
+/// Import a Docker project as a new local site (plan 22): copy the folder into a
+/// managed site dir, record the app service/port, and bring it up.
+#[tauri::command]
+async fn import_docker_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    path: String,
+    service: String,
+    app_port: u16,
+    include_all: Option<bool>,
+) -> Result<Site, String> {
+    let site = dockerapp::import_project(
+        Some(&app),
+        &state,
+        name,
+        std::path::PathBuf::from(path),
+        service,
+        app_port,
+        include_all.unwrap_or(false),
+    )
+    .await?;
     tray::refresh(&app);
     Ok(site)
 }
@@ -600,6 +636,8 @@ pub fn run() {
             list_sites,
             get_site,
             create_site,
+            inspect_docker_project,
+            import_docker_project,
             clone_site,
             start_site,
             stop_site,

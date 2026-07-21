@@ -114,10 +114,12 @@ pub fn site_url(slug: &str, ca_trusted: bool, ports: RouterPorts) -> String {
 /// one-click login, WP install URL and the CLI all funnel through here.
 pub fn site_public_url(state: &AppState, site: &Site) -> String {
     let (domains_on, ca_trusted) = enabled_and_trusted(state);
-    if domains_on {
+    if domains_on && site.capabilities.domains {
         site_url(&site.slug, ca_trusted, router_ports(state))
     } else {
-        format!("http://localhost:{}", site.port)
+        // The app's own port for a docker project whose compose publishes on a
+        // different port than the reserved site port; the site port for WP.
+        format!("http://localhost:{}", site.config.upstream_port(site.port))
     }
 }
 
@@ -1139,6 +1141,48 @@ mod tests {
         let sites: Vec<Site> = Vec::new();
         assert_eq!(render_caddyfile(&sites), render_caddyfile(&sites));
         assert!(!render_caddyfile(&sites).contains("8080"));
+    }
+
+    /// Build a Site for the routing tests. `app_port` overrides the upstream
+    /// (a docker project on its own published port); `None` = the site port.
+    fn site_for(slug: &str, port: u16, kind: &str, app_port: Option<u16>) -> Site {
+        let mut s = Site {
+            id: slug.into(),
+            name: slug.into(),
+            slug: slug.into(),
+            path: format!("/tmp/{slug}"),
+            port,
+            wp_version: String::new(),
+            php_version: String::new(),
+            status: "running".into(),
+            admin_user: "admin".into(),
+            admin_pass: String::new(),
+            created_at: "2026-07-21T00:00:00Z".into(),
+            connection_id: None,
+            remote_site_id: None,
+            kind: kind.into(),
+            config: crate::site::SiteConfig { app_port, ..Default::default() },
+            capabilities: crate::site::Capabilities::default(),
+        };
+        s.refresh_capabilities();
+        s
+    }
+
+    /// Plan 22: a WordPress site routes to its site port, while a docker app
+    /// routes to its own published app port — the "domain → app port" contract.
+    #[test]
+    fn caddyfile_routes_a_docker_app_to_its_app_port() {
+        let wp = site_for("blog", 8081, crate::site::KIND_WORDPRESS, None);
+        let app = site_for("api", 8090, crate::site::KIND_DOCKER, Some(3000));
+        let out = render_caddyfile(&[wp, app]);
+        assert!(out.contains("http://blog.test"));
+        assert!(out.contains("reverse_proxy host.docker.internal:8081"), "WP → site port:\n{out}");
+        assert!(out.contains("http://api.test"));
+        assert!(
+            out.contains("reverse_proxy host.docker.internal:3000"),
+            "docker → app_port, not the reserved site port:\n{out}"
+        );
+        assert!(!out.contains("8090"), "the reserved site port must not be the upstream:\n{out}");
     }
 
     #[test]

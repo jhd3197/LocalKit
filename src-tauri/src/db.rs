@@ -588,10 +588,10 @@ mod tests {
         assert_eq!(back.config.service, "app");
         assert_eq!(back.config.app_port, Some(3000));
         assert_eq!(back.config.db_engine.as_deref(), Some("postgres"));
-        // A docker app with a recognized DB engine earns db_sync but never the
-        // WordPress-only capabilities.
+        // The DB engine is captured, but a docker app stays code-only for now —
+        // db_sync waits on engine-native dumps.
         assert!(back.capabilities.code_sync);
-        assert!(back.capabilities.db_sync, "a recognized DB engine flips db_sync on");
+        assert!(!back.capabilities.db_sync, "docker is code-only until native dumps land");
         assert!(!back.capabilities.wp_tools);
         assert!(!back.capabilities.one_click_login);
 

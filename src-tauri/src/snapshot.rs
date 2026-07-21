@@ -270,11 +270,23 @@ pub async fn create(
         return Err(format!("site directory not found: {}", dir.display()));
     }
 
-    site::emit(app, site_id, "snapshot", "Exporting database...");
-    let sql = export_db(&dir).await?;
-    let db_gz = gzip(sql.as_bytes())?;
+    // WordPress (and any db_sync kind) exports its database; a code-only docker
+    // app snapshots its files alone, so `db.sql.gz` is empty and restore knows
+    // to skip the import.
+    let db_gz = if s.capabilities.db_sync {
+        site::emit(app, site_id, "snapshot", "Exporting database...");
+        let sql = export_db(&dir).await?;
+        gzip(sql.as_bytes())?
+    } else {
+        Vec::new()
+    };
 
-    site::emit(app, site_id, "snapshot", "Archiving wp-content...");
+    let what = if s.config.sync_path == "." {
+        "the project"
+    } else {
+        s.config.sync_path.as_str()
+    };
+    site::emit(app, site_id, "snapshot", &format!("Archiving {what}..."));
     let code_tgz = build_wp_content_tgz(&dir, &s.config.sync_path)?;
 
     let snap = Snapshot {
@@ -356,12 +368,16 @@ pub async fn restore(
     let src = snapshot_dir(&state.data_dir, site_id, snapshot_id);
 
     // Read the archives before mutating anything: a corrupt snapshot should
-    // fail while the site is still intact.
-    let db_gz = std::fs::read(src.join(DB_FILE))
-        .map_err(|e| format!("failed to read the snapshot's database dump: {e}"))?;
-    let sql = gunzip(&db_gz)?;
+    // fail while the site is still intact. A code-only (docker) snapshot has an
+    // empty `db.sql.gz`, so there is nothing to import.
+    let db_gz = std::fs::read(src.join(DB_FILE)).unwrap_or_default();
+    let sql = if db_gz.is_empty() {
+        None
+    } else {
+        Some(gunzip(&db_gz)?)
+    };
     let code_tgz = std::fs::read(src.join(CODE_FILE))
-        .map_err(|e| format!("failed to read the snapshot's wp-content archive: {e}"))?;
+        .map_err(|e| format!("failed to read the snapshot's code archive: {e}"))?;
 
     site::emit(app, site_id, "restore", "Taking a pre-restore snapshot...");
     create(
@@ -374,23 +390,33 @@ pub async fn restore(
     .await
     .map_err(|e| format!("pre-restore snapshot failed, nothing was changed: {e}"))?;
 
-    // The DB import needs the stack up; the user asked to go back to this
-    // snapshot, so start the site rather than refusing.
+    // A database import needs the stack up; a code-only restore does not, so
+    // only auto-start when there is actually a database to import.
     let mut started = false;
-    if !is_running(&dir, s.app_service()).await {
+    if sql.is_some() && !is_running(&dir, s.app_service()).await {
         site::emit(app, site_id, "restore", "Starting the site...");
         site::start(state, site_id).await?;
         started = true;
     }
 
-    site::emit(app, site_id, "restore", "Importing database...");
-    wordpress::import_db(&dir, &sql).await?;
+    if let Some(sql) = &sql {
+        site::emit(app, site_id, "restore", "Importing database...");
+        wordpress::import_db(&dir, sql).await?;
+    }
 
-    site::emit(app, site_id, "restore", "Restoring wp-content...");
+    let what = if s.config.sync_path == "." {
+        "files"
+    } else {
+        s.config.sync_path.as_str()
+    };
+    site::emit(app, site_id, "restore", &format!("Restoring {what}..."));
     restore_wp_content(&dir, &s.config.sync_path, &code_tgz)?;
 
-    // Object/transient caches can outlive the import; best effort.
-    let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
+    // Object/transient caches can outlive the import (WordPress only — a docker
+    // app has no wp-cli).
+    if s.capabilities.wp_tools {
+        let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
+    }
 
     let when = &snap.created_at;
     Ok(if started {

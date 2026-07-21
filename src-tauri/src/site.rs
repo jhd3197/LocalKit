@@ -124,17 +124,13 @@ impl Capabilities {
     /// Derive the capability set for a kind + its config. Every kind × every
     /// capability is an explicit decision here (unit-tested), never an `if`
     /// scattered through a feature.
-    pub fn for_kind(kind: &str, config: &SiteConfig) -> Self {
+    pub fn for_kind(kind: &str, _config: &SiteConfig) -> Self {
         match kind {
-            KIND_DOCKER => {
-                let mut c = Self::DOCKER;
-                // A recognized database engine in the copied compose earns the
-                // site engine-native DB snapshots/dumps (plan 22 phase 2).
-                if config.db_engine.is_some() {
-                    c.db_sync = true;
-                }
-                c
-            }
+            // Docker apps are code-only for now: `config.db_engine` is detected
+            // and stored so engine-native DB snapshots/dumps can land later, but
+            // `db_sync` stays off until they actually work — a kind must not
+            // claim a capability it can't deliver (the plan's own guardrail).
+            KIND_DOCKER => Self::DOCKER,
             // `wordpress` and any unknown/legacy kind fall back to the fully
             // capable WordPress set — the safe default for a pre-plan-22 row.
             _ => Self::WORDPRESS,
@@ -995,17 +991,19 @@ mod tests {
         );
     }
 
-    /// A recognized DB engine in a docker app's compose flips on `db_sync` (and
-    /// only `db_sync` — not the WP tooling).
+    /// A recognized DB engine is captured in config, but a docker app stays
+    /// code-only for now — `db_sync` only turns on once engine-native dumps
+    /// actually work (the plan's "ships only when it works" guardrail).
     #[test]
-    fn a_recognized_db_engine_flips_on_db_sync_only() {
+    fn a_recognized_db_engine_is_captured_but_stays_code_only() {
         let config = SiteConfig {
             db_engine: Some("mariadb".into()),
             db_service: Some("db".into()),
             ..SiteConfig::default()
         };
         let caps = Capabilities::for_kind(KIND_DOCKER, &config);
-        assert!(caps.db_sync, "a DB engine earns db_sync");
+        assert!(!caps.db_sync, "docker is code-only until native dumps land");
+        assert!(caps.code_sync && caps.snapshots, "code snapshots still work");
         assert!(!caps.wp_tools && !caps.one_click_login && !caps.search_replace);
     }
 

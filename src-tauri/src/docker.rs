@@ -122,6 +122,23 @@ pub async fn compose_down(dir: &Path, volumes: bool) -> Result<(), String> {
     compose(dir, args).await.map(|_| ())
 }
 
+/// Pull every image referenced by the compose project (no service list — used
+/// for a bring-your-own-compose docker app, plan 22, where LocalKit does not
+/// know the services ahead of time). Best-effort: `up` pulls anything missing
+/// anyway, so this only exists to give the copy a labeled "pulling" stage.
+pub async fn compose_pull_all(dir: &Path) -> Result<(), String> {
+    compose(dir, &["pull"]).await.map(|_| ())
+}
+
+/// The normalized compose project as JSON (`docker compose config --format
+/// json`), so LocalKit can enumerate a bring-your-own project's services,
+/// images and published ports without shipping a YAML parser (plan 22). Docker
+/// itself does the parsing, so every compose quirk (extends, anchors, env
+/// interpolation) is already resolved.
+pub async fn compose_config(dir: &Path) -> Result<String, String> {
+    compose(dir, &["config", "--format", "json"]).await
+}
+
 /// Run a one-off command in a compose service, e.g. wp-cli:
 /// `docker compose run --rm -T <service> <args...>`
 pub async fn compose_run(dir: &Path, service: &str, args: &[&str]) -> Result<String, String> {
