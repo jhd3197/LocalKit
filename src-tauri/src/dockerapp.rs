@@ -198,7 +198,9 @@ pub async fn inspect(source_dir: &Path) -> Result<DockerProjectInspection, Strin
 
 /// Recursively copy `src` into `dst`, skipping names in `excludes` and symlinks
 /// (a symlink could point outside the tree — refuse it rather than follow it).
-fn copy_tree(src: &Path, dst: &Path, excludes: &[&str]) -> Result<(), String> {
+/// Shared with the plan-26 php import ("bring your own code into a generated
+/// stack" is the same copy problem as importing a whole compose project).
+pub(crate) fn copy_tree(src: &Path, dst: &Path, excludes: &[&str]) -> Result<(), String> {
     std::fs::create_dir_all(dst)
         .map_err(|e| format!("failed to create {}: {e}", dst.display()))?;
     let entries =

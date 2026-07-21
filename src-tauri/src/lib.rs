@@ -3,6 +3,7 @@ pub mod db;
 pub mod docker;
 pub mod dockerapp;
 pub mod keystore;
+pub mod php;
 pub mod reconcile;
 pub mod router;
 pub mod serverkit;
@@ -85,6 +86,10 @@ fn app_info(state: State<AppState>) -> AppInfo {
                 kind: site::KIND_DOCKER.to_string(),
                 capabilities: site::Capabilities::DOCKER,
             },
+            KindInfo {
+                kind: site::KIND_PHP.to_string(),
+                capabilities: site::Capabilities::PHP,
+            },
         ],
     }
 }
@@ -140,6 +145,34 @@ async fn import_docker_project(
         std::path::PathBuf::from(path),
         service,
         app_port,
+        include_all.unwrap_or(false),
+    )
+    .await?;
+    tray::refresh(&app);
+    Ok(site)
+}
+
+/// Create a new PHP/Laravel stack site (plan 26): an empty Laravel-ready
+/// skeleton, or (with `path`) importing an existing PHP project folder.
+#[tauri::command]
+async fn create_php_site(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    php_version: String,
+    path: Option<String>,
+    include_all: Option<bool>,
+) -> Result<Site, String> {
+    let source = path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from);
+    let site = php::create_php_site(
+        Some(&app),
+        &state,
+        name,
+        php_version,
+        source,
         include_all.unwrap_or(false),
     )
     .await?;
@@ -887,6 +920,7 @@ pub fn run() {
             list_sites,
             get_site,
             create_site,
+            create_php_site,
             inspect_docker_project,
             import_docker_project,
             clone_site,

@@ -19,12 +19,13 @@ pub const DB_PORT_OFFSET: u16 = 10000;
 /// the profile-gated `adminer` service needs no allocator change (plan 24).
 pub const ADMINER_PORT_OFFSET: u16 = 1000;
 
-/// Site kinds (plan 22). WordPress is the reference implementation with every
-/// capability; `docker` is a bring-your-own-compose project. The stored default
-/// is `wordpress`, so every pre-plan-22 row migrates cleanly. (`php`/Laravel
-/// arrives with plan 26.)
+/// Site kinds. WordPress is the reference implementation with every capability;
+/// `docker` is a bring-your-own-compose project (plan 22); `php` is a generated
+/// PHP/Laravel stack (plan 26). The stored default is `wordpress`, so every
+/// pre-plan-22 row migrates cleanly.
 pub const KIND_WORDPRESS: &str = "wordpress";
 pub const KIND_DOCKER: &str = "docker";
+pub const KIND_PHP: &str = "php";
 
 /// Per-kind settings, persisted as the `config_json` column (plan 22).
 ///
@@ -123,6 +124,23 @@ impl Capabilities {
         wp_tools: false,
         search_replace: false,
     };
+    /// PHP/Laravel stack (plan 26): everything a WordPress site claims *except*
+    /// the WP-specific trio (one-click login, the WP tools tab, search-replace).
+    /// Its database is synced engine-native (`db_sync`) and it gets the Adminer
+    /// GUI (`db_gui`), a bundled compose template like WordPress — so unlike a
+    /// bring-your-own docker app it can carry a first-class DB.
+    pub const PHP: Self = Self {
+        domains: true,
+        terminal: true,
+        logs: true,
+        snapshots: true,
+        db_gui: true,
+        db_sync: true,
+        code_sync: true,
+        one_click_login: false,
+        wp_tools: false,
+        search_replace: false,
+    };
 
     /// Derive the capability set for a kind + its config. Every kind × every
     /// capability is an explicit decision here (unit-tested), never an `if`
@@ -134,6 +152,9 @@ impl Capabilities {
             // `db_sync` stays off until they actually work — a kind must not
             // claim a capability it can't deliver (the plan's own guardrail).
             KIND_DOCKER => Self::DOCKER,
+            // PHP/Laravel: a generated stack with a bundled mariadb, so it has
+            // real DB sync + an Adminer GUI, but none of the WordPress-only tools.
+            KIND_PHP => Self::PHP,
             // `wordpress` and any unknown/legacy kind fall back to the fully
             // capable WordPress set — the safe default for a pre-plan-22 row.
             _ => Self::WORDPRESS,
@@ -426,7 +447,17 @@ pub fn site_dir(data_dir: &Path, slug: &str) -> PathBuf {
 // Compose / env templates
 // ---------------------------------------------------------------------------
 
+/// Render the deterministic compose file for a site, dispatched on kind. The
+/// render is deterministic so a rewrite (e.g. Adminer's on-demand start) is safe
+/// on a running site — it only ever adds the profile-gated tooling services.
 pub fn render_compose(site: &Site) -> String {
+    match site.kind.as_str() {
+        KIND_PHP => crate::php::render_compose(site),
+        _ => render_wordpress_compose(site),
+    }
+}
+
+fn render_wordpress_compose(site: &Site) -> String {
     format!(
         r#"name: localkit-{slug}
 
@@ -511,10 +542,22 @@ volumes:
     )
 }
 
-/// The site's MySQL password from `.env` (the `wordpress` DB user), for
-/// pre-filling the Adminer login (plan 24). Empty when `.env` is missing.
+/// The site's application DB password from `.env`, for pre-filling the Adminer
+/// login (plan 24). Empty when `.env` is missing.
 pub fn db_password(dir: &Path) -> String {
     read_env_value(dir, "DB_PASSWORD").unwrap_or_default()
+}
+
+/// The site's application DB name from `.env`. Defaults to `wordpress` so a WP
+/// site whose `.env` predates this reader is unchanged; a `php` site records its
+/// own (`laravel`).
+pub fn db_name(dir: &Path) -> String {
+    read_env_value(dir, "DB_NAME").unwrap_or_else(|| "wordpress".to_string())
+}
+
+/// The site's application DB user from `.env` (defaults to `wordpress`, as above).
+pub fn db_user(dir: &Path) -> String {
+    read_env_value(dir, "DB_USER").unwrap_or_else(|| "wordpress".to_string())
 }
 
 pub fn render_env(site: &Site, db_password: &str) -> String {
@@ -586,6 +629,10 @@ pub(crate) async fn reserve(
         if !PHP_VERSIONS.contains(&php_version.as_str()) {
             return Err(format!("unsupported PHP version: {php_version}"));
         }
+    } else if kind == KIND_PHP && !PHP_VERSIONS.contains(&php_version.as_str()) {
+        // A php site has no WordPress version, but its PHP version is still from
+        // the allowlist (it becomes the app image's `FROM php:<ver>-fpm` tag).
+        return Err(format!("unsupported PHP version: {php_version}"));
     }
 
     let slug = unique_slug(state, &slugify(&name))?;
@@ -916,8 +963,8 @@ pub fn detail(state: &AppState, id: &str) -> Result<SiteDetail, String> {
         live_status: site.status.clone(),
         incomplete,
         db_host: "127.0.0.1".into(),
-        db_name: "wordpress".into(),
-        db_user: "wordpress".into(),
+        db_name: db_name(&dir),
+        db_user: db_user(&dir),
         db_password,
         site,
     })
@@ -1222,6 +1269,29 @@ mod tests {
         assert!(!caps.db_sync, "docker is code-only until native dumps land");
         assert!(caps.code_sync && caps.snapshots, "code snapshots still work");
         assert!(!caps.wp_tools && !caps.one_click_login && !caps.search_replace);
+    }
+
+    /// A PHP/Laravel site (plan 26) claims everything WordPress does *except*
+    /// the WP-specific trio — but crucially keeps engine-native DB sync and the
+    /// Adminer GUI, which a code-only docker app does not.
+    #[test]
+    fn php_claims_db_sync_and_gui_but_not_the_wordpress_trio() {
+        let caps = Capabilities::for_kind(KIND_PHP, &SiteConfig::default());
+        assert_eq!(caps, Capabilities::PHP);
+        assert!(
+            caps.domains
+                && caps.terminal
+                && caps.logs
+                && caps.snapshots
+                && caps.db_gui
+                && caps.db_sync
+                && caps.code_sync,
+            "a php site has domains, terminal, logs, snapshots, db_gui, db_sync, code_sync"
+        );
+        assert!(
+            !caps.one_click_login && !caps.wp_tools && !caps.search_replace,
+            "a php site does not claim the WordPress-only trio"
+        );
     }
 
     /// An unknown/legacy kind falls back to the fully-capable WordPress set —

@@ -151,6 +151,14 @@ pub async fn compose_pull(dir: &Path, services: &[&str]) -> Result<(), String> {
     compose(dir, &args).await.map(|_| ())
 }
 
+/// Build any services that declare a `build:` (plan 26 php stack builds its
+/// `app` image from a generated Dockerfile). `up -d` builds a missing image
+/// implicitly, but running it as its own step gives the create flow a labeled
+/// "building" stage instead of a silent multi-minute stall on first run.
+pub async fn compose_build(dir: &Path) -> Result<(), String> {
+    compose(dir, &["build"]).await.map(|_| ())
+}
+
 pub async fn compose_down(dir: &Path, volumes: bool) -> Result<(), String> {
     let args: &[&str] = if volumes { &["down", "-v"] } else { &["down"] };
     compose(dir, args).await.map(|_| ())
