@@ -30,7 +30,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 20 | `20_clone-and-blueprints` | ✅ shipped | One-click site clone + save-site-as-blueprint creation flows, portable `.lkbp` export/import (needs 17). |
 | 21 | `21_cli-serverkit` | ✅ shipped | `lk connection/push/pull` + remote listing + shell completions (Track D). |
 | 22 | `22_multi-stack-core` | ✅ shipped | Kind/capability site model + bring-your-own-compose Docker apps — before 23–25 so new features are capability-aware from day one. |
-| 23 | `23_reconciliation` | ⬜ | Settle DB site status against Docker ground truth; recover half-created sites; Docker-health gating. |
+| 23 | `23_reconciliation` | ✅ shipped | Settle DB site status against Docker ground truth (forward-only, 60s reconciler); `degraded` status; recover half-created sites (Resume/Clean up); Docker-health pill. |
 | 24 | `24_site-tools` | ⬜ | Tools tab: Adminer sidecar, serialization-safe search-replace, WP_DEBUG + log viewer, config editor. |
 | 25 | `25_release-polish-completion` | ⬜ | M5 remainder: update checker, OS keyring for API keys, OS notifications, real test suite. |
 | 26 | `26_php-laravel-stack` | ⬜ | Generated PHP/Laravel stack + per-kind ServerKit sync parity (needs 22, 17–19). |
@@ -56,6 +56,10 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   (fresh ports/secrets, admin login carried over), save-a-site-as-blueprint,
   create-from-blueprint in the New Site dialog, and a portable `.lkbp`
   export/import — all on the plan-17 snapshot engine
+- ✅ Status reconciliation + crash recovery (plan 23): a 60 s reconciler settles
+  DB status against Docker ground truth (forward-only, one batched `docker ps`),
+  a new `degraded` status, half-created-site recovery (Resume / Clean up via a
+  completion marker), and a Docker-unavailable pill — status never lies again
 
 ## Track B — ServerKit (M3–M4)
 

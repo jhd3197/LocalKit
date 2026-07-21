@@ -1,6 +1,20 @@
 # 23 — Status reconciliation & crash recovery
 
-Status: ⬜ planned
+Status: ✅ shipped
+
+> Shipped: migration 7 (`status_updated_at`) with a forward-only
+> `settle_status` compare-and-swap; `reconcile.rs` (`classify`/`decide`
+> decision table, batched `docker::project_container_states`, `InFlight`
+> guard shared across every lifecycle path, 60 s `spawn_loop` + startup pass);
+> the new `degraded` status across StatusBadge / dashboard / SiteDetail /
+> palette / tray / `lk list` / mock; a 30 s-cached `docker::check_cached` behind
+> a sidebar "Docker unavailable" pill (`useDocker`); and half-created recovery
+> via the `.localkit-install-complete` marker + startup backfill, `incomplete`
+> on `SiteWithStatus`/`SiteDetail`, `site::resume` (+ `resume_site` command,
+> `lk resume`), and the dashboard's "Setup incomplete" → Resume / Clean up.
+> Verified: `cargo test --lib` (decision table, settle CAS, ps grouping), the
+> smoke `reconcile` + `recover` subcommands against real Docker, and the mock
+> UI (degraded badge, Docker pill, incomplete → Resume).
 
 Keep the app's view of the world honest: a reconciler that continuously
 settles the DB's site statuses against Docker's ground truth, plus a

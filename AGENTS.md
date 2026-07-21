@@ -181,7 +181,7 @@ src-tauri/               Rust backend (also a cargo workspace root)
   prompts twice). Run `smoke -- create` first, `smoke -- cleanup` after.
 - `cd src-tauri && cargo run -p lk -- <cmd>` — headless CLI (`lk list |
   create [--blueprint <id|name>] | clone <site> <new-name> | start | stop |
-  restart | delete | info | logs | wp | env | login |
+  restart | resume | delete | info | logs | wp | env | login |
   snapshot list|create|restore|delete |
   blueprint list|save|delete|export|import | import |
   connection add|list|test|remove | sites --remote <conn> |
@@ -226,9 +226,10 @@ src-tauri/               Rust backend (also a cargo workspace root)
 - **Errors:** commands return `Result<T, String>` with user-displayable
   messages; `docker::friendly_error` maps common "Docker not running" stderr.
 - **DB:** forward-only migrations only — bump `user_version` and add an
-  `if version < N` block; never edit migration 1. (Latest is migration 6:
-  plan-22 `kind` + `config_json` columns, constant defaults so legacy rows
-  migrate to the WordPress stack.)
+  `if version < N` block; never edit migration 1. (Latest is migration 7:
+  plan-23 `status_updated_at` — every command status write stamps it, and
+  `settle_status` compare-and-swaps on it so the reconciler never clobbers a
+  newer write. Migration 6 was plan-22 `kind` + `config_json`.)
 - **Async:** never hold the `Db` mutex guard across `.await` (futures must be Send);
   lock in a short scope, drop, then await.
 - **Ports:** site port = first free from 8081; DB host port = site port + 10000.
@@ -252,6 +253,32 @@ src-tauri/               Rust backend (also a cargo workspace root)
   land (so `db_sync` is off), and clone/blueprints/ServerKit sync stay
   WordPress-only (plan 26). Docker apps are **copied** into the managed site dir
   (`dockerapp.rs`), never referenced.
+- **Status reconciliation (plan 23):** site status is otherwise write-path only,
+  so `reconcile.rs` settles the DB against Docker's ground truth — **inspect,
+  settle forward, never guess.** `spawn_loop` (started in `lib.rs run()`) runs
+  `reconcile_once` at startup and every 60 s; each pass does one
+  `docker::project_container_states` call (a single `docker ps`, grouped by the
+  `com.docker.compose.project=localkit-<slug>` label — never N per-site
+  `compose_ps`) and applies the pure, unit-tested `classify` × `decide` table.
+  **Forward-only:** it settles via `db.settle_status`, a compare-and-swap on
+  `status_updated_at`, so a newer command/event write always wins; a 60 s grace
+  window shields a just-started site from a running→stopped downgrade. Sites with
+  an in-flight lifecycle command are skipped via `AppState.in_flight`
+  (`reconcile::InFlight`, an RAII refcounted guard held by every lifecycle path —
+  start/stop/delete/create/clone/import/blueprint/restore). **No ground truth
+  (Docker down) → zero settles**, so a Docker Desktop restart never mass-flaps
+  sites. `degraded` (amber, up-but-unhealthy) is a real status the reconciler and
+  `site::list` both produce — touchpoints: `StatusBadge`, dashboard/SiteDetail/
+  palette (treated as "up" for Open/Stop), tray dot ◐, `lk list`. After a settle:
+  `tray::refresh` + a `sites-changed` event the frontend re-fetches on. **Docker
+  health:** `docker::check_cached` (30 s TTL) backs the sidebar's global "Docker
+  unavailable" pill (the `useDocker` store polls it). **Crash recovery:** each
+  successful create/import/clone/blueprint writes a `.localkit-install-complete`
+  marker as its last step (`site::mark_complete`); a startup backfill marks
+  known-complete sites so legacy rows aren't flagged. A dir without the marker
+  (and not in flight) reports `incomplete` on `SiteWithStatus`/`SiteDetail`; the
+  dashboard shows "Setup incomplete" + Resume / Clean up, `site::resume` re-runs
+  the create tail, `lk resume` / `lk list` mirror it.
 - **wp-cli:** the stock `wordpress` image has no wp-cli; use the profile-gated
   `wpcli` service (`wordpress:cli-php<ver>`) via `docker::compose_run`, and
   always pass `wp` as the first argument (the cli image's `wp` CMD is replaced

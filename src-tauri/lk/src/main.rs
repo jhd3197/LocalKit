@@ -160,6 +160,9 @@ enum Cmd {
     /// Restart a site
     Restart { site: String },
 
+    /// Finish a half-created site (a create killed mid-install)
+    Resume { site: String },
+
     /// Delete a site (removes containers, volumes, and files).
     /// A restorable snapshot is kept unless --delete-snapshots is passed.
     /// Prompts for confirmation unless --yes; --yes is required non-interactively.
@@ -526,6 +529,13 @@ async fn run(cli: &Cli) -> Result<(), CliError> {
             println!("{}", site_url(&s));
             Ok(())
         }
+        Cmd::Resume { site: q } => {
+            let s = resolve(&state, q)?;
+            let s = site::resume(None, &state, &s.id).await?;
+            eprintln!("{} {} setup finished", ok("✓"), bold(&s.name));
+            println!("{}", site_url(&s));
+            Ok(())
+        }
         Cmd::Delete {
             site: q,
             yes,
@@ -580,7 +590,9 @@ async fn cmd_list(state: &AppState, json: bool) -> Result<(), String> {
         .map(|s| {
             [
                 s.site.slug.clone(),
-                s.live_status.clone(),
+                // A half-created site (plan 23) reads as `incomplete` — run
+                // `lk resume <site>` to finish it.
+                if s.incomplete { "incomplete".to_string() } else { s.live_status.clone() },
                 site_url(&s.site),
                 format!("WP {} / PHP {}", s.site.wp_version, s.site.php_version),
             ]
@@ -606,8 +618,9 @@ async fn cmd_list(state: &AppState, json: bool) -> Result<(), String> {
             let padded = format!("{:<w$}", c, w = w[i]);
             let cell = match (i, c.as_str()) {
                 (1, "running") => ok(&padded),
-                // Degraded = up but unhealthy (plan 23) — amber, not dim.
-                (1, "degraded") => warn(&padded),
+                // Degraded (up but unhealthy) and incomplete (a killed create)
+                // both warrant attention — amber, not dim (plan 23).
+                (1, "degraded") | (1, "incomplete") => warn(&padded),
                 (1, _) => dim(&padded),
                 _ => padded,
             };
