@@ -2,6 +2,7 @@ pub mod blueprint;
 pub mod db;
 pub mod docker;
 pub mod dockerapp;
+pub mod reconcile;
 pub mod router;
 pub mod serverkit;
 pub mod site;
@@ -27,6 +28,9 @@ pub struct AppState {
     pub terminals: terminal::PtyManager,
     /// Cancel flags for in-flight chunked syncs, keyed by site id (plan 19).
     pub transfers: transfer::CancelRegistry,
+    /// Sites with an in-flight lifecycle command, shared with every command
+    /// path so the reconciler skips them (plan 23).
+    pub in_flight: reconcile::InFlight,
 }
 
 /// The base capability set advertised for a kind (plan 22). `docker`'s
@@ -608,6 +612,7 @@ pub fn run() {
             data_dir,
             terminals: terminal::PtyManager::new(),
             transfers: Default::default(),
+            in_flight: Default::default(),
         })
         .setup(move |app| {
             // Main window is built in code (not tauri.conf.json) so the

@@ -4,6 +4,7 @@
 //! fewer dependencies and it matches whatever Docker Desktop the user has.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use tokio::process::Command;
 
@@ -248,6 +249,84 @@ pub async fn compose_ps(dir: &Path) -> Result<Vec<ContainerInfo>, String> {
     parse_ps(&stdout)
 }
 
+/// Ground-truth container states for every LocalKit compose project, from a
+/// single `docker ps` pass (plan 23). One subprocess for all sites beats N
+/// per-site `compose ps` calls every reconcile tick. Keyed by compose project
+/// name (`com.docker.compose.project`, which is `localkit-<slug>` for every
+/// LocalKit site — WordPress via the compose `name:`, docker apps via
+/// `COMPOSE_PROJECT_NAME`). A project with no containers is simply absent from
+/// the map. `--all` so exited containers are visible (a stopped project reads
+/// as present-but-down, not gone).
+pub async fn project_container_states() -> Result<HashMap<String, Vec<ContainerInfo>>, String> {
+    let output = no_window(Command::new("docker").args(["ps", "--all", "--format", "json"]))
+        .output()
+        .await
+        .map_err(|e| format!("failed to run docker ps: {e}"))?;
+    if !output.status.success() {
+        return Err(friendly_error(&String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(parse_ps_projects(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Read one value out of a `docker ps` `Labels` string
+/// (`k1=v1,k2=v2,...`). Returns the first match, `None` if the key is absent.
+fn label_value(labels: &str, key: &str) -> Option<String> {
+    labels.split(',').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().to_string())
+    })
+}
+
+#[derive(Deserialize)]
+struct PsProjectEntry {
+    #[serde(rename = "Labels")]
+    labels: Option<String>,
+    #[serde(rename = "Service")]
+    service: Option<String>,
+    #[serde(rename = "State")]
+    state: Option<String>,
+    #[serde(rename = "Status")]
+    status: Option<String>,
+}
+
+/// Group `docker ps --format json` rows by their compose project. Accepts both
+/// a JSON array and NDJSON (older CLIs), and skips any row without the compose
+/// project/service labels (a non-LocalKit container). The service comes from
+/// the compose label; some CLIs also expose a bare `Service` field, used as a
+/// fallback.
+fn parse_ps_projects(stdout: &str) -> HashMap<String, Vec<ContainerInfo>> {
+    let trimmed = stdout.trim();
+    let mut map: HashMap<String, Vec<ContainerInfo>> = HashMap::new();
+    if trimmed.is_empty() {
+        return map;
+    }
+    let entries: Vec<PsProjectEntry> = if trimmed.starts_with('[') {
+        serde_json::from_str(trimmed).unwrap_or_default()
+    } else {
+        trimmed
+            .lines()
+            .filter_map(|l| serde_json::from_str::<PsProjectEntry>(l.trim()).ok())
+            .collect()
+    };
+    for entry in entries {
+        let labels = entry.labels.unwrap_or_default();
+        let Some(project) = label_value(&labels, "com.docker.compose.project") else {
+            continue;
+        };
+        let Some(service) = label_value(&labels, "com.docker.compose.service")
+            .or(entry.service)
+        else {
+            continue;
+        };
+        map.entry(project).or_default().push(ContainerInfo {
+            service,
+            state: entry.state.unwrap_or_default(),
+            status: entry.status.unwrap_or_default(),
+        });
+    }
+    map
+}
+
 #[derive(Deserialize)]
 struct PsEntry {
     #[serde(rename = "Service")]
@@ -290,5 +369,52 @@ fn parse_ps(stdout: &str) -> Result<Vec<ContainerInfo>, String> {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_value_reads_one_compose_label() {
+        let labels = "com.docker.compose.project=localkit-blog,com.docker.compose.service=wordpress,foo=bar";
+        assert_eq!(label_value(labels, "com.docker.compose.project").as_deref(), Some("localkit-blog"));
+        assert_eq!(label_value(labels, "com.docker.compose.service").as_deref(), Some("wordpress"));
+        assert_eq!(label_value(labels, "missing"), None);
+    }
+
+    #[test]
+    fn parse_ps_projects_groups_ndjson_by_project_and_skips_strays() {
+        // Two LocalKit projects plus a non-compose container (no labels) that
+        // must be ignored.
+        let stdout = concat!(
+            r#"{"Labels":"com.docker.compose.project=localkit-blog,com.docker.compose.service=wordpress","State":"running","Status":"Up 3 minutes"}"#, "\n",
+            r#"{"Labels":"com.docker.compose.project=localkit-blog,com.docker.compose.service=db","State":"running","Status":"Up 3 minutes (healthy)"}"#, "\n",
+            r#"{"Labels":"com.docker.compose.project=localkit-api,com.docker.compose.service=app","State":"exited","Status":"Exited (0) 1 minute ago"}"#, "\n",
+            r#"{"Labels":"maintainer=someone","State":"running","Status":"Up"}"#, "\n",
+        );
+        let map = parse_ps_projects(stdout);
+        assert_eq!(map.len(), 2);
+        let blog = &map["localkit-blog"];
+        assert_eq!(blog.len(), 2);
+        assert!(blog.iter().any(|c| c.service == "wordpress" && c.state == "running"));
+        let api = &map["localkit-api"];
+        assert_eq!(api.len(), 1);
+        assert_eq!(api[0].service, "app");
+        assert_eq!(api[0].state, "exited");
+    }
+
+    #[test]
+    fn parse_ps_projects_accepts_a_json_array_too() {
+        let stdout = r#"[{"Labels":"com.docker.compose.project=localkit-x,com.docker.compose.service=web","State":"restarting","Status":"Restarting (1) 2 seconds ago"}]"#;
+        let map = parse_ps_projects(stdout);
+        assert_eq!(map["localkit-x"][0].state, "restarting");
+    }
+
+    #[test]
+    fn parse_ps_projects_handles_empty_output() {
+        assert!(parse_ps_projects("").is_empty());
+        assert!(parse_ps_projects("   \n  ").is_empty());
     }
 }

@@ -34,6 +34,7 @@ fn make_state() -> AppState {
         data_dir: dir,
         terminals: localkit_lib::terminal::PtyManager::new(),
         transfers: Default::default(),
+        in_flight: Default::default(),
     }
 }
 
