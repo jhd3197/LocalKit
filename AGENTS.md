@@ -257,6 +257,12 @@ src-tauri/               Rust backend (also a cargo workspace root)
 
 ## Conventions
 
+- **Git workflow:** two branches, `main` and `dev`. All work happens on `dev`
+  in small, focused commits; agents **commit locally but never push, merge to
+  `main`, or open PRs** — the maintainer does that himself (a main merge is
+  what triggers the release workflow). `CLAUDE.md` is a thin pointer at this
+  file. PR descriptions follow the `create-pr` skill (`.claude/skills/`);
+  generated files land in `/.pr` (gitignored).
 - **Docker:** always shell out to the `docker compose` CLI from Rust
   (`docker.rs`); never add a Docker API client (bollard etc.). All compose
   invocations run with `current_dir = <site dir>` so `.env` is picked up.
