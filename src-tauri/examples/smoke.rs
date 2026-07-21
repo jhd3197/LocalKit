@@ -1,7 +1,7 @@
 //! End-to-end smoke test driver for the real LocalKit site lifecycle.
 //! Runs outside the Tauri runtime (no AppHandle; events are skipped).
 //!
-//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|adminer|delete|cleanup>
+//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|adminer|php|delete|cleanup>
 //!
 //! Uses a fixed smoke data dir + site name so subcommands can run as separate
 //! invocations (each one reconstructs the same AppState).
@@ -9,10 +9,13 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use localkit_lib::{blueprint, db::Db, docker, reconcile, site, snapshot, wordpress, AppState};
+use localkit_lib::{blueprint, db::Db, docker, php, reconcile, site, snapshot, wordpress, AppState};
 
 const SMOKE_NAME: &str = "Smoke Test";
 const SMOKE_SLUG: &str = "smoke-test";
+/// Plan 26 php-stack verification: a self-contained PHP/Laravel smoke site.
+const PHP_NAME: &str = "PHP Smoke";
+const PHP_SLUG: &str = "php-smoke";
 /// Plan 20 clone verification: a throwaway copy of the smoke site.
 const CLONE_NAME: &str = "Smoke Clone";
 const CLONE_SLUG: &str = "smoke-clone";
@@ -47,6 +50,15 @@ fn http_code(url: &str) -> String {
         .args(["-s", "-o", "NUL", "-w", "%{http_code}", "--max-time", "20", url])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|e| format!("curl failed: {e}"))
+}
+
+/// The response body (for asserting on a page's rendered content).
+fn http_body(url: &str) -> String {
+    std::process::Command::new("curl")
+        .args(["-s", "--max-time", "20", url])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_else(|e| format!("curl failed: {e}"))
 }
 
@@ -640,6 +652,58 @@ async fn adminer_smoke(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Plan 26: create a PHP/Laravel stack site, prove it serves and (via the
+/// skeleton page's PDO probe) that php-fpm can reach the bundled mariadb, then
+/// delete it. Self-contained — its own site, cleaned up on the way out.
+async fn php_smoke(state: &AppState) -> Result<(), String> {
+    // Idempotent: drop any php-smoke leftovers from a prior run first.
+    let existing: Vec<site::Site> = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.list_sites()?.into_iter().filter(|s| s.slug == PHP_SLUG).collect()
+    };
+    for s in existing {
+        let _ = site::delete(None, state, &s.id, true).await;
+    }
+
+    let s = php::create_php_site(None, state, PHP_NAME.to_string(), "8.3".to_string(), None, false)
+        .await?;
+    println!(
+        "CREATED php id={} slug={} port={} db_port={} kind={}",
+        s.id, s.slug, s.port, s.db_port(), s.kind
+    );
+    assert_eq!(s.kind, site::KIND_PHP, "kind should be php");
+    assert!(s.capabilities.db_sync, "php claims db_sync");
+    assert!(!s.capabilities.wp_tools, "php has no WP tools");
+
+    let url = format!("http://localhost:{}", s.port);
+    let home = http_code(&format!("{url}/"));
+    println!("HTTP / -> {home}");
+    assert_eq!(home, "200", "the skeleton webroot should serve 200");
+
+    // The skeleton page runs a PDO connectivity check against the bundled db —
+    // "connected" proves php-fpm has pdo_mysql AND mariadb is reachable.
+    let body = http_body(&format!("{url}/"));
+    assert!(body.contains("Your PHP stack is running"), "unexpected body:\n{body}");
+    assert!(
+        body.contains("connected"),
+        "php-fpm could not reach the database (pdo_mysql/mariadb):\n{body}"
+    );
+    println!("skeleton page rendered + database reachable");
+
+    // The app code is bind-mounted from ./app on the host.
+    assert!(
+        s.dir().join("app").join("public").join("index.php").exists(),
+        "app/public/index.php missing on host"
+    );
+    assert_eq!(s.status, "running", "db status should be running");
+
+    // Clean up wholesale (drop snapshots too — this is a throwaway).
+    site::delete(None, state, &s.id, true).await?;
+    assert!(!s.dir().exists(), "php site dir survived delete");
+    println!("PHP SMOKE OK on {url}");
+    Ok(())
+}
+
 async fn delete(state: &AppState) -> Result<(), String> {
     let s = find_site(state)?;
     let dir = s.dir();
@@ -705,6 +769,7 @@ async fn main() {
         "tools" => tools_smoke(&state).await,
         "config" => config_smoke(&state).await,
         "adminer" => adminer_smoke(&state).await,
+        "php" => php_smoke(&state).await,
         "delete" => delete(&state).await,
         "cleanup" => cleanup(&state).await,
         other => Err(format!("unknown command: {other}")),

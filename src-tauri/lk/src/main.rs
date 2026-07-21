@@ -22,7 +22,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell as CompletionShell;
 use localkit_lib::serverkit::{self, ServerKitConnection};
 use localkit_lib::sync::{self, SyncRecord};
-use localkit_lib::{blueprint, db::Db, docker, router, site, snapshot, wordpress, AppState};
+use localkit_lib::{blueprint, db::Db, docker, php, router, site, snapshot, wordpress, AppState};
 
 // ---------------------------------------------------------------------------
 // clap surface
@@ -124,12 +124,19 @@ enum Cmd {
     Create {
         /// Site name, e.g. "My Blog" (defaults to the blueprint name with --blueprint)
         name: Option<String>,
+        /// Stack kind: `wordpress` (default) or `php` (a PHP/Laravel stack)
+        #[arg(long, default_value = "wordpress")]
+        kind: String,
         /// WordPress version (allowlist lives in the app; ignored with --blueprint)
         #[arg(long)]
         wp_version: Option<String>,
         /// PHP version (allowlist lives in the app; ignored with --blueprint)
         #[arg(long)]
         php_version: Option<String>,
+        /// For --kind php: import an existing PHP project folder instead of an
+        /// empty Laravel-ready skeleton
+        #[arg(long)]
+        from: Option<PathBuf>,
         /// Create from a saved blueprint (its id or name) instead of a blank install
         #[arg(long)]
         blueprint: Option<String>,
@@ -497,11 +504,25 @@ async fn run(cli: &Cli) -> Result<(), CliError> {
         Cmd::Connection(sub) => cmd_connection(&state, sub).await,
         Cmd::Create {
             name,
+            kind,
             wp_version,
             php_version,
+            from,
             blueprint,
             json,
-        } => cmd_create(&state, name.as_deref(), wp_version, php_version, blueprint.as_deref(), *json).await,
+        } => {
+            cmd_create(
+                &state,
+                name.as_deref(),
+                kind,
+                wp_version,
+                php_version,
+                from.as_deref(),
+                blueprint.as_deref(),
+                *json,
+            )
+            .await
+        }
         Cmd::Clone {
             site: q,
             new_name,
@@ -631,11 +652,14 @@ async fn cmd_list(state: &AppState, json: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_create(
     state: &AppState,
     name: Option<&str>,
+    kind: &str,
     wp_version: &Option<String>,
     php_version: &Option<String>,
+    from: Option<&Path>,
     blueprint: Option<&str>,
     json: bool,
 ) -> Result<(), String> {
@@ -663,6 +687,36 @@ async fn cmd_create(
     }
 
     let name = name.ok_or("a site name is required (or pass --blueprint <name>)")?;
+
+    // A PHP/Laravel stack: empty skeleton, or import an existing folder (--from).
+    if kind == site::KIND_PHP {
+        let php = php_version
+            .clone()
+            .unwrap_or_else(|| site::PHP_VERSIONS[0].into());
+        let source = from.map(|p| p.to_path_buf());
+        let site = php::create_php_site(None, state, name.to_string(), php, source, false).await?;
+        if json {
+            print_json(&site)?;
+        } else {
+            println!("{}", site_url(&site));
+        }
+        eprintln!("{} {} is running", ok("✓"), bold(&site.name));
+        eprintln!(
+            "{} open a terminal (`lk` has none — use the app) or edit ./{}/ to add your code",
+            info("→"),
+            php::APP_DIR
+        );
+        return Ok(());
+    }
+    if kind != site::KIND_WORDPRESS {
+        return Err(format!(
+            "unknown kind `{kind}` — use `wordpress` (default) or `php`"
+        ));
+    }
+    if from.is_some() {
+        return Err("--from is only valid with --kind php".into());
+    }
+
     let wp = wp_version
         .clone()
         .unwrap_or_else(|| site::WP_VERSIONS[0].into());
