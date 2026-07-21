@@ -111,6 +111,7 @@ function useSiteActions(site: SiteWithStatus) {
   const busyId = useSites((s) => s.busyId);
   const start = useSites((s) => s.start);
   const stop = useSites((s) => s.stop);
+  const resume = useSites((s) => s.resume);
   const remove = useSites((s) => s.remove);
   const navigate = useNav((s) => s.navigate);
   const router = useRouter((s) => s.status);
@@ -123,10 +124,17 @@ function useSiteActions(site: SiteWithStatus) {
   return {
     busy,
     up,
+    incomplete: !!site.incomplete,
     url,
     open: () => void openUrl(url),
     toggle: () => void (up ? stop(site.id) : start(site.id)),
     details: () => navigate({ name: "site", id: site.id }),
+    resume: () => void resume(site.id),
+    cleanup: () => {
+      if (window.confirm(`Clean up "${site.name}"? Its half-created containers, database and files will be removed.`)) {
+        void remove(site.id);
+      }
+    },
     remove: () => {
       if (window.confirm(`Delete "${site.name}"? This removes its containers, database and files.`)) {
         void remove(site.id);
@@ -137,6 +145,32 @@ function useSiteActions(site: SiteWithStatus) {
 
 const ghostBtn =
   "rounded-md border border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 disabled:opacity-50";
+const resumeBtn =
+  "rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50";
+
+/** Amber badge for a half-created site (plan 23), shown in place of the status. */
+function IncompleteBadge() {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-800 bg-amber-500/15 px-2.5 py-0.5 text-xs font-medium text-amber-400">
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+      Setup incomplete
+    </span>
+  );
+}
+
+/** Resume / Clean up actions for a half-created site (plan 23). */
+function IncompleteActions({ a }: { a: ReturnType<typeof useSiteActions> }) {
+  return (
+    <>
+      <button onClick={a.resume} disabled={a.busy} className={resumeBtn}>
+        Resume setup
+      </button>
+      <button onClick={a.cleanup} disabled={a.busy} className={dangerBtn}>
+        Clean up
+      </button>
+    </>
+  );
+}
 
 /**
  * Subtle marker on sites that came from a ServerKit server (plan 18). Renders
@@ -197,7 +231,7 @@ function GridCard({
           </button>
           <KindBadge kind={site.kind} />
         </div>
-        <StatusBadge status={site.live_status} />
+        {a.incomplete ? <IncompleteBadge /> : <StatusBadge status={site.live_status} />}
       </div>
       <p className="mt-1 font-mono text-xs text-zinc-500">{a.url}</p>
       <div className="mt-1 flex items-center gap-2 text-xs text-zinc-600">
@@ -206,33 +240,39 @@ function GridCard({
       </div>
 
       <div className="mt-3.5 flex flex-wrap gap-1.5">
-        {a.up && (
-          <button onClick={a.open} className={ghostBtn}>
-            Open
-          </button>
+        {a.incomplete ? (
+          <IncompleteActions a={a} />
+        ) : (
+          <>
+            {a.up && (
+              <button onClick={a.open} className={ghostBtn}>
+                Open
+              </button>
+            )}
+            <button
+              onClick={a.toggle}
+              disabled={a.busy || site.live_status === "creating"}
+              className={ghostBtn}
+            >
+              {a.up ? "Stop" : "Start"}
+            </button>
+            <button onClick={a.details} className={ghostBtn}>
+              Details
+            </button>
+            {site.capabilities.wp_tools && (
+              <button
+                onClick={() => onClone(site)}
+                disabled={a.busy || site.live_status === "creating"}
+                className={ghostBtn}
+              >
+                Clone
+              </button>
+            )}
+            <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
+              Delete
+            </button>
+          </>
         )}
-        <button
-          onClick={a.toggle}
-          disabled={a.busy || site.live_status === "creating"}
-          className={ghostBtn}
-        >
-          {a.up ? "Stop" : "Start"}
-        </button>
-        <button onClick={a.details} className={ghostBtn}>
-          Details
-        </button>
-        {site.capabilities.wp_tools && (
-          <button
-            onClick={() => onClone(site)}
-            disabled={a.busy || site.live_status === "creating"}
-            className={ghostBtn}
-          >
-            Clone
-          </button>
-        )}
-        <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
-          Delete
-        </button>
       </div>
     </div>
   );
@@ -292,37 +332,43 @@ function ListRow({
       <td className="px-4 py-2.5 font-mono text-xs text-zinc-500">{a.url}</td>
       <td className="px-4 py-2.5 text-xs text-zinc-500">{stackLabel(site)}</td>
       <td className="px-4 py-2.5">
-        <StatusBadge status={site.live_status} />
+        {a.incomplete ? <IncompleteBadge /> : <StatusBadge status={site.live_status} />}
       </td>
       <td className="px-4 py-2.5">
         <div className="flex justify-end gap-1.5">
-          {a.up && (
-            <button onClick={a.open} className={ghostBtn}>
-              Open
-            </button>
+          {a.incomplete ? (
+            <IncompleteActions a={a} />
+          ) : (
+            <>
+              {a.up && (
+                <button onClick={a.open} className={ghostBtn}>
+                  Open
+                </button>
+              )}
+              <button
+                onClick={a.toggle}
+                disabled={a.busy || site.live_status === "creating"}
+                className={ghostBtn}
+              >
+                {a.up ? "Stop" : "Start"}
+              </button>
+              <button onClick={a.details} className={ghostBtn}>
+                Details
+              </button>
+              {site.capabilities.wp_tools && (
+                <button
+                  onClick={() => onClone(site)}
+                  disabled={a.busy || site.live_status === "creating"}
+                  className={ghostBtn}
+                >
+                  Clone
+                </button>
+              )}
+              <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
+                Delete
+              </button>
+            </>
           )}
-          <button
-            onClick={a.toggle}
-            disabled={a.busy || site.live_status === "creating"}
-            className={ghostBtn}
-          >
-            {a.up ? "Stop" : "Start"}
-          </button>
-          <button onClick={a.details} className={ghostBtn}>
-            Details
-          </button>
-          {site.capabilities.wp_tools && (
-            <button
-              onClick={() => onClone(site)}
-              disabled={a.busy || site.live_status === "creating"}
-              className={ghostBtn}
-            >
-              Clone
-            </button>
-          )}
-          <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
-            Delete
-          </button>
         </div>
       </td>
     </tr>

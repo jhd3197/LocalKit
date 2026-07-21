@@ -1,7 +1,7 @@
 //! End-to-end smoke test driver for the real LocalKit site lifecycle.
 //! Runs outside the Tauri runtime (no AppHandle; events are skipped).
 //!
-//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|clone|blueprint|delete|cleanup>
+//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|delete|cleanup>
 //!
 //! Uses a fixed smoke data dir + site name so subcommands can run as separate
 //! invocations (each one reconstructs the same AppState).
@@ -217,6 +217,47 @@ async fn reconcile_smoke(state: &AppState) -> Result<(), String> {
     // Leave the smoke site genuinely running for the next subcommand.
     site::start(state, &s.id).await?;
     println!("RECONCILE OK");
+    Ok(())
+}
+
+/// Half-created recovery verification (plan 23): simulate a create killed
+/// mid-flight (remove the completion marker, force `status = creating`), confirm
+/// the site reports as `incomplete`, then resume it and confirm it comes back
+/// running, complete, and no longer flagged.
+async fn recover(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    let dir = s.dir();
+
+    // Arrange: a killed create leaves no marker and a stuck `creating` status.
+    let marker = dir.join(site::INSTALL_MARKER);
+    let _ = std::fs::remove_file(&marker);
+    force_status(state, &s.id, "creating", "2000-01-01T00:00:00+00:00")?;
+    assert!(!site::is_complete(&dir), "marker should be gone");
+
+    // Assert: the list flags it incomplete.
+    let listed = site::list(state).await?;
+    let entry = listed
+        .iter()
+        .find(|e| e.site.id == s.id)
+        .ok_or("smoke site missing from list")?;
+    assert!(entry.incomplete, "a marker-less creating site must read as incomplete");
+    println!("flagged incomplete: slug={} status={}", entry.site.slug, entry.site.status);
+
+    // Act: resume.
+    let resumed = site::resume(None, state, &s.id).await?;
+    println!("RESUMED status={}", resumed.status);
+
+    // Assert: running, complete, no longer flagged.
+    assert_eq!(resumed.status, "running", "resume should leave the site running");
+    assert!(site::is_complete(&dir), "resume must re-write the completion marker");
+    let after = site::list(state).await?;
+    let entry = after.iter().find(|e| e.site.id == s.id).unwrap();
+    assert!(!entry.incomplete, "resumed site must no longer read as incomplete");
+
+    // It actually serves HTTP.
+    let home = http_code(&format!("http://localhost:{}/", resumed.port));
+    assert!(["200", "301", "302"].contains(&home.as_str()), "resumed site not serving: {home}");
+    println!("RECOVER OK");
     Ok(())
 }
 
@@ -509,6 +550,7 @@ async fn main() {
         "stop" => stop(&state).await,
         "start" => start(&state).await,
         "reconcile" => reconcile_smoke(&state).await,
+        "recover" => recover(&state).await,
         "clone" => clone(&state).await,
         "blueprint" => blueprint_smoke(&state).await,
         "delete" => delete(&state).await,

@@ -44,6 +44,8 @@ export const ipc = {
     invoke<Site>("clone_site", { id, newName }),
   startSite: (id: string) => invoke<Site>("start_site", { id }),
   stopSite: (id: string) => invoke<Site>("stop_site", { id }),
+  /** Finish a half-created site (plan 23). */
+  resumeSite: (id: string) => invoke<Site>("resume_site", { id }),
   deleteSite: (id: string, deleteSnapshots = false) =>
     invoke<void>("delete_site", { id, deleteSnapshots }),
   siteLogs: (id: string, tail = 200) => invoke<string>("site_logs", { id, tail }),

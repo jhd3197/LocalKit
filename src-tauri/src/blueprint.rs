@@ -551,6 +551,9 @@ async fn do_create(
         db.set_status(id, "running")?;
         db.update_credentials(id, &admin_user, "")?;
     }
+    // Last step: the completion marker (plan 23) — its absence flags a killed
+    // blueprint provision.
+    site::mark_complete(&dir);
     router::refresh_routes(state).await;
     router::refresh_hosts(state).await;
     site::get(state, id)

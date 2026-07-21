@@ -224,12 +224,32 @@ impl Site {
     }
 }
 
+/// Filename of the completion marker written as the last step of a successful
+/// create/import/clone (plan 23). A site directory that lacks it is a
+/// half-created site — a create killed mid-flight.
+pub const INSTALL_MARKER: &str = ".localkit-install-complete";
+
+/// Write the completion marker (best-effort — a marker write failure must not
+/// fail an otherwise-finished create; the next startup backfill re-adds it).
+pub(crate) fn mark_complete(dir: &Path) {
+    let _ = std::fs::write(dir.join(INSTALL_MARKER), b"");
+}
+
+/// Whether a site directory carries the completion marker.
+pub fn is_complete(dir: &Path) -> bool {
+    dir.join(INSTALL_MARKER).exists()
+}
+
 /// A site row plus its live container status.
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteWithStatus {
     #[serde(flatten)]
     pub site: Site,
     pub live_status: String,
+    /// A half-created site (plan 23): its directory exists but the completion
+    /// marker is absent and no create is in flight. The UI offers Resume / Clean
+    /// up instead of the usual actions.
+    pub incomplete: bool,
 }
 
 /// Detail payload for the site page (includes DB credentials from .env).
@@ -238,6 +258,8 @@ pub struct SiteDetail {
     #[serde(flatten)]
     pub site: Site,
     pub live_status: String,
+    /// See `SiteWithStatus::incomplete` (plan 23).
+    pub incomplete: bool,
     pub db_host: String,
     pub db_port: u16,
     pub db_name: String,
@@ -641,6 +663,9 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
         db.set_status(&site.id, "running")?;
         db.update_credentials(&site.id, &site.admin_user, &site.admin_pass)?;
     }
+    // Last step: the completion marker. Its absence is what flags a create that
+    // was killed mid-flight (plan 23).
+    mark_complete(&dir);
     // Add the new site to the router's Caddyfile + hosts block (no-op when disabled).
     router::refresh_routes(state).await;
     router::refresh_hosts(state).await;
@@ -798,6 +823,7 @@ async fn do_clone(
         db.set_status(id, "running")?;
         db.update_credentials(id, &site.admin_user, &site.admin_pass)?;
     }
+    mark_complete(&dir);
     // A new running site joins the router's Caddyfile + hosts block (no-op when
     // local domains are disabled).
     router::refresh_routes(state).await;
@@ -840,9 +866,11 @@ pub fn detail(state: &AppState, id: &str) -> Result<SiteDetail, String> {
     let site = get(state, id)?;
     let dir = site.dir();
     let db_password = read_env_value(&dir, "DB_PASSWORD").unwrap_or_default();
+    let incomplete = dir.exists() && !is_complete(&dir) && !state.in_flight.contains(&site.id);
     Ok(SiteDetail {
         db_port: site.db_port(),
         live_status: site.status.clone(),
+        incomplete,
         db_host: "127.0.0.1".into(),
         db_name: "wordpress".into(),
         db_user: "wordpress".into(),
@@ -874,6 +902,90 @@ pub async fn stop(state: &AppState, id: &str) -> Result<Site, String> {
     }
     router::refresh_routes(state).await;
     get(state, id)
+}
+
+/// Finish a half-created site (plan 23): a create killed mid-flight left
+/// `status = creating` and no completion marker. Re-runs the tail — bring the
+/// containers up, wait, and (for a fresh WordPress create that never installed)
+/// run `wp core install` — then marks it complete. The containers exist and the
+/// images are pulled, so this is normally just the wait + install tail.
+pub async fn resume(app: Option<&AppHandle>, state: &AppState, id: &str) -> Result<Site, String> {
+    let _guard = state.in_flight.guard(id);
+    let site = get(state, id)?;
+    if !site.dir().exists() {
+        return Err(format!(
+            "\"{}\" has no project directory to resume — clean it up instead.",
+            site.name
+        ));
+    }
+    match do_resume(app, state, &site).await {
+        Ok(site) => {
+            let url = router::site_public_url(state, &site);
+            emit(
+                app,
+                &site.id,
+                "done",
+                &format!("{} setup finished — now running at {url}", site.name),
+            );
+            Ok(site)
+        }
+        Err(e) => {
+            emit(app, &site.id, "error", &format!("Resume failed: {e}"));
+            Err(e)
+        }
+    }
+}
+
+async fn do_resume(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Result<Site, String> {
+    let dir = site.dir();
+    let id = site.id.as_str();
+
+    // The compose project is the first, fast create stage, so it is almost
+    // always present. If a WordPress site's is somehow missing we can
+    // regenerate it; a docker app's project was copied and cannot be rebuilt.
+    if site.kind == KIND_WORDPRESS && !dir.join("docker-compose.yml").exists() {
+        write_project_files(site)?;
+    }
+
+    emit(app, id, "containers", "Starting Docker containers...");
+    docker::compose_up(&dir).await?;
+
+    emit(app, id, "waiting", "Waiting for the app to come online...");
+    let _ = wait_for_port(site.config.upstream_port(site.port), 180).await;
+
+    let mut resumed = site.clone();
+    if site.kind == KIND_WORDPRESS {
+        wordpress::wait_for_config(&dir, 24).await?;
+        if !wordpress::is_installed(&dir).await {
+            // An imported/clone/blueprint site's data lands via an archive, not
+            // `wp core install` — if it never installed, that data step never
+            // ran and cannot be reconstructed here. Only a fresh create's tail
+            // is safe to re-run.
+            if site.connection_id.is_some() {
+                return Err(
+                    "This imported site never finished importing its data — clean it up and import it again."
+                        .into(),
+                );
+            }
+            let admin_pass = random_password(16);
+            let install_url = router::site_public_url(state, site);
+            emit(app, id, "install", "Finishing WordPress setup...");
+            wordpress::install(&dir, site, &admin_pass, &install_url, app).await?;
+            resumed.admin_pass = admin_pass;
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            db.update_credentials(id, &resumed.admin_user, &resumed.admin_pass)?;
+        }
+    }
+
+    resumed.status = "running".into();
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_status(id, "running")?;
+    }
+    mark_complete(&dir);
+    router::refresh_routes(state).await;
+    router::refresh_hosts(state).await;
+    Ok(resumed)
 }
 
 /// Delete a site. Unless `delete_snapshots` is set, a `pre_delete` snapshot is
@@ -952,7 +1064,11 @@ pub async fn list(state: &AppState) -> Result<Vec<SiteWithStatus>, String> {
             // Docker unavailable/off: fall back to the stored status.
             Err(_) => site.status.clone(),
         };
-        out.push(SiteWithStatus { site, live_status });
+        // Half-created? Dir present, completion marker absent, no create in
+        // flight (plan 23). Startup backfill marks known-complete legacy sites.
+        let incomplete =
+            site.dir().exists() && !is_complete(&site.dir()) && !state.in_flight.contains(&site.id);
+        out.push(SiteWithStatus { site, live_status, incomplete });
     }
     Ok(out)
 }

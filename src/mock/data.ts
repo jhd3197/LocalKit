@@ -142,6 +142,28 @@ export const sites: MockSite[] = [
     remote_site_id: null,
     ...WP_KIND,
   },
+  // A create killed mid-install (plan 23): status stuck at `creating`, no
+  // completion marker → the dashboard flags it "Setup incomplete" and offers
+  // Resume setup / Clean up instead of the usual actions.
+  {
+    id: "site-beta-launch",
+    name: "Beta Launch",
+    slug: "beta-launch",
+    path: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites\\beta-launch",
+    port: 8087,
+    wp_version: "6.7",
+    php_version: "8.3",
+    status: "creating",
+    live_status: "stopped",
+    incomplete: true,
+    admin_user: "admin",
+    admin_pass: "",
+    created_at: "2026-07-20T22:05:00Z",
+    db_password: "m4ri4-b3t4-4410",
+    connection_id: null,
+    remote_site_id: null,
+    ...WP_KIND,
+  },
   {
     id: "site-client-demo",
     name: "Client Demo",

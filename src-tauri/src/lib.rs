@@ -165,6 +165,15 @@ async fn stop_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
     Ok(site)
 }
 
+/// Finish a half-created site (plan 23): re-run the create tail and mark it
+/// complete. The "Resume setup" action on an incomplete site.
+#[tauri::command]
+async fn resume_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Site, String> {
+    let site = site::resume(Some(&app), &state, &id).await?;
+    tray::refresh(&app);
+    Ok(site)
+}
+
 #[tauri::command]
 async fn delete_site(
     app: AppHandle,
@@ -600,6 +609,9 @@ pub fn run() {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("LocalKit");
     let db = Db::open(&data_dir.join("localkit.db")).expect("failed to open LocalKit database");
+    // Backfill completion markers for already-complete sites before anything
+    // reads them, so pre-plan-23 sites are never flagged "Setup incomplete".
+    reconcile::backfill_markers(&db);
     let settings_init_script = build_settings_init_script(&db);
 
     tauri::Builder::default()
@@ -650,6 +662,7 @@ pub fn run() {
             clone_site,
             start_site,
             stop_site,
+            resume_site,
             delete_site,
             site_logs,
             wp_cli_info,

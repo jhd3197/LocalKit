@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 
-use crate::{docker, AppState};
+use crate::{db::Db, docker, site, AppState};
 
 /// How recently a `running` write must have happened for the reconciler to
 /// leave an empty ground truth alone (grace window for slow container starts).
@@ -181,6 +181,22 @@ pub async fn reconcile_once(state: &AppState) -> Vec<ReconcileEvent> {
         }
     }
     events
+}
+
+/// One-time startup backfill (plan 23): mark every already-complete site
+/// (running/stopped/degraded, directory present) with the completion marker.
+/// This is what keeps a pre-plan-23 site — or a create that crashed after
+/// `set_status` but before the marker write — from being mistaken for a
+/// half-created one. Run synchronously before the window loads so the first
+/// `list_sites` is already honest.
+pub fn backfill_markers(db: &Db) {
+    for s in db.list_sites().unwrap_or_default() {
+        let done = matches!(s.status.as_str(), "running" | "stopped" | "degraded");
+        let dir = s.dir();
+        if done && dir.exists() && !site::is_complete(&dir) {
+            site::mark_complete(&dir);
+        }
+    }
 }
 
 /// Start the background reconcile loop: one pass immediately (so the dashboard

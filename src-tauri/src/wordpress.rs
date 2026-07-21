@@ -273,6 +273,12 @@ pub async fn install(
     Err(format!("WordPress install failed: {last_err}"))
 }
 
+/// Whether WordPress core is already installed (plan 23 resume: don't re-run
+/// `core install` on a site whose database already holds one).
+pub async fn is_installed(dir: &Path) -> bool {
+    wp(dir, &["core", "is-installed"]).await.is_ok()
+}
+
 /// Wait until wp-cli can see the site's `wp-config.php`.
 ///
 /// `site::wait_for_port` is not a sufficient readiness signal on its own:

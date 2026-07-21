@@ -55,10 +55,18 @@ export interface Site {
 
 export interface SiteWithStatus extends Site {
   live_status: string;
+  /**
+   * Plan 23 — a half-created site (dir present, completion marker absent, no
+   * create in flight). The dashboard offers Resume / Clean up. Optional so mock
+   * fixtures only set it on the sites that are actually incomplete.
+   */
+  incomplete?: boolean;
 }
 
 export interface SiteDetail extends Site {
   live_status: string;
+  /** Plan 23 — see `SiteWithStatus.incomplete`. */
+  incomplete?: boolean;
   db_host: string;
   db_port: number;
   db_name: string;

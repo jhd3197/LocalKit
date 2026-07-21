@@ -351,6 +351,9 @@ async fn do_import(
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.set_status(id, "running")?;
     }
+    // Last step: the completion marker (plan 23) — its absence flags a killed
+    // import.
+    site::mark_complete(&dir);
     // A docker app is an ordinary site to the router/tray — it gets a domain.
     router::refresh_routes(state).await;
     router::refresh_hosts(state).await;

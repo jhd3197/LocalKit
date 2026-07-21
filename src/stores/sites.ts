@@ -18,6 +18,7 @@ interface SitesState {
   cloneSite: (id: string, newName: string) => Promise<Site>;
   start: (id: string) => Promise<void>;
   stop: (id: string) => Promise<void>;
+  resume: (id: string) => Promise<void>;
   remove: (id: string, deleteSnapshots?: boolean) => Promise<void>;
   fetchLogs: (id: string) => Promise<void>;
   fetchWpInfo: (id: string) => Promise<void>;
@@ -147,6 +148,20 @@ export const useSites = create<SitesState>((set, get) => ({
       toast.success("Site stopped", siteName(get().sites, id));
     } catch (e) {
       toastError(e, "Stop site");
+    } finally {
+      set({ busyId: null });
+    }
+  },
+
+  resume: async (id) => {
+    // Resume streams the same site-event stages as create, so the pinned
+    // progress toast covers feedback; busyId disables the card while it runs.
+    set({ busyId: id });
+    try {
+      await ipc.resumeSite(id);
+      await get().refresh();
+    } catch (e) {
+      toastError(e, "Resume setup");
     } finally {
       set({ busyId: null });
     }

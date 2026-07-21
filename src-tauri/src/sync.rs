@@ -783,6 +783,9 @@ async fn do_import(
         // does not need one. Storing a fake would be worse than storing none.
         db.update_credentials(id, &admin_user, "")?;
     }
+    // Last step: the completion marker (plan 23) — its absence flags a killed
+    // import.
+    site::mark_complete(&dir);
     router::refresh_routes(state).await;
     router::refresh_hosts(state).await;
 

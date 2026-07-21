@@ -299,6 +299,37 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return site;
     }
 
+    // Plan 23: finish a half-created site — re-run the install tail, then mark
+    // it complete (clears the `incomplete` flag so the card returns to normal).
+    case "resume_site": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      const stages: Array<[string, string]> = [
+        ["containers", "Starting containers…"],
+        ["waiting", "Waiting for the app to come online…"],
+        ["install", "Finishing WordPress setup…"],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id: site.id, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        // Flip BEFORE the terminal `done` event, so the refresh it triggers
+        // reads the finished, no-longer-incomplete site.
+        const s = data.sites.find((x) => x.id === a.id);
+        if (s) {
+          s.status = s.live_status = "running";
+          s.incomplete = false;
+        }
+        emit("site-event", {
+          id: site.id,
+          stage: "done",
+          message: `${site.name} setup finished — now running at http://localhost:${site.port}`,
+        } satisfies SiteEvent);
+      })();
+      return site;
+    }
+
     case "delete_site": {
       const siteId = String(a.id);
       const i = data.sites.findIndex((s) => s.id === siteId);
