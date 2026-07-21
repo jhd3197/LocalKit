@@ -15,6 +15,9 @@ pub const DEFAULT_ADMIN_USER: &str = "admin";
 pub const BASE_PORT: u16 = 8081;
 /// Host DB port = site port + this offset (8081 -> 18081).
 pub const DB_PORT_OFFSET: u16 = 10000;
+/// Host Adminer port = DB port + this offset (18081 -> 19081), deterministic so
+/// the profile-gated `adminer` service needs no allocator change (plan 24).
+pub const ADMINER_PORT_OFFSET: u16 = 1000;
 
 /// Site kinds (plan 22). WordPress is the reference implementation with every
 /// capability; `docker` is a bring-your-own-compose project. The stored default
@@ -192,6 +195,13 @@ fn default_kind() -> String {
 impl Site {
     pub fn db_port(&self) -> u16 {
         self.port + DB_PORT_OFFSET
+    }
+
+    /// Host port the Adminer database GUI is published on: `db_port + 1000`
+    /// (plan 24). A deterministic offset, so the profile-gated `adminer` service
+    /// needs no allocator change — it is mapped in the compose template.
+    pub fn adminer_port(&self) -> u16 {
+        self.db_port() + ADMINER_PORT_OFFSET
     }
 
     pub fn dir(&self) -> PathBuf {
@@ -475,6 +485,21 @@ services:
       - wp-data:/var/www/html
       - ./wp-content:/var/www/html/wp-content
 
+  # Adminer database GUI (single-file PHP, ~0.5 MB). Profile-gated + off by
+  # default; started on demand from Tools -> Database (plan 24). The host port is
+  # deterministic (db_port + 1000), so no allocator change is needed.
+  adminer:
+    image: adminer:4-standalone
+    profiles: ["tools"]
+    restart: unless-stopped
+    ports:
+      - "{adminer_port}:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   wp-data:
   db-data:
@@ -482,7 +507,14 @@ volumes:
         slug = site.slug,
         wp = site.wp_version,
         php = site.php_version,
+        adminer_port = site.adminer_port(),
     )
+}
+
+/// The site's MySQL password from `.env` (the `wordpress` DB user), for
+/// pre-filling the Adminer login (plan 24). Empty when `.env` is missing.
+pub fn db_password(dir: &Path) -> String {
+    read_env_value(dir, "DB_PASSWORD").unwrap_or_default()
 }
 
 pub fn render_env(site: &Site, db_password: &str) -> String {
@@ -1204,6 +1236,38 @@ mod tests {
         // Round-trips back to JSON and parses to the same value.
         let back: SiteConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert_eq!(back, config);
+    }
+
+    /// Plan 24: Adminer is a profile-gated service published on db_port + 1000,
+    /// mapped at render time so no allocator change is needed.
+    #[test]
+    fn compose_publishes_adminer_on_the_db_plus_1000_port() {
+        let mut s = Site {
+            id: "s".into(),
+            name: "Blog".into(),
+            slug: "blog".into(),
+            path: "/tmp/blog".into(),
+            port: 8081,
+            wp_version: "6.7".into(),
+            php_version: "8.3".into(),
+            status: "running".into(),
+            status_updated_at: "2026-01-01T00:00:00Z".into(),
+            admin_user: DEFAULT_ADMIN_USER.into(),
+            admin_pass: String::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            connection_id: None,
+            remote_site_id: None,
+            kind: KIND_WORDPRESS.into(),
+            config: SiteConfig::default(),
+            capabilities: Capabilities::default(),
+        };
+        s.refresh_capabilities();
+        assert_eq!(s.adminer_port(), 19081, "db_port (18081) + 1000");
+        let yml = render_compose(&s);
+        assert!(yml.contains("adminer:4-standalone"), "{yml}");
+        assert!(yml.contains("\"19081:8080\""), "adminer host port mapping:\n{yml}");
+        // Off by default: gated behind the tools profile, like wpcli.
+        assert_eq!(yml.matches("profiles: [\"tools\"]").count(), 2, "wpcli + adminer are profile-gated");
     }
 
     #[test]

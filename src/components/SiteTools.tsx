@@ -1,4 +1,5 @@
 import type { SiteDetail } from "../lib/types";
+import DatabasePanel from "./DatabasePanel";
 import SearchReplacePanel from "./SearchReplacePanel";
 import DebugPanel from "./DebugPanel";
 import ConfigEditorPanel from "./ConfigEditorPanel";
@@ -21,6 +22,7 @@ export default function SiteTools({
   const caps = detail.capabilities;
   return (
     <div className="mt-6 space-y-4">
+      {caps.db_gui && <DatabasePanel siteId={detail.id} running={running} />}
       {caps.search_replace && (
         <SearchReplacePanel siteId={detail.id} running={running} onShowSnapshots={onShowSnapshots} />
       )}

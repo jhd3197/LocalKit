@@ -156,6 +156,17 @@ pub async fn compose_down(dir: &Path, volumes: bool) -> Result<(), String> {
     compose(dir, args).await.map(|_| ())
 }
 
+/// Start a single profile-gated service: `docker compose --profile <profile> up
+/// -d <service>`. The `--profile` flag is required — without it a service with
+/// `profiles: [...]` is treated as nonexistent (plan 24 starts Adminer this way).
+pub async fn compose_up_profile_service(
+    dir: &Path,
+    profile: &str,
+    service: &str,
+) -> Result<(), String> {
+    compose(dir, &["--profile", profile, "up", "-d", service]).await.map(|_| ())
+}
+
 /// Pull every image referenced by the compose project (no service list — used
 /// for a bring-your-own-compose docker app, plan 22, where LocalKit does not
 /// know the services ahead of time). Best-effort: `up` pulls anything missing

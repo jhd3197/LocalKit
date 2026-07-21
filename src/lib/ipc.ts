@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AdminerInfo,
   AppInfo,
   Blueprint,
   DebugStatus,
@@ -52,6 +53,8 @@ export const ipc = {
     invoke<void>("delete_site", { id, deleteSnapshots }),
   siteLogs: (id: string, tail = 200) => invoke<string>("site_logs", { id, tail }),
   wpCliInfo: (id: string) => invoke<WpInfo>("wp_cli_info", { id }),
+  /** Start Adminer for a site and get its URL + DB login to pre-fill (plan 24). */
+  openSiteDatabase: (id: string) => invoke<AdminerInfo>("open_site_database", { id }),
   /** Serialization-safe search-replace (plan 24); dryRun counts without writing. */
   siteSearchReplace: (id: string, from: string, to: string, dryRun: boolean) =>
     invoke<SearchReplaceResult>("site_search_replace", { id, from, to, dryRun }),

@@ -1,6 +1,28 @@
 # 24 — Site tools: database GUI, search-replace, debug mode, config editor
 
-Status: ⬜ planned
+Status: ✅ shipped
+
+All four phases landed. Notes where the implementation reconciled the plan
+against real behaviour:
+
+- **Adminer login** uses the site's `wordpress` DB user, not `root`: the compose
+  template sets `MYSQL_RANDOM_ROOT_PASSWORD`, so root's password is unknowable.
+  The "Open database" button opens `?server=db&username=wordpress&db=wordpress`
+  and copies the `wordpress` user's password to the clipboard.
+- **Adminer port** is `db_port + 1000` (`Site::adminer_port`), mapped in the
+  deterministic compose template; `open_site_database` rewrites the compose file
+  first so sites created before the feature pick up the service.
+- **`db-<slug>.test`** is carried in `render_caddyfile` (+ matching hosts
+  entries) for `db_gui` sites; the button opens the domain when local domains are
+  on, else `localhost:<adminer_port>`.
+- **Search-replace** parses wp-cli's *tab-separated* report (it drops the ASCII
+  grid when stdout is a pipe, which is what LocalKit captures).
+- **Debug** writes `wp-config.php` via a root wpcli runner (`--user root` +
+  `--allow-root`) — the file is root-owned in the wp-data volume.
+- **Config editor** reads/writes `wp-config.php` with `docker compose cp`
+  (runs as the daemon, so it overwrites the root-owned file; requires the site
+  running); `.env` is a plain host file whose save offers a restart
+  (`compose up -d`, which recreates services whose env changed).
 
 A "Tools" tab on SiteDetail covering the four things every WP developer
 reaches for an external app to do today: browse the database, run a

@@ -1,7 +1,7 @@
 //! End-to-end smoke test driver for the real LocalKit site lifecycle.
 //! Runs outside the Tauri runtime (no AppHandle; events are skipped).
 //!
-//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|delete|cleanup>
+//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|adminer|delete|cleanup>
 //!
 //! Uses a fixed smoke data dir + site name so subcommands can run as separate
 //! invocations (each one reconstructs the same AppState).
@@ -603,6 +603,43 @@ async fn config_smoke(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Adminer sidecar verification (plan 24): rewrite the compose file to add the
+/// profile-gated `adminer` service (the smoke site predates the feature), start
+/// it on demand, and assert it serves its login page on db_port + 1000. Stops
+/// just Adminer afterward.
+async fn adminer_smoke(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    if s.status != "running" {
+        site::start(state, &s.id).await?;
+    }
+    let dir = s.dir();
+    // Ensure the compose file carries the adminer service (deterministic render).
+    std::fs::write(dir.join("docker-compose.yml"), site::render_compose(&s))
+        .map_err(|e| format!("failed to rewrite docker-compose.yml: {e}"))?;
+    docker::compose_up_profile_service(&dir, "tools", "adminer").await?;
+
+    let port = s.adminer_port();
+    println!("adminer starting on port {port} (db_port {} + 1000)...", s.db_port());
+    let mut code = String::new();
+    for _ in 0..15 {
+        code = http_code(&format!("http://localhost:{port}/"));
+        if code == "200" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    assert_eq!(code, "200", "Adminer did not serve its login page on port {port}");
+    println!("adminer serving HTTP 200 on {port}");
+
+    // Tidy: stop just the Adminer service (leave wordpress/db running).
+    let _ = std::process::Command::new("docker")
+        .args(["compose", "--profile", "tools", "stop", "adminer"])
+        .current_dir(&dir)
+        .output();
+    println!("ADMINER OK on db-{}.test-equivalent port {port}", s.slug);
+    Ok(())
+}
+
 async fn delete(state: &AppState) -> Result<(), String> {
     let s = find_site(state)?;
     let dir = s.dir();
@@ -667,6 +704,7 @@ async fn main() {
         "blueprint" => blueprint_smoke(&state).await,
         "tools" => tools_smoke(&state).await,
         "config" => config_smoke(&state).await,
+        "adminer" => adminer_smoke(&state).await,
         "delete" => delete(&state).await,
         "cleanup" => cleanup(&state).await,
         other => Err(format!("unknown command: {other}")),

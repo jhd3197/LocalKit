@@ -268,6 +268,51 @@ async fn site_search_replace(
     }
 }
 
+/// Where Adminer opened, plus the DB login to pre-fill (plan 24). Adminer can't
+/// take the password in the URL, so the frontend copies it to the clipboard.
+#[derive(Serialize)]
+struct AdminerInfo {
+    url: String,
+    username: String,
+    password: String,
+}
+
+/// Start the Adminer database GUI for a site and return its URL + DB login.
+///
+/// Adminer is a profile-gated service (off by default). Sites created before
+/// this feature don't have it in their compose file, so the deterministic
+/// template is rewritten first (leaving wordpress/db unchanged), then Adminer is
+/// started on demand. The login uses the site's `wordpress` DB user — the root
+/// password is random (`MYSQL_RANDOM_ROOT_PASSWORD`) and unknowable, so the plan
+/// note about `username=root` can't apply here (plan 24).
+#[tauri::command]
+async fn open_site_database(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<AdminerInfo, String> {
+    let s = site::get(&state, &id)?;
+    s.require(s.capabilities.db_gui, "The database GUI")?;
+    let dir = s.dir();
+    // Ensure the compose file carries the adminer service (deterministic render,
+    // so this is safe and leaves the running wordpress/db containers alone).
+    std::fs::write(dir.join("docker-compose.yml"), site::render_compose(&s))
+        .map_err(|e| format!("failed to update docker-compose.yml: {e}"))?;
+    // Start Adminer; depends_on brings the db up if it isn't already.
+    docker::compose_up_profile_service(&dir, "tools", "adminer").await?;
+    // Keep the Caddyfile's db-<slug>.test route current (no-op/UAC-free; hosts
+    // entries are synced through the normal create/delete path).
+    router::refresh_routes(&state).await;
+
+    let base = router::adminer_public_url(&state, &s);
+    Ok(AdminerInfo {
+        // Prefill the server + username + database; Adminer takes the password
+        // in its form, not the URL.
+        url: format!("{base}/?server=db&username=wordpress&db=wordpress"),
+        username: "wordpress".to_string(),
+        password: site::db_password(&dir),
+    })
+}
+
 /// WP_DEBUG state + debug-log size (plan 24).
 #[tauri::command]
 async fn site_debug_status(
@@ -838,6 +883,7 @@ pub fn run() {
             site_logs,
             wp_cli_info,
             site_search_replace,
+            open_site_database,
             site_debug_status,
             set_site_debug,
             read_site_debug_log,

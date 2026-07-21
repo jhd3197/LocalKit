@@ -599,6 +599,19 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return { dry_run: dryRun, total, changes };
     }
 
+    // Plan 24: Adminer database GUI. Returns a fake URL + DB login; the opener
+    // mock no-ops the actual navigation, but the clipboard + toast flow runs.
+    case "open_site_database": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      const adminerPort = site.port + 11000;
+      return {
+        url: `http://localhost:${adminerPort}/?server=db&username=wordpress&db=wordpress`,
+        username: "wordpress",
+        password: site.db_password || "m4ri4-demo",
+      };
+    }
+
     // Plan 24: WP_DEBUG toggle + debug.log viewer. Enabling seeds a couple of
     // fake log lines so the viewer + clear button are reviewable.
     case "site_debug_status": {

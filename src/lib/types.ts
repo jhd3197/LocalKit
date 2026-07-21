@@ -119,6 +119,13 @@ export interface DebugStatus {
   log_bytes: number;
 }
 
+/** Adminer URL + the DB login to pre-fill (plan 24 Tools → Database). */
+export interface AdminerInfo {
+  url: string;
+  username: string;
+  password: string;
+}
+
 /** A site kind and the capabilities it advertises (plan 22 `app_info`). */
 export interface KindInfo {
   kind: string;

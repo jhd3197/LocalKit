@@ -157,8 +157,20 @@ async function main() {
     await clickExact("button", "tools");
     await sleep(400);
     let text = await bodyText();
+    ok("Tools tab shows the Database GUI", /Browse and edit the database in Adminer/i.test(text));
     ok("Tools tab shows Search & Replace", /Search & Replace/i.test(text));
     ok("Tools tab hides the overview logs panel", !/Container logs/i.test(text));
+
+    // Database: "Open database" fires (opener is a no-op in mock) and toasts.
+    const canOpenDb = await page.evaluate(() =>
+      [...document.querySelectorAll("button")].some(
+        (b) => b.textContent.trim() === "Open database" && !b.disabled
+      )
+    );
+    ok("Open database is enabled on a running site", canOpenDb);
+    await clickByText("button", "Open database");
+    await sleep(500);
+    ok("opening the database toasts the login", /Log in as/i.test(await bodyText()));
 
     // 2) Search & Replace: preview shows per-column counts + Apply appears.
     ok("filled the 'replace this' field", await setInputByPlaceholder("old.test", "https://old.test"));

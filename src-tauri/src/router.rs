@@ -123,6 +123,25 @@ pub fn site_public_url(state: &AppState, site: &Site) -> String {
     }
 }
 
+/// Where a site's Adminer database GUI is reached (plan 24): `db-<slug>.test`
+/// when local domains are on and the site has a db GUI, else
+/// `localhost:<adminer_port>`. Mirrors `site_public_url`; a non-default https
+/// port stays on http for the same reason (a second cert-exception prompt).
+pub fn adminer_public_url(state: &AppState, site: &Site) -> String {
+    let (domains_on, ca_trusted) = enabled_and_trusted(state);
+    if domains_on && site.capabilities.domains && site.capabilities.db_gui {
+        let ports = router_ports(state);
+        if !ports.is_default() {
+            format!("http://db-{}.{TLD}:{}", site.slug, ports.http)
+        } else {
+            let scheme = if ca_trusted { "https" } else { "http" };
+            format!("{scheme}://db-{}.{TLD}", site.slug)
+        }
+    } else {
+        format!("http://localhost:{}", site.adminer_port())
+    }
+}
+
 fn render_compose(ports: RouterPorts) -> String {
     // Container ports stay 80/443 — only the host mapping moves, so the
     // Caddyfile (and the hosts block) are unaffected by fallback mode.
@@ -163,6 +182,17 @@ fn render_caddyfile(sites: &[Site]) -> String {
             slug = site.slug,
             port = site.config.upstream_port(site.port),
         ));
+        // Adminer database GUI at db-<slug>.test when the kind has a db GUI
+        // (plan 24). The route exists whether or not Adminer is currently
+        // running — starting it is on-demand from Tools -> Database.
+        if site.capabilities.db_gui {
+            out.push_str(&format!(
+                "http://db-{slug}.{TLD} {{\n\treverse_proxy host.docker.internal:{port}\n}}\n\n\
+                 https://db-{slug}.{TLD} {{\n\ttls internal\n\treverse_proxy host.docker.internal:{port}\n}}\n\n",
+                slug = site.slug,
+                port = site.adminer_port(),
+            ));
+        }
     }
     out
 }
@@ -569,12 +599,16 @@ async fn sync_hosts(slugs: &[String]) -> Result<(), String> {
 }
 
 fn site_slugs(state: &AppState) -> Vec<String> {
-    list_sites(state)
-        .unwrap_or_default()
-        .iter()
-        .filter(|s| s.capabilities.domains)
-        .map(|s| s.slug.clone())
-        .collect()
+    let mut slugs = Vec::new();
+    for s in list_sites(state).unwrap_or_default().iter().filter(|s| s.capabilities.domains) {
+        slugs.push(s.slug.clone());
+        // Adminer's `db-<slug>.test` needs its own hosts entry too, or the
+        // Caddy db-route the caddyfile carries never resolves (plan 24).
+        if s.capabilities.db_gui {
+            slugs.push(format!("db-{}", s.slug));
+        }
+    }
+    slugs
 }
 
 fn get_flag(state: &AppState, key: &str) -> Result<bool, String> {
@@ -1184,6 +1218,19 @@ mod tests {
             "docker → app_port, not the reserved site port:\n{out}"
         );
         assert!(!out.contains("8090"), "the reserved site port must not be the upstream:\n{out}");
+    }
+
+    /// Plan 24: a db-GUI site gets a `db-<slug>.test` route to its Adminer port
+    /// (db_port + 1000); a code-only docker app does not.
+    #[test]
+    fn caddyfile_adds_a_db_route_for_db_gui_sites_only() {
+        let wp = site_for("blog", 8081, crate::site::KIND_WORDPRESS, None);
+        let app = site_for("api", 8090, crate::site::KIND_DOCKER, Some(3000));
+        let out = render_caddyfile(&[wp, app]);
+        // blog: adminer_port = 8081 + 10000 + 1000 = 19081.
+        assert!(out.contains("http://db-blog.test"), "{out}");
+        assert!(out.contains("reverse_proxy host.docker.internal:19081"), "{out}");
+        assert!(!out.contains("db-api.test"), "a code-only docker app must not get a db route:\n{out}");
     }
 
     #[test]

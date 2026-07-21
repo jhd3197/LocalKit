@@ -110,7 +110,7 @@ src-tauri/               Rust backend (also a cargo workspace root)
   one-click recovery, port-bearing site URLs, SiteDetail banner). The mock
   fakes a LocalWP holding 80/443; `window.__LOCALKIT_MOCK__` (mock builds
   only) lets the script reach states the UI can't drive on its own.
-- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|delete|cleanup>`
+- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|adminer|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
   uses a scratch data dir under the OS temp dir. `reconcile` (plan 23) stops the
   containers behind LocalKit's back and asserts the reconciler settles
@@ -127,7 +127,9 @@ src-tauri/               Rust backend (also a cargo workspace root)
   toggle round-trips through wp-config.php (via the root-capable wpcli runner).
   `config` (plan 24, split out so it stays fast) reads wp-config.php out of the
   running container via `compose cp`, round-trips a write without breaking the
-  site, and reads/writes the `.env`.
+  site, and reads/writes the `.env`. `adminer` (plan 24) rewrites the compose
+  file to add the profile-gated `adminer` service, starts it on demand, and
+  asserts it serves its login page on db_port + 1000.
 - `cd src-tauri && cargo run --example docker_smoke [-- run|clean]` — plan-22
   E2E for the generic Docker app kind against real Docker (scratch data dir):
   writes a trivial nginx+mariadb compose fixture, inspects it, imports it as a
@@ -174,10 +176,11 @@ src-tauri/               Rust backend (also a cargo workspace root)
   Clone under a new name, and Save-as-blueprint round-tripping into the dialog).
 - `node scripts/verify-site-tools.mjs` — headless runtime check of the plan-24
   Tools tab against the mock server (a WordPress site's Tools tab switching from
-  the overview; Search & Replace previewing per-column change counts then
-  applying with the snapshot shortcut; the Debug toggle seeding the log viewer
-  and Clear emptying it; the Config editor loading wp-config.php and switching to
-  the .env; a code-only docker site having no Tools tab).
+  the overview; the Database GUI's "Open database" toasting the login; Search &
+  Replace previewing per-column change counts then applying with the snapshot
+  shortcut; the Debug toggle seeding the log viewer and Clear emptying it; the
+  Config editor loading wp-config.php and switching to the .env; a code-only
+  docker site having no Tools tab).
 - `node scripts/verify-multistack.mjs` — headless runtime check of the plan-22
   capability gating against the mock server (the WP/Docker kind badges, a docker
   site's SiteDetail hiding WP Admin / credentials / database / wp-cli / clone /
@@ -296,6 +299,33 @@ src-tauri/               Rust backend (also a cargo workspace root)
   `wpcli` service (`wordpress:cli-php<ver>`) via `docker::compose_run`, and
   always pass `wp` as the first argument (the cli image's `wp` CMD is replaced
   by run args, so omitting it makes the entrypoint exec `core` and fail).
+- **Site tools (plan 24):** the Tools tab on `SiteDetail` (`SiteTools.tsx`,
+  shown only when the kind claims a tool) hosts four capability-gated panels.
+  **Database** (`db_gui`): a profile-gated `adminer` service in the compose
+  template on `db_port + 1000` (`Site::adminer_port`), started on demand
+  (`docker::compose_up_profile_service`, `--profile tools up -d adminer`) —
+  `open_site_database` rewrites the deterministic compose file first so sites
+  created before the feature get it, opens Adminer prefilled with the
+  `wordpress` DB user (root's password is random/unknowable), and the frontend
+  copies the password to the clipboard. `render_caddyfile` carries a
+  `db-<slug>.test` route for `db_gui` sites, with matching `db-<slug>` hosts
+  entries (`site_slugs`). **Search & Replace** (`search_replace`):
+  `wordpress::search_replace_report` runs the serialization-safe
+  `wp search-replace --all-tables --precise --report-changed-only [--dry-run]`
+  and parses the report (tab-separated in practice, not the ASCII grid — wp-cli
+  drops the grid when stdout is a pipe); Apply takes a `pre_search_replace`
+  snapshot first. **Debug** (`wp_tools`): `WP_DEBUG`/`WP_DEBUG_LOG` toggle (log
+  to file, never screen) + a tail of the bind-mounted `wp-content/debug.log`.
+  **Config** (`wp_tools`): edits `.env` (a plain host file; save offers
+  `site::restart` = `compose up -d`, which recreates services whose `.env`
+  changed) and `wp-config.php` (in the wp-data volume — read/written with
+  `docker compose cp` against the running container, which runs as the daemon so
+  it can overwrite the root-owned file; the command gates it on the site
+  running). Writing `wp-config.php` via a piped `sh -c 'cat > …'` was tried and
+  abandoned — docker's stdin EOF didn't reach `cat`, hanging the run. Any wp-cli
+  that must write `wp-config.php` (e.g. `wp config set` for debug) runs through
+  `docker::compose_run_root` + `--allow-root` (`wordpress::wp_root`), since the
+  cli image's `www-data` user can't write the root-owned file.
 - **Events:** long operations emit `site-event`
   (`{id, stage, message, bytes_done?, bytes_total?}`);
   create stages: files → pulling → containers → waiting → install (re-emitted
