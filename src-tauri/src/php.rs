@@ -43,8 +43,9 @@ const DB_NAME: &str = "laravel";
 const DB_USER: &str = "laravel";
 
 /// The `SiteConfig` every php site carries. Deterministic, so a rewrite (Adminer
-/// on-demand start) reproduces it exactly.
-fn php_config() -> SiteConfig {
+/// on-demand start) reproduces it exactly. Shared with the import flow (plan 26
+/// phase 3), which reserves a php site the same way a fresh create does.
+pub(crate) fn config() -> SiteConfig {
     SiteConfig {
         service: APP_SERVICE.to_string(),
         sync_path: APP_DIR.to_string(),
@@ -290,7 +291,7 @@ pub async fn create_php_site(
         site::KIND_PHP.to_string(),
         String::new(),
         php_version,
-        php_config(),
+        config(),
         None,
     )
     .await?;
@@ -362,19 +363,15 @@ async fn do_create(
     Ok(running)
 }
 
-/// Write a php site's generated files: `docker/Dockerfile`, `nginx.conf`,
-/// `docker-compose.yml`, `.env`, and the `app/` code directory (an empty
-/// skeleton or a copy of `source`).
+/// Write a php site's generated files: the `app/` code directory (an empty
+/// skeleton or a copy of `source`) plus the generated infra (`docker/Dockerfile`,
+/// `nginx.conf`, `docker-compose.yml`, `.env`).
 fn write_project_files(
     site: &site::Site,
     source: Option<&Path>,
     include_all: bool,
 ) -> Result<(), String> {
-    let dir = site.dir();
-    let app_dir = dir.join(APP_DIR);
-    std::fs::create_dir_all(dir.join("docker"))
-        .map_err(|e| format!("failed to create the project directory: {e}"))?;
-
+    let app_dir = ensure_dirs(site)?;
     match source {
         Some(src) => {
             let excludes: &[&str] = if include_all { &[] } else { dockerapp::DEFAULT_EXCLUDES };
@@ -388,15 +385,34 @@ fn write_project_files(
                 .map_err(|e| format!("failed to write the skeleton index: {e}"))?;
         }
     }
+    write_infra(site)
+}
 
-    // A Laravel-style project serves from `public/`; a plain PHP project that has
-    // no `public/` serves from its root.
+/// Create a php site's directory skeleton: the site dir, `docker/`, and an empty
+/// `app/`. Returns the `app/` path. Shared by create and import (plan 26 phase 3
+/// extracts the remote code into `app/` between this and `write_infra`).
+pub(crate) fn ensure_dirs(site: &site::Site) -> Result<PathBuf, String> {
+    let dir = site.dir();
+    std::fs::create_dir_all(dir.join("docker"))
+        .map_err(|e| format!("failed to create the project directory: {e}"))?;
+    let app_dir = dir.join(APP_DIR);
+    std::fs::create_dir_all(&app_dir)
+        .map_err(|e| format!("failed to create the app directory: {e}"))?;
+    Ok(app_dir)
+}
+
+/// Write the generated infra files (Dockerfile, nginx.conf, compose, `.env`).
+/// Called *after* `app/` is populated so the nginx webroot is detected from the
+/// real project layout — a Laravel-style `public/` serves from there, a plain
+/// PHP project without one serves from the app root.
+pub(crate) fn write_infra(site: &site::Site) -> Result<(), String> {
+    let dir = site.dir();
+    let app_dir = dir.join(APP_DIR);
     let webroot = if app_dir.join("public").is_dir() {
         "/var/www/html/public"
     } else {
         "/var/www/html"
     };
-
     let db_password = site::random_password(24);
     std::fs::write(dir.join("docker").join("Dockerfile"), render_dockerfile(&site.php_version))
         .map_err(|e| format!("failed to write the Dockerfile: {e}"))?;
@@ -407,6 +423,38 @@ fn write_project_files(
     std::fs::write(dir.join(".env"), render_env(site, &db_password))
         .map_err(|e| format!("failed to write .env: {e}"))?;
     Ok(())
+}
+
+/// Best-effort patch of `APP_URL` in the app's own `.env` (Laravel convention)
+/// after a pull/import (plan 26). Unlike WordPress there is no serialization-safe
+/// search-replace to run — URL config is the app's own concern — so this only
+/// touches the one well-known key, and only if an `app/.env` exists. Never fails
+/// the sync: a php app may not be Laravel, or may have no `.env` at all.
+pub fn patch_app_url(site_dir: &Path, sync_path: &str, url: &str) {
+    let env_path = site_dir.join(sync_path).join(".env");
+    let Ok(existing) = std::fs::read_to_string(&env_path) else {
+        return; // no app/.env — nothing to patch
+    };
+    let mut replaced = false;
+    let mut out: Vec<String> = existing
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("APP_URL=") {
+                replaced = true;
+                format!("APP_URL={url}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !replaced {
+        out.push(format!("APP_URL={url}"));
+    }
+    let mut body = out.join("\n");
+    if existing.ends_with('\n') {
+        body.push('\n');
+    }
+    let _ = std::fs::write(&env_path, body);
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +483,7 @@ mod tests {
             connection_id: None,
             remote_site_id: None,
             kind: site::KIND_PHP.into(),
-            config: php_config(),
+            config: config(),
             capabilities: Capabilities::default(),
         };
         s.refresh_capabilities();
@@ -481,8 +529,35 @@ mod tests {
     }
 
     #[test]
+    fn patch_app_url_replaces_or_appends_only_when_an_app_env_exists() {
+        let base = std::env::temp_dir().join(format!("lk-php-appurl-{}", std::process::id()));
+        let app = base.join("app");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&app).unwrap();
+
+        // No app/.env → no-op, no panic, no file created.
+        patch_app_url(&base, "app", "http://shop.test");
+        assert!(!app.join(".env").exists());
+
+        // Existing APP_URL is replaced; other keys are untouched.
+        std::fs::write(app.join(".env"), "APP_NAME=Shop\nAPP_URL=http://old\nDB_HOST=db\n").unwrap();
+        patch_app_url(&base, "app", "http://shop.test");
+        let env = std::fs::read_to_string(app.join(".env")).unwrap();
+        assert!(env.contains("APP_URL=http://shop.test"));
+        assert!(!env.contains("http://old"));
+        assert!(env.contains("APP_NAME=Shop") && env.contains("DB_HOST=db"));
+
+        // Missing APP_URL is appended.
+        std::fs::write(app.join(".env"), "APP_NAME=Shop\n").unwrap();
+        patch_app_url(&base, "app", "http://shop.test");
+        let env = std::fs::read_to_string(app.join(".env")).unwrap();
+        assert!(env.contains("APP_URL=http://shop.test"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn config_is_the_deterministic_php_shape() {
-        let cfg = php_config();
+        let cfg = config();
         assert_eq!(cfg.service, "app");
         assert_eq!(cfg.sync_path, "app");
         assert_eq!(cfg.db_engine.as_deref(), Some("mariadb"));

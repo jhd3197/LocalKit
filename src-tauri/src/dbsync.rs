@@ -11,6 +11,7 @@
 //! This is the single dispatch table Phase 2's "every kind × operation has an
 //! explicit handler or a clean unsupported error" guarantee is tested against.
 
+use std::io::BufReader;
 use std::path::Path;
 
 use crate::{docker, site, wordpress};
@@ -137,6 +138,39 @@ pub async fn import_sql(site: &Site, dir: &Path, sql: &[u8]) -> Result<(), Strin
         &[(password_env(&engine), &password)],
         &arg_refs,
         &mut &sql[..],
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Export the database to a file on the host — used by the push flow, which
+/// stages the dump for a chunked upload straight off disk (plan 19/26).
+pub async fn export_to_file(site: &Site, dir: &Path, dest: &Path) -> Result<(), String> {
+    let sql = export_sql(site, dir).await?;
+    std::fs::write(dest, sql).map_err(|e| format!("failed to write database dump: {e}"))
+}
+
+/// Import a gzipped dump straight off disk, decompressing into the client's
+/// stdin — the streaming counterpart of `import_sql` used by pull/import so a
+/// remote database never exists decompressed in memory (plan 19/26).
+pub async fn import_from_gz(site: &Site, dir: &Path, gz_path: &Path) -> Result<(), String> {
+    if site.kind == site::KIND_WORDPRESS {
+        return wordpress::import_db_from_gz(dir, gz_path).await;
+    }
+    let (engine, service) = engine_service(site)?;
+    let (user, db, password) = creds(dir);
+    let args = import_args(&engine, &user, &db)?;
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let file = std::fs::File::open(gz_path)
+        .map_err(|e| format!("failed to open the downloaded dump: {e}"))?;
+    let mut reader = flate2::read::GzDecoder::new(BufReader::new(file));
+    docker::compose_up_wait_service(dir, &service).await?;
+    docker::compose_exec_env_stdin_reader(
+        dir,
+        &service,
+        &[(password_env(&engine), &password)],
+        &arg_refs,
+        &mut reader,
     )
     .await
     .map(|_| ())

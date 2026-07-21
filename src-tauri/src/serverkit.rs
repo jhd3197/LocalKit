@@ -51,9 +51,13 @@ pub struct ServerKitInfo {
     /// the `features` array — callers must treat "absent" as "unsupported",
     /// never as "unknown, try anyway".
     pub features: Vec<String>,
+    /// Site kinds this extension can sync (plan 26). Absent/empty means a
+    /// pre-plan-26 server that only knows WordPress — callers fall back to
+    /// `["wordpress"]` so an old server ↔ new client stays safe.
+    pub kinds: Vec<String>,
 }
 
-/// A remote WordPress site as listed by `GET /api/v1/wordpress/sites`.
+/// A remote site as listed by `GET /api/v1/localkit/sites`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteWpSite {
     pub id: i64,
@@ -62,6 +66,9 @@ pub struct RemoteWpSite {
     pub status: String,
     pub wp_version: Option<String>,
     pub php_version: Option<String>,
+    /// Stack kind (plan 26): `wordpress` (default for a pre-plan-26 server that
+    /// omits it) | `php`. Gates which import/sync the client offers.
+    pub kind: String,
     /// Multisite installs are refused by the import flow — one local compose
     /// project cannot represent a network of sites.
     pub multisite: bool,
@@ -177,7 +184,9 @@ pub async fn test_connection(url: &str, api_key: &str) -> Result<ServerKitInfo, 
     // what can this build of it do?
     let pair = pair(&base, api_key).await;
     let localkit_extension = pair.is_some();
-    let features = pair.map(|p| p.features).unwrap_or_default();
+    let (features, kinds) = pair
+        .map(|p| (p.features, normalize_kinds(p.kinds)))
+        .unwrap_or_default();
 
     Ok(ServerKitInfo {
         status: health.status.unwrap_or_else(|| "unknown".into()),
@@ -188,13 +197,26 @@ pub async fn test_connection(url: &str, api_key: &str) -> Result<ServerKitInfo, 
         api_key_valid: true,
         localkit_extension,
         features,
+        kinds,
     })
 }
 
-#[derive(Deserialize)]
+/// A server that advertises no `kinds` (pre-plan-26) implicitly supports only
+/// WordPress; normalize that to `["wordpress"]` so callers have one rule.
+fn normalize_kinds(kinds: Vec<String>) -> Vec<String> {
+    if kinds.is_empty() {
+        vec![crate::site::KIND_WORDPRESS.to_string()]
+    } else {
+        kinds
+    }
+}
+
+#[derive(Deserialize, Default)]
 struct PairResponse {
     #[serde(default)]
     features: Vec<String>,
+    #[serde(default)]
+    kinds: Vec<String>,
 }
 
 /// `GET /pair` — extension presence probe. `None` means "not installed or
@@ -211,7 +233,7 @@ async fn pair(base: &str, api_key: &str) -> Option<PairResponse> {
         return None;
     }
     // A 200 without a parseable body still proves the extension is there.
-    Some(resp.json().await.unwrap_or(PairResponse { features: vec![] }))
+    Some(resp.json().await.unwrap_or_default())
 }
 
 /// Does this server's extension advertise `feature`?
@@ -224,6 +246,23 @@ pub async fn has_feature(url: &str, api_key: &str, feature: &str) -> Result<bool
     Ok(pair(&base, api_key)
         .await
         .is_some_and(|p| p.features.iter().any(|f| f == feature)))
+}
+
+/// Can this server's extension sync a site of `kind` (plan 26)?
+///
+/// WordPress is always supported (every extension version can do it); other
+/// kinds require the server to advertise them in `/pair`'s `kinds`. A failed
+/// probe answers "no" for non-WordPress kinds — never start a per-kind sync the
+/// server can't finish.
+pub async fn supports_kind(url: &str, api_key: &str, kind: &str) -> Result<bool, String> {
+    if kind == crate::site::KIND_WORDPRESS {
+        return Ok(true);
+    }
+    let base = normalize_base_url(url)?;
+    Ok(pair(&base, api_key)
+        .await
+        .map(|p| normalize_kinds(p.kinds))
+        .is_some_and(|kinds| kinds.iter().any(|k| k == kind)))
 }
 
 #[derive(Deserialize)]
@@ -249,6 +288,9 @@ struct RawSite {
     wp_version: Option<String>,
     #[serde(default)]
     php_version: Option<String>,
+    /// Stack kind (plan 26). Absent on a pre-plan-26 server → WordPress.
+    #[serde(default)]
+    kind: Option<String>,
     #[serde(default)]
     multisite: bool,
     #[serde(default)]
@@ -303,6 +345,10 @@ pub async fn list_wp_sites(url: &str, api_key: &str) -> Result<Vec<RemoteWpSite>
             status: s.status.unwrap_or_else(|| "unknown".into()),
             wp_version: s.wp_version,
             php_version: s.php_version,
+            kind: s
+                .kind
+                .filter(|k| !k.is_empty())
+                .unwrap_or_else(|| crate::site::KIND_WORDPRESS.to_string()),
             multisite: s.multisite,
             environment_count: s.environment_count,
         })
@@ -795,5 +841,34 @@ pub async fn create_remote_site(
         401 | 403 => Err("The API key was rejected (or lacks admin rights). Check the key.".into()),
         _ => Err(extract_error(&body)
             .unwrap_or_else(|| format!("Creating the remote site failed with HTTP {code}."))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server that advertises no kinds (pre-plan-26) is treated as WordPress-
+    /// only, so the client's per-kind gate has exactly one rule.
+    #[test]
+    fn absent_kinds_normalize_to_wordpress_only() {
+        assert_eq!(normalize_kinds(vec![]), vec!["wordpress".to_string()]);
+    }
+
+    /// An advertised list is passed through verbatim (order + extras preserved).
+    #[test]
+    fn advertised_kinds_pass_through() {
+        let kinds = vec!["wordpress".to_string(), "php".to_string()];
+        assert_eq!(normalize_kinds(kinds.clone()), kinds);
+    }
+
+    /// A `/sites` entry without a `kind` deserializes to a WordPress remote; an
+    /// explicit one is carried through.
+    #[test]
+    fn raw_site_defaults_kind_to_wordpress() {
+        let wp: RawSite = serde_json::from_str(r#"{"id":1,"name":"blog"}"#).unwrap();
+        assert_eq!(wp.kind, None);
+        let php: RawSite = serde_json::from_str(r#"{"id":2,"name":"app","kind":"php"}"#).unwrap();
+        assert_eq!(php.kind.as_deref(), Some("php"));
     }
 }
