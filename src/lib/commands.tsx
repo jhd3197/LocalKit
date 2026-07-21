@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "./ipc";
 import { toastError } from "./errors";
+import { toast } from "../stores/toast";
 import { useNav } from "../stores/nav";
 import { useSettings } from "../stores/settings";
 import { useSites } from "../stores/sites";
@@ -97,6 +98,12 @@ function staticCommands(): Command[] {
 function siteCommands(site: SiteWithStatus): Command[] {
   const nav = useNav.getState();
   const running = site.live_status === "running";
+  // Degraded (up but unhealthy, plan 23) offers Stop like a running site; the
+  // WP Admin login below stays gated on a healthy `running`.
+  const up = running || site.live_status === "degraded";
+  // Per-site commands are gated on the site's capabilities (plan 22), so a
+  // docker app never offers a WP-only action in the palette.
+  const caps = site.capabilities;
   const cmds: Command[] = [
     {
       id: `site.${site.id}.open`,
@@ -104,7 +111,7 @@ function siteCommands(site: SiteWithStatus): Command[] {
       group: site.name,
       run: () => nav.navigate({ name: "site", id: site.id }),
     },
-    running
+    up
       ? {
           id: `site.${site.id}.stop`,
           title: "Stop",
@@ -117,14 +124,29 @@ function siteCommands(site: SiteWithStatus): Command[] {
           group: site.name,
           run: () => void useSites.getState().start(site.id),
         },
-    {
+  ];
+  if (caps.terminal) {
+    cmds.push({
       id: `site.${site.id}.terminal`,
       title: "Terminal",
       group: site.name,
       run: () => nav.navigate({ name: "terminal", siteId: site.id }),
-    },
-  ];
-  if (running) {
+    });
+  }
+  if (caps.snapshots) {
+    cmds.push({
+      id: `site.${site.id}.snapshot`,
+      title: "Create snapshot",
+      group: site.name,
+      run: () => {
+        void ipc
+          .createSnapshot(site.id)
+          .then(() => toast.success("Snapshot taken", site.name))
+          .catch((e) => toastError(e, "Create snapshot"));
+      },
+    });
+  }
+  if (running && caps.one_click_login) {
     cmds.push({
       id: `site.${site.id}.wp-admin`,
       title: "WP Admin",

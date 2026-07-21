@@ -1,5 +1,7 @@
 import { useEffect } from "react";
-import { onSiteEvent } from "./lib/ipc";
+import { onSiteEvent, onSitesChanged } from "./lib/ipc";
+import { checkForUpdateOnLaunch } from "./lib/update";
+import { useDocker } from "./stores/docker";
 import { useNav } from "./stores/nav";
 import { useRouter } from "./stores/router";
 import { useSites } from "./stores/sites";
@@ -9,6 +11,7 @@ import Toasts from "./components/Toasts";
 import CommandPalette from "./components/CommandPalette";
 import KeyboardShortcutsDialog from "./components/KeyboardShortcutsDialog";
 import NewSiteDialog from "./components/NewSiteDialog";
+import ImportSiteDialog from "./components/ImportSiteDialog";
 import Dashboard from "./pages/Dashboard";
 import SiteDetail from "./pages/SiteDetail";
 import TerminalPage from "./pages/Terminal";
@@ -25,9 +28,24 @@ export default function App() {
   useEffect(() => {
     void useSites.getState().refresh();
     void useRouter.getState().refresh();
+    void useDocker.getState().refresh();
+    // Update awareness (plan 25): a throttled, best-effort GitHub check that
+    // may raise a one-time "update available" toast. Never blocks startup.
+    void checkForUpdateOnLaunch();
     const unlisten = onSiteEvent(handleEvent);
+    // The reconciler settles status in the background; re-fetch when it does
+    // so an external stop/start corrects itself without a manual refresh.
+    const unlistenChanged = onSitesChanged(() => {
+      void useSites.getState().refresh();
+      void useDocker.getState().refresh();
+    });
+    // Poll Docker health so the "unavailable" pill appears/clears on its own
+    // (plan 23); the backend caches for 30 s, so this is cheap.
+    const docker = window.setInterval(() => void useDocker.getState().refresh(), 30_000);
     return () => {
       void unlisten.then((f) => f());
+      void unlistenChanged.then((f) => f());
+      window.clearInterval(docker);
     };
   }, [handleEvent]);
 
@@ -42,6 +60,9 @@ export default function App() {
 
       {settingsOpen && <Settings />}
       {newSiteOpen && <NewSiteDialog onClose={() => setNewSiteOpen(false)} />}
+      {/* Opened from Settings → ServerKit, but rendered here so the import
+          keeps running (and the dialog keeps reporting) if Settings closes. */}
+      <ImportSiteDialog />
       <CommandPalette />
       <KeyboardShortcutsDialog />
 

@@ -7,6 +7,8 @@ interface RouterState {
   busy: boolean;
   refresh: () => Promise<void>;
   setEnabled: (enabled: boolean) => Promise<void>;
+  /** Change the router's host ports (fallback mode); returns an error string. */
+  setPorts: (http: number, https: number) => Promise<string | null>;
   trustCa: () => Promise<string | null>;
 }
 
@@ -31,6 +33,20 @@ export const useRouter = create<RouterState>((set) => ({
       set({ status });
     } catch {
       await useRouter.getState().refresh();
+    } finally {
+      set({ busy: false });
+    }
+  },
+
+  setPorts: async (http, https) => {
+    set({ busy: true });
+    try {
+      const status = await ipc.setRouterPorts(http, https);
+      set({ status });
+      return null;
+    } catch (e) {
+      await useRouter.getState().refresh();
+      return typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
     } finally {
       set({ busy: false });
     }

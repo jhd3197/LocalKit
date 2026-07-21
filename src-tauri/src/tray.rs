@@ -99,14 +99,10 @@ fn sites(app: &AppHandle) -> Vec<site::Site> {
 }
 
 /// URL a site's "Open in browser" should hit: `<slug>.test` when local
-/// domains are on, otherwise the always-working `localhost:<port>`.
+/// domains are on (port-aware in fallback mode), otherwise the always-working
+/// `localhost:<port>`.
 fn site_url(state: &AppState, site: &site::Site) -> String {
-    let (domains_on, trusted) = router::enabled_and_trusted(state);
-    if domains_on {
-        router::site_url(&site.slug, trusted)
-    } else {
-        format!("http://localhost:{}", site.port)
-    }
+    router::site_public_url(state, site)
 }
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
@@ -123,15 +119,21 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         let state = app.state::<AppState>();
         let mut submenu = SubmenuBuilder::with_id(app, "sites", "Sites");
         for site in &sites {
-            let running = site.status == "running";
-            let dot = if running { "●" } else { "○" };
+            // "up" covers degraded (containers running but unhealthy, plan 23):
+            // still openable and stoppable, with its own half-filled dot.
+            let up = site.status == "running" || site.status == "degraded";
+            let dot = match site.status.as_str() {
+                "running" => "●",
+                "degraded" => "◐",
+                _ => "○",
+            };
             let open = MenuItemBuilder::with_id(
                 format!("{ID_OPEN}{}", site.id),
                 format!("Open {} in browser", site_url(&state, site)),
             )
-            .enabled(running)
+            .enabled(up)
             .build(app)?;
-            let toggle = if running {
+            let toggle = if up {
                 MenuItemBuilder::with_id(format!("{ID_STOP}{}", site.id), "Stop").build(app)?
             } else {
                 MenuItemBuilder::with_id(format!("{ID_START}{}", site.id), "Start").build(app)?

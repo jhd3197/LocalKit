@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../lib/ipc";
-import { siteUrl } from "../lib/domains";
+import { siteUrl, sitePort } from "../lib/domains";
 import { useNav } from "../stores/nav";
 import { useRouter } from "../stores/router";
 import { useSites } from "../stores/sites";
 import type { SiteDetail as SiteDetailData, WpUser } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
+import KindBadge from "../components/KindBadge";
 import CopyButton from "../components/CopyButton";
 import PushPanel from "../components/PushPanel";
+import SnapshotsPanel from "../components/SnapshotsPanel";
+import DeleteSiteDialog from "../components/DeleteSiteDialog";
+import CloneSiteDialog from "../components/CloneSiteDialog";
+import SaveBlueprintDialog from "../components/SaveBlueprintDialog";
+import SiteTools from "../components/SiteTools";
+import { describeConflicts } from "../components/DomainsSettings";
 
 export default function SiteDetail({ id }: { id: string }) {
   const navigate = useNav((s) => s.navigate);
@@ -29,6 +36,10 @@ export default function SiteDetail({ id }: { id: string }) {
   const [loginUserId, setLoginUserId] = useState<number | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [cloneOpen, setCloneOpen] = useState(false);
+  const [blueprintOpen, setBlueprintOpen] = useState(false);
+  const [tab, setTab] = useState<"overview" | "tools">("overview");
   const logRef = useRef<HTMLPreElement>(null);
 
   const loadDetail = useCallback(() => {
@@ -61,17 +72,18 @@ export default function SiteDetail({ id }: { id: string }) {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
 
-  // Load WP users for the WP Admin login picker (running sites only).
+  // Load WP users for the WP Admin login picker (running WordPress sites only).
+  const canLogin = detail?.capabilities.one_click_login ?? false;
   useEffect(() => {
     setWpUsers(null);
     setLoginUserId(null);
-    if (detail?.live_status === "running") {
+    if (canLogin && detail?.live_status === "running") {
       ipc
         .siteWpUsers(id)
         .then(setWpUsers)
         .catch(() => setWpUsers(null));
     }
-  }, [id, detail?.live_status]);
+  }, [id, canLogin, detail?.live_status]);
 
   if (!detail) {
     return (
@@ -84,8 +96,16 @@ export default function SiteDetail({ id }: { id: string }) {
     );
   }
 
-  const url = siteUrl(detail.slug, detail.port, router);
+  const url = siteUrl(detail.slug, sitePort(detail), router);
   const running = detail.live_status === "running";
+  // Up = running or degraded (containers up but unhealthy, plan 23). WP-only
+  // affordances (login, wp-cli) stay gated on a healthy `running`; only the
+  // Stop control treats a degraded site as stoppable.
+  const up = running || detail.live_status === "degraded";
+  const caps = detail.capabilities;
+  // Tools tab (plan 24): only shown when the site's kind supports at least one
+  // of the tools — a code-only docker app has none, so it stays a flat page.
+  const hasTools = caps.db_gui || caps.search_replace || caps.wp_tools;
 
   // WP Admin one-click login: default to the install admin, picker overrides.
   const defaultUserId =
@@ -114,10 +134,11 @@ export default function SiteDetail({ id }: { id: string }) {
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-semibold text-white">{detail.name}</h1>
+          <KindBadge kind={detail.kind} />
           <StatusBadge status={detail.live_status} />
         </div>
         <div className="flex gap-2">
-          {running ? (
+          {up ? (
             <button
               onClick={() => void stop(id)}
               disabled={busyId === id}
@@ -140,12 +161,28 @@ export default function SiteDetail({ id }: { id: string }) {
           >
             Terminal
           </button>
+          {caps.wp_tools && (
+            <button
+              onClick={() => setCloneOpen(true)}
+              disabled={busyId === id}
+              title="Copy this site's database and files into a new site"
+              className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+            >
+              Clone
+            </button>
+          )}
+          {caps.wp_tools && (
+            <button
+              onClick={() => setBlueprintOpen(true)}
+              disabled={busyId === id}
+              title="Save this site's stack as a reusable blueprint"
+              className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+            >
+              Save as blueprint
+            </button>
+          )}
           <button
-            onClick={() => {
-              if (window.confirm(`Delete "${detail.name}"? This removes its containers, database and files.`)) {
-                void remove(id).then(() => navigate({ name: "sites" }));
-              }
-            }}
+            onClick={() => setConfirmDelete(true)}
             disabled={busyId === id}
             className="rounded-md border border-red-900 px-4 py-2 text-sm text-red-400 hover:border-red-700 disabled:opacity-50"
           >
@@ -154,13 +191,66 @@ export default function SiteDetail({ id }: { id: string }) {
         </div>
       </div>
 
+      {confirmDelete && (
+        <DeleteSiteDialog
+          siteName={detail.name}
+          busy={busyId === id}
+          onClose={() => setConfirmDelete(false)}
+          onConfirm={(deleteSnapshots) => {
+            setConfirmDelete(false);
+            void remove(id, deleteSnapshots).then(() => navigate({ name: "sites" }));
+          }}
+        />
+      )}
+
+      {cloneOpen && (
+        <CloneSiteDialog
+          source={{ id, name: detail.name }}
+          onClose={() => setCloneOpen(false)}
+        />
+      )}
+
+      {blueprintOpen && (
+        <SaveBlueprintDialog
+          source={{ id, name: detail.name }}
+          onClose={() => setBlueprintOpen(false)}
+        />
+      )}
+
+      <RouterConflictBanner slug={detail.slug} port={sitePort(detail)} />
+
+      {hasTools && (
+        <div className="mt-6 flex gap-1 border-b border-zinc-800">
+          {(["overview", "tools"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium capitalize transition-colors ${
+                tab === t
+                  ? "border-violet-500 text-white"
+                  : "border-transparent text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {hasTools && tab === "tools" && (
+        <SiteTools detail={detail} running={running} onShowSnapshots={() => setTab("overview")} />
+      )}
+
+      <div className={hasTools && tab !== "overview" ? "hidden" : ""}>
       <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* URL */}
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Site</h2>
           <p className="mt-3 font-mono text-sm text-violet-400">{url}</p>
           <p className="mt-1 text-xs text-zinc-600">
-            WordPress {detail.wp_version} · PHP {detail.php_version}
+            {caps.wp_tools
+              ? `WordPress ${detail.wp_version} · PHP ${detail.php_version}`
+              : `Docker Compose · app service “${detail.config.service}”`}
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <button
@@ -170,15 +260,17 @@ export default function SiteDetail({ id }: { id: string }) {
             >
               Open site
             </button>
-            <button
-              onClick={() => void wpAdminLogin()}
-              disabled={!running || loggingIn}
-              title={running ? "Log straight into wp-admin — no password needed" : "Start the site to log in"}
-              className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
-            >
-              {loggingIn ? "Logging in…" : "WP Admin"}
-            </button>
-            {running && wpUsers && wpUsers.length > 1 && (
+            {caps.one_click_login && (
+              <button
+                onClick={() => void wpAdminLogin()}
+                disabled={!running || loggingIn}
+                title={running ? "Log straight into wp-admin — no password needed" : "Start the site to log in"}
+                className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+              >
+                {loggingIn ? "Logging in…" : "WP Admin"}
+              </button>
+            )}
+            {caps.one_click_login && running && wpUsers && wpUsers.length > 1 && (
               <select
                 value={selectedUserId ?? ""}
                 onChange={(e) => setLoginUserId(Number(e.target.value))}
@@ -196,7 +288,8 @@ export default function SiteDetail({ id }: { id: string }) {
           {loginError && <p className="mt-2 text-xs text-red-400">{loginError}</p>}
         </section>
 
-        {/* Credentials */}
+        {/* Credentials (WordPress only) */}
+        {caps.one_click_login && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">WP Admin credentials</h2>
           <dl className="mt-3 space-y-2 text-sm">
@@ -214,8 +307,10 @@ export default function SiteDetail({ id }: { id: string }) {
             </div>
           </dl>
         </section>
+        )}
 
-        {/* Database */}
+        {/* Database (needs the db_gui capability — hidden for docker apps) */}
+        {caps.db_gui && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Database (MariaDB)</h2>
           <dl className="mt-3 space-y-2 text-sm">
@@ -235,8 +330,10 @@ export default function SiteDetail({ id }: { id: string }) {
             ))}
           </dl>
         </section>
+        )}
 
-        {/* wp-cli info */}
+        {/* wp-cli info (WordPress only) */}
+        {caps.wp_tools && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">WordPress info (wp-cli)</h2>
@@ -282,12 +379,22 @@ export default function SiteDetail({ id }: { id: string }) {
             </>
           )}
         </section>
+        )}
       </div>
 
-      {/* ServerKit push/pull (M4) */}
-      <div className="mt-4">
-        <PushPanel siteId={id} running={running} />
-      </div>
+      {/* Snapshots + one-click restore (plan 17) — every kind that supports them */}
+      {caps.snapshots && (
+        <div className="mt-4">
+          <SnapshotsPanel siteId={id} />
+        </div>
+      )}
+
+      {/* ServerKit push/pull (M4) — WordPress only until plan 26 */}
+      {caps.wp_tools && (
+        <div className="mt-4">
+          <PushPanel siteId={id} running={running} />
+        </div>
+      )}
 
       {/* Logs */}
       <section className="mt-4 rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
@@ -315,6 +422,66 @@ export default function SiteDetail({ id }: { id: string }) {
           {logs || "No logs yet."}
         </pre>
       </section>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Plan 16: local domains are on but the router is blocked on its ports.
+ *
+ * This is the case where a toast is not enough — WordPress still has
+ * `home`/`siteurl` pointing at `<slug>.test`, so the user is most likely
+ * staring at the *other* program's "Site Not Found" page and has no way to
+ * know two apps are fighting over port 80. Dismissible, but it comes back if
+ * the conflict changes.
+ */
+function RouterConflictBanner({ slug, port }: { slug: string; port: number }) {
+  const status = useRouter((s) => s.status);
+  const refresh = useRouter((s) => s.refresh);
+  const openSettings = useNav((s) => s.openSettings);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+
+  // App.tsx only refreshes router status at startup, so a conflict that
+  // appears later (the other app launched while LocalKit was open) would go
+  // unreported on exactly the page where it matters. Re-check on arrival.
+  useEffect(() => {
+    void refresh();
+  }, [refresh, slug]);
+
+  const conflicts = status?.conflicts ?? [];
+  if (!status?.enabled || conflicts.length === 0) return null;
+
+  const key = conflicts.map((c) => `${c.port}:${c.process ?? "?"}`).join(",");
+  if (dismissed === key) return null;
+
+  return (
+    <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-900/60 bg-amber-950/40 p-4">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-amber-200">
+          Local domains are blocked — another program is using{" "}
+          {describeConflicts(conflicts)}
+        </p>
+        <p className="mt-1 text-xs text-amber-200/80">
+          <code className="font-mono">{slug}.test</code> currently reaches that program, not this
+          site — which is why you may be seeing someone else's “not found” page. This site is still
+          served directly at{" "}
+          <code className="font-mono">http://localhost:{port}</code>.
+        </p>
+        <button
+          onClick={() => openSettings("domains")}
+          className="mt-2.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
+        >
+          Fix in Settings
+        </button>
+      </div>
+      <button
+        onClick={() => setDismissed(key)}
+        aria-label="Dismiss"
+        className="shrink-0 rounded-md px-2 py-1 text-xs text-amber-200/70 hover:bg-amber-900/40 hover:text-amber-100"
+      >
+        Dismiss
+      </button>
     </div>
   );
 }

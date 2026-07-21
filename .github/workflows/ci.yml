@@ -41,13 +41,17 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            libdbus-1-dev
 
       - name: Install npm deps
         run: npm ci
 
       - name: TypeScript + Vite build
         run: npm run build
+
+      - name: Frontend unit tests (vitest)
+        run: npm run test
 
       - name: cargo check (whole workspace — GUI lib/bin + lk CLI)
         working-directory: src-tauri

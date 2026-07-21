@@ -4,16 +4,115 @@
 // delete / create behave naturally while previewing.
 import * as data from "./data";
 import { emit } from "./event";
-import type { ServerKitInfo, Site, SiteEvent } from "../lib/types";
+import type {
+  Blueprint,
+  PortConflict,
+  RouterStatus,
+  ServerKitInfo,
+  Site,
+  SiteEvent,
+  Snapshot,
+  SnapshotKind,
+} from "../lib/types";
 
 type Args = Record<string, unknown>;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Plan 16 pre-flight, mocked: which router ports the fake LocalWP holds. */
+function mockProbe(http: number, https: number): PortConflict[] {
+  return [http, https]
+    .filter((p) => p in data.heldPorts)
+    .map((port) => ({ port, process: data.heldPorts[port] }));
+}
+
+/**
+ * Mirror of `router::conflict_message` + the short-circuited status.
+ * `keepEnabled` distinguishes the two real cases: a failed *enable* leaves the
+ * flag off (the backend never reaches `set_flag`), while a conflict found by a
+ * later status poll happens with domains already enabled.
+ */
+function mockConflict(conflicts: PortConflict[], keepEnabled = false): RouterStatus {
+  const held = conflicts.map((c) => `port ${c.port} is held by ${c.process}`).join(", ");
+  const onDefaults = data.routerStatus.http_port === 80 && data.routerStatus.https_port === 443;
+  data.routerStatus.running = false;
+  if (!keepEnabled) data.routerStatus.enabled = false;
+  data.routerStatus.conflicts = conflicts;
+  data.routerStatus.error =
+    `Local domains could not start: ${held}. ` +
+    (onDefaults
+      ? "Quit the other program (LocalWP's router, IIS, Skype, or another web server), " +
+        "or switch LocalKit to fallback ports (8080/8443) in Settings → Domains."
+      : "Quit whatever is holding those ports, or pick different router ports in Settings → Domains.");
+  return { ...data.routerStatus };
+}
+
 // Fake interactive shells for the Terminal page (terminal_open/write/close).
 const mockShells = new Map<string, { slug: string; buffer: string }>();
+/** Per-site WP_DEBUG state + a fake debug.log for the Tools → Debug mock. */
+const mockDebug = new Map<string, { enabled: boolean; log: string }>();
+function debugState(id: string): { enabled: boolean; log: string } {
+  let s = mockDebug.get(id);
+  if (!s) {
+    s = { enabled: false, log: "" };
+    mockDebug.set(id, s);
+  }
+  return s;
+}
+
+/** Per-site config-file contents for the Tools → Config mock. */
+const mockConfigFiles = new Map<string, Record<"wp-config" | "env", string>>();
+function configFiles(id: string): Record<"wp-config" | "env", string> {
+  let f = mockConfigFiles.get(id);
+  if (!f) {
+    const site = data.sites.find((s) => s.id === id);
+    const port = site?.port ?? 8080;
+    f = {
+      "wp-config":
+        [
+          "<?php",
+          "define( 'DB_NAME', 'wordpress' );",
+          "define( 'DB_USER', 'wordpress' );",
+          "define( 'DB_PASSWORD', getenv('WORDPRESS_DB_PASSWORD') );",
+          "define( 'DB_HOST', 'db:3306' );",
+          "define( 'WP_DEBUG', false );",
+          "$table_prefix = 'wp_';",
+          "if ( ! defined( 'ABSPATH' ) ) { define( 'ABSPATH', __DIR__ . '/' ); }",
+          "require_once ABSPATH . 'wp-settings.php';",
+        ].join("\n") + "\n",
+      env: `WP_PORT=${port}\nDB_PORT=${port + 10000}\nDB_NAME=wordpress\nDB_USER=wordpress\nDB_PASSWORD=${
+        site?.db_password ?? "changeme"
+      }\n`,
+    };
+    mockConfigFiles.set(id, f);
+  }
+  return f;
+}
+/** Site ids whose in-flight mock transfer has been asked to stop (plan 19). */
+const mockCancels = new Set<string>();
 const prompt = (slug: string) =>
   `\x1b[35mroot\x1b[0m@\x1b[34m${slug}\x1b[0m:\x1b[36m/var/www/html\x1b[0m# `;
+
+/** Add a snapshot to the fake store, newest first (mirrors the real listing). */
+function pushSnapshot(siteId: string, kind: SnapshotKind, note: string): Snapshot {
+  const site = data.sites.find((s) => s.id === siteId);
+  const now = new Date();
+  const snap: Snapshot = {
+    // Same shape as the Rust id: a sortable timestamp.
+    id: now.toISOString().replace(/[-:T]/g, "").slice(0, 14) + `-${now.getMilliseconds()}`,
+    site_id: siteId,
+    site_name: site?.name ?? siteId,
+    site_slug: site?.slug ?? siteId,
+    created_at: now.toISOString(),
+    kind,
+    note,
+    db_bytes: 2_000_000 + Math.floor(Math.random() * 3_000_000),
+    code_bytes: 40_000_000 + Math.floor(Math.random() * 200_000_000),
+    wp_version: site?.wp_version ?? "6.7",
+  };
+  (data.snapshots[siteId] ??= []).unshift(snap);
+  return snap;
+}
 
 function slugify(name: string): string {
   return name
@@ -21,6 +120,20 @@ function slugify(name: string): string {
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+/** The WordPress kind fields every mock-created site carries (plan 22). */
+const WP_SITE_KIND = {
+  kind: "wordpress",
+  config: { service: "wordpress", sync_path: "wp-content" },
+  capabilities: data.WP_CAPS,
+} as const;
+
+// Mock-only escape hatch: lets the headless verification scripts put the fake
+// backend into states the UI alone can't reach (e.g. "the router died while
+// domains were enabled"). Never present in the real app.
+if (typeof window !== "undefined") {
+  (window as unknown as { __LOCALKIT_MOCK__?: typeof data }).__LOCALKIT_MOCK__ = data;
 }
 
 export async function invoke<T = unknown>(cmd: string, args: Args = {}): Promise<T> {
@@ -34,6 +147,16 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
   switch (cmd) {
     case "check_docker":
       return { available: true, version: "27.5.1", error: null };
+
+    case "check_for_update":
+      // Pretend a newer release exists so the Settings row + launch toast are
+      // exercisable in mock mode.
+      return {
+        current: "0.1.0",
+        latest: "0.2.0",
+        url: "https://github.com/jhd3197/LocalKit/releases/latest",
+        update_available: true,
+      };
 
     case "app_info":
       return data.appInfo;
@@ -80,6 +203,9 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         admin_user: "admin",
         admin_pass: "generated-demo-pass",
         created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+        ...WP_SITE_KIND,
       };
       data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-n3w-0000" });
       // Flip to running once the fake install finishes.
@@ -91,6 +217,176 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
           s.live_status = "running";
         }
       })();
+      return site;
+    }
+
+    case "create_php_site": {
+      const name = String(a.name ?? "").trim();
+      if (!name) throw "Site name is required.";
+      const slug = slugify(name);
+      const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
+      const id = `site-${slug}`;
+      const importing = !!(a.path && String(a.path).trim());
+      const stages: Array<[string, string]> = [
+        ["files", "Writing project files…"],
+        ["pulling", "Building the PHP image (first run can take a few minutes)…"],
+        ["containers", "Starting containers…"],
+        ["waiting", "Waiting for the app to come online…"],
+        ["done", `Site "${name}" is ready at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id, stage, message } satisfies SiteEvent);
+          await sleep(900);
+        }
+      })();
+      const site: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: "",
+        php_version: String(a.phpVersion ?? "8.3"),
+        status: "creating",
+        admin_user: "",
+        admin_pass: "",
+        created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+        kind: "php",
+        config: {
+          service: "app",
+          sync_path: "app",
+          db_engine: "mariadb",
+          db_service: "db",
+        },
+        capabilities: data.PHP_CAPS,
+      };
+      void importing; // the mock ignores the source folder; real backend copies it
+      data.sites.push({ ...site, live_status: "creating", db_password: "laravel-demo-0000" });
+      void (async () => {
+        await sleep(900 * stages.length);
+        const s = data.sites.find((x) => x.id === id);
+        if (s) {
+          s.status = "running";
+          s.live_status = "running";
+        }
+      })();
+      return site;
+    }
+
+    case "clone_site": {
+      const source = data.sites.find((s) => s.id === a.id);
+      if (!source) throw `site not found: ${a.id}`;
+      const name = String(a.newName ?? "").trim();
+      if (!name) throw "Site name is required";
+      const slug = slugify(name);
+      const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
+      const id = `site-${slug}`;
+      // Same stages the Rust clone emits; the `snapshot` one carries the
+      // *source* id (that's the site being read), the rest the new clone.
+      const stages: Array<[string, string, string]> = [
+        [a.id as string, "snapshot", "Exporting database…"],
+        [a.id as string, "snapshot", "Archiving wp-content…"],
+        [id, "files", "Writing project files…"],
+        [id, "containers", "Starting Docker containers…"],
+        [id, "waiting", "Waiting for WordPress to come online…"],
+        [id, "import", `Copying ${source.name}'s content…`],
+        [id, "import", "Rewriting URLs to the clone…"],
+        [id, "done", `${name} cloned from ${source.name} — now running at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [eid, stage, message] of stages) {
+          emit("site-event", { id: eid, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        const s = data.sites.find((x) => x.id === id);
+        if (s) s.status = s.live_status = "running";
+      })();
+
+      const clone: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: source.wp_version,
+        php_version: source.php_version,
+        status: "creating",
+        // The cloned database carries the source's login, so its admin
+        // credentials work on the copy; ports and DB secrets are fresh.
+        admin_user: source.admin_user,
+        admin_pass: source.admin_pass,
+        created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+        ...WP_SITE_KIND,
+      };
+      data.sites.push({ ...clone, live_status: "creating", db_password: "m4ri4-cl0ne-0001" });
+      return clone;
+    }
+
+    case "inspect_docker_project": {
+      // Fictional inspection so the "Import a Docker project" flow is reviewable
+      // without a real folder — any path returns a plausible two-service project.
+      const services = [
+        { name: "api", image: "node:20", published_ports: [4000], db_engine: null },
+        { name: "db", image: "postgres:16", published_ports: [], db_engine: "postgres" },
+      ];
+      return {
+        compose_file: "docker-compose.yml",
+        services,
+        suggested_service: "api",
+        suggested_port: 4000,
+        db_engine: "postgres",
+        db_service: "db",
+        copy_bytes: 3_204_880,
+        excluded: [".git", "node_modules", "vendor"],
+      };
+    }
+
+    case "import_docker_project": {
+      const name = String(a.name ?? "").trim();
+      if (!name) throw "Site name is required";
+      const service = String(a.service ?? "app");
+      const port = Number(a.appPort) || 4000;
+      const slug = slugify(name);
+      const id = `site-${slug}`;
+      const stages: Array<[string, string]> = [
+        ["files", "Copying the Docker project…"],
+        ["pulling", "Pulling images (first run can take a few minutes)…"],
+        ["containers", "Starting containers…"],
+        ["waiting", "Waiting for the app to come online…"],
+        ["done", `${name} imported — now running at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        const s = data.sites.find((x) => x.id === id);
+        if (s) s.status = s.live_status = "running";
+      })();
+      const site: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: "",
+        php_version: "",
+        status: "creating",
+        admin_user: "",
+        admin_pass: "",
+        created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+        kind: "docker",
+        config: { service, sync_path: ".", app_port: port, db_engine: "postgres", db_service: "db" },
+        capabilities: data.DOCKER_CAPS,
+      };
+      data.sites.push({ ...site, live_status: "creating", db_password: "" });
       return site;
     }
 
@@ -108,10 +404,199 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return site;
     }
 
+    // Plan 23: finish a half-created site — re-run the install tail, then mark
+    // it complete (clears the `incomplete` flag so the card returns to normal).
+    case "resume_site": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      const stages: Array<[string, string]> = [
+        ["containers", "Starting containers…"],
+        ["waiting", "Waiting for the app to come online…"],
+        ["install", "Finishing WordPress setup…"],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id: site.id, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        // Flip BEFORE the terminal `done` event, so the refresh it triggers
+        // reads the finished, no-longer-incomplete site.
+        const s = data.sites.find((x) => x.id === a.id);
+        if (s) {
+          s.status = s.live_status = "running";
+          s.incomplete = false;
+        }
+        emit("site-event", {
+          id: site.id,
+          stage: "done",
+          message: `${site.name} setup finished — now running at http://localhost:${site.port}`,
+        } satisfies SiteEvent);
+      })();
+      return site;
+    }
+
     case "delete_site": {
-      const i = data.sites.findIndex((s) => s.id === a.id);
-      if (i >= 0) data.sites.splice(i, 1);
+      const siteId = String(a.id);
+      const i = data.sites.findIndex((s) => s.id === siteId);
+      if (i >= 0) {
+        // Mirrors site::delete — a pre_delete snapshot first, and the
+        // snapshots outlive the site unless the caller opted out.
+        if (a.deleteSnapshots) {
+          delete data.snapshots[siteId];
+        } else {
+          pushSnapshot(siteId, "pre_delete", `before deleting ${data.sites[i].name}`);
+        }
+        data.sites.splice(i, 1);
+      }
       return null;
+    }
+
+    case "list_snapshots":
+      return data.snapshots[String(a.siteId)] ?? [];
+
+    case "create_snapshot": {
+      const siteId = String(a.siteId);
+      const site = data.sites.find((s) => s.id === siteId);
+      if (!site) throw `site not found: ${siteId}`;
+      const snap = pushSnapshot(siteId, "manual", String(a.note ?? ""));
+      emit("site-event", {
+        id: siteId,
+        stage: "done",
+        message: `Snapshot of ${site.name} taken`,
+      } satisfies SiteEvent);
+      return snap;
+    }
+
+    case "restore_snapshot": {
+      const siteId = String(a.siteId);
+      const site = data.sites.find((s) => s.id === siteId);
+      if (!site) throw `site not found: ${siteId}`;
+      const snap = (data.snapshots[siteId] ?? []).find((s) => s.id === a.snapshotId);
+      if (!snap) throw `snapshot \`${a.snapshotId}\` not found`;
+      // Restoring is destructive, so the real backend snapshots first.
+      pushSnapshot(siteId, "pre_restore", `before restoring ${snap.created_at}`);
+      const started = site.live_status !== "running";
+      site.status = site.live_status = "running";
+      void (async () => {
+        for (const message of [
+          "Taking a pre-restore snapshot…",
+          "Importing database…",
+          "Restoring wp-content…",
+        ]) {
+          emit("site-event", { id: siteId, stage: "restore", message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        emit("site-event", {
+          id: siteId,
+          stage: "done",
+          message: started
+            ? `${site.name} restored to the snapshot from ${snap.created_at} (the site was stopped, so it was started)`
+            : `${site.name} restored to the snapshot from ${snap.created_at}`,
+        } satisfies SiteEvent);
+      })();
+      return null;
+    }
+
+    case "delete_snapshot": {
+      const list = data.snapshots[String(a.siteId)] ?? [];
+      const i = list.findIndex((s) => s.id === a.snapshotId);
+      if (i < 0) throw `snapshot \`${a.snapshotId}\` not found`;
+      list.splice(i, 1);
+      return null;
+    }
+
+    case "list_blueprints":
+      return data.blueprints;
+
+    case "save_blueprint": {
+      const site = data.sites.find((s) => s.id === a.siteId);
+      if (!site) throw `site not found: ${a.siteId}`;
+      const name = String(a.name ?? "").trim();
+      if (!name) throw "Blueprint name is required";
+      const bp: Blueprint = {
+        id: slugify(name),
+        name,
+        description: String(a.description ?? ""),
+        wp_version: site.wp_version,
+        php_version: site.php_version,
+        plugins: data.wpInfo[site.id]?.plugins ?? [],
+        theme: "twentytwentyfive",
+        created_at: new Date().toISOString(),
+        source_site_name: site.name,
+        db_bytes: 2_400_000 + Math.floor(Math.random() * 2_000_000),
+        code_bytes: 40_000_000 + Math.floor(Math.random() * 120_000_000),
+      };
+      data.blueprints.unshift(bp);
+      // Mirror the backend: a snapshot's stages, then a terminal `done`.
+      void (async () => {
+        for (const message of ["Exporting database…", "Archiving wp-content…"]) {
+          emit("site-event", { id: site.id, stage: "snapshot", message } satisfies SiteEvent);
+          await sleep(500);
+        }
+        emit("site-event", {
+          id: site.id,
+          stage: "done",
+          message: `Saved "${site.name}" as the blueprint "${name}"`,
+        } satisfies SiteEvent);
+      })();
+      return bp;
+    }
+
+    case "delete_blueprint": {
+      const i = data.blueprints.findIndex((b) => b.id === a.id);
+      if (i < 0) throw `blueprint \`${a.id}\` not found`;
+      data.blueprints.splice(i, 1);
+      return null;
+    }
+
+    case "create_site_from_blueprint": {
+      const bp = data.blueprints.find((b) => b.id === a.blueprintId);
+      if (!bp) throw `blueprint not found: ${a.blueprintId}`;
+      const name = String(a.name ?? "").trim() || bp.name;
+      const slug = slugify(name);
+      const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
+      const id = `site-${slug}`;
+      const stages: Array<[string, string]> = [
+        ["files", "Writing project files…"],
+        ["pulling", "Downloading WordPress images (first run can take a few minutes)…"],
+        ["containers", "Starting Docker containers…"],
+        ["waiting", "Waiting for WordPress to come online…"],
+        ["import", "Laying down the blueprint's content…"],
+        ["import", "Rewriting URLs to the new site…"],
+        ["done", `${name} created from blueprint "${bp.name}" — now running at http://localhost:${port}`],
+      ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        const s = data.sites.find((x) => x.id === id);
+        if (s) s.status = s.live_status = "running";
+      })();
+
+      const site: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: data.appInfo.wp_versions.includes(bp.wp_version)
+          ? bp.wp_version
+          : data.appInfo.wp_versions[0],
+        php_version: data.appInfo.php_versions.includes(bp.php_version)
+          ? bp.php_version
+          : data.appInfo.php_versions[0],
+        status: "creating",
+        // Login comes from the blueprint's database; no password stored.
+        admin_user: "admin",
+        admin_pass: "",
+        created_at: new Date().toISOString(),
+        connection_id: null,
+        remote_site_id: null,
+        ...WP_SITE_KIND,
+      };
+      data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-bp-0001" });
+      return site;
     }
 
     case "site_logs":
@@ -141,6 +626,106 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         { id: 1, login: site.admin_user, name: "Site Admin", roles: "administrator" },
         { id: 2, login: "editor", name: "Demo Editor", roles: "editor" },
       ];
+    }
+
+    // Plan 24: serialization-safe search-replace with a dry-run-first flow. A
+    // fake per-column breakdown so the preview table + Apply are reviewable; an
+    // applied run snapshots first (pre_search_replace) and streams the stages.
+    case "site_search_replace": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      const from = String(a.from ?? "");
+      const to = String(a.to ?? "");
+      if (!from) throw "The search value is required.";
+      const dryRun = Boolean(a.dryRun);
+      const changes = [
+        { table: "wp_options", column: "option_value", count: 3 },
+        { table: "wp_posts", column: "post_content", count: 12 },
+        { table: "wp_postmeta", column: "meta_value", count: 4 },
+      ];
+      const total = changes.reduce((n, c) => n + c.count, 0);
+      if (!dryRun) {
+        pushSnapshot(site.id, "pre_search_replace", `before replacing "${from}" → "${to}"`);
+        void (async () => {
+          for (const message of [
+            "Exporting database…",
+            "Archiving wp-content…",
+            "Replacing across all tables…",
+          ]) {
+            emit("site-event", { id: site.id, stage: "search-replace", message } satisfies SiteEvent);
+            await sleep(500);
+          }
+          emit("site-event", {
+            id: site.id,
+            stage: "done",
+            message: `Replaced ${total} occurrences across ${changes.length} columns`,
+          } satisfies SiteEvent);
+        })();
+      }
+      return { dry_run: dryRun, total, changes };
+    }
+
+    // Plan 24: Adminer database GUI. Returns a fake URL + DB login; the opener
+    // mock no-ops the actual navigation, but the clipboard + toast flow runs.
+    case "open_site_database": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      const adminerPort = site.port + 11000;
+      return {
+        url: `http://localhost:${adminerPort}/?server=db&username=wordpress&db=wordpress`,
+        username: "wordpress",
+        password: site.db_password || "m4ri4-demo",
+      };
+    }
+
+    // Plan 24: WP_DEBUG toggle + debug.log viewer. Enabling seeds a couple of
+    // fake log lines so the viewer + clear button are reviewable.
+    case "site_debug_status": {
+      const s = debugState(String(a.id));
+      return { enabled: s.enabled, log_bytes: s.log.length };
+    }
+
+    case "set_site_debug": {
+      const s = debugState(String(a.id));
+      s.enabled = Boolean(a.enabled);
+      if (s.enabled && !s.log) {
+        s.log =
+          [
+            "[21-Jul-2026 17:40:02 UTC] PHP Notice:  Undefined variable $greeting in /var/www/html/wp-content/themes/pixel-bakery/functions.php on line 42",
+            "[21-Jul-2026 17:40:03 UTC] PHP Warning:  Use of undefined constant CACHE_TTL in /var/www/html/wp-content/plugins/demo/demo.php on line 8",
+            "[21-Jul-2026 17:40:04 UTC] PHP Fatal error:  Uncaught Error: Call to undefined function demo_boot() in /var/www/html/wp-content/mu-plugins/demo-check.php:11",
+          ].join("\n") + "\n";
+      }
+      return { enabled: s.enabled, log_bytes: s.log.length };
+    }
+
+    case "read_site_debug_log":
+      return debugState(String(a.id)).log;
+
+    case "clear_site_debug_log": {
+      debugState(String(a.id)).log = "";
+      return null;
+    }
+
+    // Plan 24: config editor for wp-config.php + .env.
+    case "read_site_config_file": {
+      const which = String(a.file);
+      if (which !== "wp-config" && which !== "env") throw `unknown config file: ${which}`;
+      return configFiles(String(a.id))[which];
+    }
+
+    case "write_site_config_file": {
+      const which = String(a.file);
+      if (which !== "wp-config" && which !== "env") throw `unknown config file: ${which}`;
+      configFiles(String(a.id))[which] = String(a.contents);
+      return null;
+    }
+
+    case "restart_site": {
+      const site = data.sites.find((s) => s.id === a.id);
+      if (!site) throw `site not found: ${a.id}`;
+      site.status = site.live_status = "running";
+      return site;
     }
 
     case "save_serverkit_connection": {
@@ -173,6 +758,8 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         staging: false,
         api_key_valid: true,
         localkit_extension: true,
+        features: ["sites", "push-code", "push-db", "pull-db", "pull-code", "sync-v2"],
+        kinds: ["wordpress", "php"],
       };
       return info;
     }
@@ -188,10 +775,108 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         url: `https://${slugify(String(a.name))}.example`,
         status: "running",
         wp_version: "6.7",
+        php_version: "8.3",
+        kind: "wordpress",
+        multisite: false,
         environment_count: 1,
       };
       list.push(site);
       data.remoteSites[String(a.connectionId)] = list;
+      return site;
+    }
+
+    case "import_remote_site": {
+      const connectionId = String(a.connectionId);
+      const remoteId = Number(a.remoteSiteId);
+      const remote = (data.remoteSites[connectionId] ?? []).find((s) => s.id === remoteId);
+      if (!remote) throw `Remote site #${remoteId} was not found.`;
+      if (remote.multisite) {
+        throw `"${remote.name}" is a WordPress multisite install, which LocalKit cannot import.`;
+      }
+      if (data.sites.some((s) => s.connection_id === connectionId && s.remote_site_id === remoteId)) {
+        throw `"${remote.name}" was already imported. Pull its database into that site instead.`;
+      }
+
+      const name = String(a.name ?? "").trim() || remote.name;
+      const slug = slugify(name);
+      const port = Math.max(...data.sites.map((s) => s.port), 8080) + 1;
+      const id = `site-${slug}`;
+      const conn = data.connections.find((c) => c.id === connectionId);
+      const isPhp = remote.kind === "php";
+      // Same stages the Rust import emits, so the progress toast reads the same.
+      const stages: Array<[string, string]> = isPhp
+        ? [
+            ["files", "Creating the project directory…"],
+            ["code", "Downloading remote application code…"],
+            ["code", "Extracting code (6.1 MB)…"],
+            ["files", "Writing project files…"],
+            ["pulling", "Building the PHP image (first run can take a few minutes)…"],
+            ["containers", "Starting containers…"],
+            ["waiting", "Waiting for the app to come online…"],
+            ["install", "Downloading remote database…"],
+            ["install", "Importing remote database…"],
+            ["done", `${name} imported from ${conn?.label ?? "server"} — now running at http://localhost:${port}`],
+          ]
+        : [
+            ["files", "Writing project files…"],
+            ["pulling", "Downloading WordPress images (first run can take a few minutes)…"],
+            ["code", "Downloading remote wp-content…"],
+            ["code", "Extracting wp-content (48.2 MB)…"],
+            ["containers", "Starting Docker containers…"],
+            ["waiting", "Waiting for WordPress to come online…"],
+            ["install", "Downloading remote database…"],
+            ["install", "Importing remote database…"],
+            ["install", "Rewriting URLs remote -> local…"],
+            ["done", `${name} imported from ${conn?.label ?? "server"} — now running at http://localhost:${port}`],
+          ];
+      void (async () => {
+        for (const [stage, message] of stages) {
+          emit("site-event", { id, stage, message } satisfies SiteEvent);
+          await sleep(700);
+        }
+        const s = data.sites.find((x) => x.id === id);
+        if (s) s.status = s.live_status = "running";
+      })();
+
+      const site: Site = {
+        id,
+        name,
+        slug,
+        path: `${data.appInfo.sites_dir}\\${slug}`,
+        port,
+        wp_version: data.appInfo.wp_versions.includes(remote.wp_version ?? "")
+          ? String(remote.wp_version)
+          : data.appInfo.wp_versions[0],
+        php_version: data.appInfo.php_versions.includes(remote.php_version ?? "")
+          ? String(remote.php_version)
+          : data.appInfo.php_versions[0],
+        status: "creating",
+        // The imported database keeps the remote's accounts, and no password
+        // of ours — mirrors what the backend records.
+        admin_user: isPhp ? "" : "admin",
+        admin_pass: "",
+        created_at: new Date().toISOString(),
+        connection_id: connectionId,
+        remote_site_id: remoteId,
+        ...(isPhp
+          ? {
+              kind: "php",
+              config: { service: "app", sync_path: "app", db_engine: "mariadb", db_service: "db" },
+              capabilities: data.PHP_CAPS,
+            }
+          : WP_SITE_KIND),
+      };
+      data.sites.push({ ...site, live_status: "creating", db_password: "m4ri4-imp0rt-0001" });
+      (data.syncHistory[id] ??= []).unshift({
+        id: `sync-${Date.now()}`,
+        site_id: id,
+        connection_id: connectionId,
+        direction: "pull",
+        kind: "import",
+        status: "success",
+        message: `${name} imported from ${conn?.label ?? "server"} via mock.`,
+        created_at: new Date().toISOString(),
+      });
       return site;
     }
 
@@ -203,19 +888,17 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       const siteId = String(a.siteId);
       const site = data.sites.find((s) => s.id === siteId);
       const id = `sync-${Date.now()}`;
-      void (async () => {
-        emit("site-event", {
-          id: siteId,
-          stage: "push",
-          message: `${direction === "push" ? "Pushing" : "Pulling"} ${kind} for ${site?.name}…`,
-        } satisfies SiteEvent);
-        await sleep(1200);
-        emit("site-event", {
-          id: siteId,
-          stage: "done",
-          message: `${direction === "push" ? "Pushed" : "Pulled"} ${kind} for ${site?.name}.`,
-        } satisfies SiteEvent);
-      })();
+      // Plan 17: DB syncs overwrite a database, so they snapshot first.
+      if (kind === "db") {
+        const conn = data.connections.find((c) => c.id === a.connectionId);
+        pushSnapshot(
+          siteId,
+          direction === "push" ? "pre_push" : "pre_pull",
+          `${conn?.label ?? "server"} (#${a.remoteSiteId} on ${conn?.url ?? "?"})`
+        );
+      }
+      const verb = direction === "push" ? "Pushing" : "Pulling";
+      const past = direction === "push" ? "Pushed" : "Pulled";
       const record = {
         id,
         site_id: siteId,
@@ -223,24 +906,102 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
         direction,
         kind,
         status: "success",
-        message: `${direction === "push" ? "Pushed" : "Pulled"} ${kind} via mock.`,
+        message: `${past} ${kind} via mock.`,
         created_at: new Date().toISOString(),
       };
       (data.syncHistory[siteId] ??= []).unshift(record);
+
+      // Plan 19: a chunked transfer, so the mock UI shows the same byte
+      // readout and Cancel button the real backend drives.
+      void (async () => {
+        mockCancels.delete(siteId);
+        const total = 312 * 1024 * 1024;
+        const chunk = 8 * 1024 * 1024;
+        emit("site-event", {
+          id: siteId,
+          stage: direction,
+          message: kind === "code" ? "Bundling wp-content…" : "Exporting local database…",
+        } satisfies SiteEvent);
+        await sleep(500);
+
+        for (let done = 0; done <= total; done += chunk) {
+          if (mockCancels.delete(siteId)) {
+            record.status = "cancelled";
+            record.message = `${direction} ${kind} cancelled`;
+            emit("site-event", {
+              id: siteId,
+              stage: "cancelled",
+              message: `${direction} ${kind} cancelled`,
+            } satisfies SiteEvent);
+            return;
+          }
+          emit("site-event", {
+            id: siteId,
+            stage: direction,
+            message: `${verb} ${kind === "code" ? "wp-content" : "database"}`,
+            bytes_done: Math.min(done, total),
+            bytes_total: total,
+          } satisfies SiteEvent);
+          await sleep(80);
+        }
+        emit("site-event", {
+          id: siteId,
+          stage: "done",
+          message: `${past} ${kind} for ${site?.name}.`,
+        } satisfies SiteEvent);
+      })();
       return null;
+    }
+
+    case "cancel_sync": {
+      const siteId = String(a.siteId);
+      mockCancels.add(siteId);
+      return true;
     }
 
     case "list_sync_history":
       return data.syncHistory[String(a.siteId)] ?? [];
 
-    case "router_status":
-      return { ...data.routerStatus };
+    case "router_status": {
+      // Mirrors `router::status`: re-diagnose whenever domains are enabled but
+      // the router is down, so a conflict that appeared *after* enabling (the
+      // real hazard — LocalWP launched later, or won the boot race) keeps
+      // reporting its named cause.
+      const s = data.routerStatus;
+      if (s.enabled && !s.running) {
+        const conflicts = mockProbe(s.http_port, s.https_port);
+        if (conflicts.length > 0) return mockConflict(conflicts, true);
+      }
+      return { ...s };
+    }
 
     case "set_domains_enabled": {
       const enabled = Boolean(a.enabled);
+      if (enabled) {
+        const conflicts = mockProbe(data.routerStatus.http_port, data.routerStatus.https_port);
+        if (conflicts.length > 0) return mockConflict(conflicts);
+      }
       data.routerStatus.enabled = enabled;
       data.routerStatus.running = enabled;
       data.routerStatus.error = null;
+      data.routerStatus.conflicts = [];
+      return { ...data.routerStatus };
+    }
+
+    case "set_router_ports": {
+      const http = Number(a.http);
+      const https = Number(a.https);
+      if (!http || !https) throw "Router ports must be between 1 and 65535.";
+      if (http === https) throw "The HTTP and HTTPS router ports must be different.";
+      if (data.routerStatus.enabled) {
+        const conflicts = mockProbe(http, https);
+        if (conflicts.length > 0) return mockConflict(conflicts);
+        data.routerStatus.running = true;
+      }
+      data.routerStatus.http_port = http;
+      data.routerStatus.https_port = https;
+      data.routerStatus.error = null;
+      data.routerStatus.conflicts = [];
       return { ...data.routerStatus };
     }
 

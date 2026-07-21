@@ -8,7 +8,9 @@
 
 A lean desktop app (think LocalWP, but lighter) that runs each WordPress site
 as its own isolated Docker Compose project — with `wp-content` bind-mounted to
-a plain host folder, so you edit code in your own editor.
+a plain host folder, so you edit code in your own editor. Also manages
+PHP/Laravel stacks and bring-your-own-compose Docker projects under the same
+roof.
 
 English | [Español](docs/README.es.md) | [中文版](docs/README.zh-CN.md) | [Português](docs/README.pt.md)
 
@@ -90,20 +92,28 @@ npm run tauri build
 | **One-Click WordPress Sites**<br>Pick a name, a WordPress version, and a PHP version — done. | **Per-Site Docker Compose Project**<br>`wordpress:<wp>-php<php>-apache` + `mariadb:11`, fully isolated per site. |
 | **Automatic WordPress Install**<br>Installed via wp-cli, with generated admin credentials handed to you. | **Unique Host Ports**<br>Sites on `http://localhost:8081+`, databases on `18081+` — no conflicts. |
 | **Lifecycle & Logs**<br>Start / stop / delete, live container status badges, and a container log viewer. | **Local Domains**<br>Optional `http(s)://<slug>.test` URLs via a shared Caddy router on ports 80/443, managed hosts-file block (one-time admin approval), and one-click local-CA trust for HTTPS. |
+| **Snapshots & One-Click Restore**<br>Point-in-time copies of the database and `wp-content`, restorable from the site page or the CLI. | **Nothing Destructive Is One-Way**<br>A snapshot is taken automatically before every push, pull, delete and restore — deleting a site keeps one unless you opt out. |
+| **Clone & Blueprints**<br>Duplicate any site in one click, or save it as a reusable blueprint (content + plugin/theme recipe) and stamp out new sites from it — portable as a single `.lkbp` file. | **More Than WordPress**<br>Import any existing Docker Compose project, or generate a PHP/Laravel stack (php-fpm + nginx + MariaDB) — same domains, terminals, snapshots, and tray. |
+| **Site Tools**<br>Built-in database GUI (Adminer), serialization-safe search-replace with dry-run, WP_DEBUG toggle with a live log viewer, and a `wp-config.php` / `.env` editor. | **Always-Honest Status**<br>A reconciler settles site status against Docker itself (never guesses), flags unhealthy containers, and recovers installs interrupted by a crash. |
+| **Plays Well With Others**<br>Port pre-flight before claiming 80/443 — if LocalWP or another tool owns them, LocalKit names the process and offers one-click fallback ports so both apps coexist. | **Local Domains That Degrade Gracefully**<br>Configurable router ports (80/443 by default); on fallback ports sites live at `http://<slug>.test:8080` and everything else keeps working. |
 
 ### 🔁 ServerKit Sync
 
 | | |
 |---|---|
 | **Push Code**<br>Push your local `wp-content` straight to a remote site on your ServerKit server. | **Push / Pull Database**<br>Push the DB, or pull a remote DB into your local site with automatic URL search-replace. |
-| **Sync History**<br>Every sync op is recorded per site, with its result. | **Connections**<br>Save, test, and delete server connections; browse remote sites and provision new ones — all through the `serverkit-localkit` extension. |
+| **Resumable Transfers**<br>Sync in 8 MiB chunks with byte-level progress. Lose the connection at 99% and the retry re-sends only what was missing — no size ceiling, nothing buffered in RAM. | **Cancel Any Transfer**<br>Stop a push or pull mid-flight. The server only applies a payload once its checksum verifies, so a cancelled sync leaves nothing half-written. |
+| **Import a Remote Site**<br>Clone any site on your server down as a *new* local site — wp-content, database and URL rewriting in one step, from the app or `lk import`. | **Sync History**<br>Every sync op is recorded per site, with its result. |
+| **Connections**<br>Save, test, and delete server connections; browse remote sites and provision new ones — all through the `serverkit-localkit` extension. | **Capability-Aware**<br>The app asks the extension what it supports, so features an older server can't do are disabled with a reason instead of failing halfway. |
 
 ### 🖥️ Desktop & CLI
 
 | | |
 |---|---|
 | **Dashboard Views**<br>Grid or dense list view for the dashboard, remembered between launches. | **Site Detail Page**<br>Open site / wp-admin, copyable admin + DB credentials, wp-cli info (core version, plugins). |
-| **`lk` CLI**<br>Manage sites from the terminal: `lk create`, `start/stop/restart`, `wp` passthrough, `env` exports, `doctor`, JSON output — shares the app's data dir. | **Bind-Mounted Code**<br>`wp-content` lives in a plain host folder, so you edit themes and plugins in your own editor. |
+| **System Tray & Notifications**<br>Close to tray with quick site actions in the tray menu; desktop notifications when long operations finish while you're elsewhere. | **OS Keyring & Update Checks**<br>ServerKit API keys live in the OS keyring (Credential Manager / Keychain / Secret Service), and the app tells you when a new release is out. |
+| **Command Palette & Shortcuts**<br>mod+K palette over a single command registry, global shortcuts, remappable bindings, cheat-sheet. | **Embedded Terminals**<br>One real PTY per site inside its container, with scrollback that survives navigation, link detection, and ghost-text history. |
+| **`lk` CLI**<br>Manage sites from the terminal: `lk create`, `start/stop/restart`, `wp` passthrough, `env` exports, `snapshot`, `clone`, `blueprint`, `connection`, `push`/`pull`, `doctor`, JSON output — shares the app's data dir. | **Bind-Mounted Code**<br>`wp-content` lives in a plain host folder, so you edit themes and plugins in your own editor. |
 
 ---
 
@@ -132,9 +142,18 @@ Headless companion binary that shares the app's data dir and database:
 cd src-tauri
 cargo run -p lk -- list                 # or: cargo build -p lk → target/debug/lk
 lk create "My Blog"                     # full site create, prints the site URL
+lk create --blueprint starter "Client"  # stamp a new site from a blueprint
+lk clone my-blog my-blog-copy           # one-click duplicate
 lk wp my-blog plugin list               # wp-cli passthrough
 lk env my-blog                          # eval-able exports: eval $(lk env my-blog)
-lk doctor                               # diagnose Docker / compose / data dir
+lk snapshot create my-blog              # point-in-time DB + wp-content copy
+lk snapshot restore my-blog <id> --yes  # roll back to one
+lk connection add Prod https://panel.example.com   # validate + store a server
+lk push my-blog --code                  # push wp-content to its linked remote
+lk pull my-blog --db                    # pull the remote DB down (URL rewrite)
+lk import Production client-blog        # clone a server site down as a new local site
+lk completions zsh                      # shell completions (bash/zsh/fish/powershell)
+lk doctor                               # diagnose Docker / router ports / connections
 lk list --json                          # machine-readable output
 ```
 
@@ -172,20 +191,31 @@ cargo build
 src/                     React 18 + TS + Vite frontend
   lib/ipc.ts             typed wrappers for all Tauri commands (invoke + events)
   lib/types.ts           shared TS types mirroring Rust payloads
-  stores/                Zustand stores (nav, sites)
-  pages/                 Dashboard (grid + list views), SiteDetail, Settings (modal)
-  components/            Sidebar, StatusBadge, CopyButton, NewSiteDialog, icons
+  stores/                Zustand stores (nav, sites, settings, blueprints, toast)
+  pages/                 Dashboard (grid + list views), SiteDetail, Terminal, Settings (modal)
+  components/            Sidebar, StatusBadge, KindBadge, NewSiteDialog, SiteTools,
+                         SnapshotsPanel, PushPanel, CommandPalette, dialogs, icons
   mock/                  fake @tauri-apps/* modules for `vite --mode mock` (screenshots)
 src-tauri/               Rust backend
   src/lib.rs             AppState, command registration, app entry
   src/db.rs              rusqlite, forward-only migrations (PRAGMA user_version)
   src/docker.rs          `docker compose` CLI wrapper
-  src/site.rs            Site model, lifecycle, compose/env templates
+  src/site.rs            Site model, lifecycle, kind/capability model, compose/env templates
+  src/dockerapp.rs       generic Docker-app kind (import an existing compose project)
+  src/php.rs             PHP/Laravel stack kind (generated php-fpm + nginx + mariadb)
   src/wordpress.rs       wp-cli via `docker compose run --rm wpcli`
-  src/router.rs          local domains: shared Caddy router + hosts block + CA trust
+  src/dbsync.rs          engine-native DB export/import dispatch (wp-cli / mysqldump / pg_dump)
+  src/router.rs          local domains: shared Caddy router + hosts block + CA trust + port probe
+  src/reconcile.rs       status reconciler (Docker ground truth, forward-only) + crash recovery
+  src/snapshot.rs        snapshots: DB dump + wp-content archive, restore, retention
+  src/blueprint.rs       save-site-as-blueprint, create-from-blueprint, .lkbp export/import
+  src/keystore.rs        OS keyring for ServerKit API keys
+  src/update.rs          GitHub release update checker
   src/serverkit.rs       ServerKit API client (X-API-Key)
-  src/sync.rs            push/pull orchestration + sync history
-scripts/                 capture-screenshots.mjs (npm run shots), generate-funding-qr.mjs
+  src/sync.rs            push/pull orchestration + remote-site import + sync history
+  src/transfer.rs        chunked transfers: chunk planning, resume, hashing, cancel
+  lk/                    `lk` CLI (separate workspace crate over localkit_lib)
+scripts/                 capture-screenshots.mjs (npm run shots), verify-*.mjs headless checks
 docs/
   plans/                 ROADMAP.md + numbered implementation plans
   screenshots/           README screenshots + CAPTURE.md
@@ -208,9 +238,49 @@ docs/
 - Auth is via `X-API-Key` (create a key in ServerKit → API settings).
 - Connection test = public `/api/v1/system/health` + key validation against `/api/v1/setup-health/account` + a `/api/v1/localkit/pair` probe that detects the extension.
 - All sync endpoints live in the `serverkit-localkit` extension (`/api/v1/localkit/...`); without it, LocalKit tells you exactly what's missing.
-- **Push code** = in-memory tar.gz of `wp-content/` → multipart POST. **Push DB** = `wp db export` → multipart POST. **Pull DB** = download dump → `wp db import` → `wp search-replace` remote URL → local URL.
+- **Transfers are chunked and resumable.** Uploads go up in 8 MiB chunks; the server assembles them, verifies a SHA-256 of the whole archive, and only *then* applies anything — so an interrupted push can never leave the remote site half-updated. Retrying re-sends only the chunks that were actually lost. Downloads resume the same way over HTTP `Range`. This lifts the server's 100 MB request limit, and nothing large is held in memory in either direction.
+- Progress is reported in bytes ("Pushing wp-content — 148 MB / 312 MB") and any transfer can be cancelled mid-flight.
+- Against a server running an older extension, LocalKit falls back to the v1 single-request upload automatically — one client, both servers.
+- **Push code** = tar.gz of `wp-content/`. **Push DB** = `wp db export`. **Pull DB** = download dump → `wp db import` → `wp search-replace` remote URL → local URL.
+- **Import** provisions a new local site, then lands the remote `wp-content` (via the extension's `pull/code`) and database on it. WordPress is never installed over the imported database — the database *is* the site, so its posts, users and settings come across intact. Log in with the remote's own accounts (`lk login`, or the app's WP Admin button).
+- The app gates Import on the capabilities the extension reports from `GET /pair`, so a server running an older extension shows the button disabled with the reason rather than failing mid-import. Multisite installs are refused outright.
+- Downloaded archives are extracted under a strict policy — only plain files and directories under `wp-content/`; absolute paths, `..`, and symlinks are rejected.
 - Every sync op is recorded in the per-site sync history with its result.
-- API keys are stored in **plaintext** in LocalKit's local SQLite DB — accepted for v1, keyring storage is on the roadmap.
+- API keys are stored in the **OS keyring** (Windows Credential Manager, macOS Keychain, Linux Secret Service). Legacy plaintext keys in the local SQLite DB are migrated into the keyring on first read; if the keyring is unavailable (headless Linux, locked keychain), LocalKit degrades to the SQLite column — never a hard failure.
+
+---
+
+## 🩺 Troubleshooting
+
+### "LocalWP / Local by Flywheel is installed" — my `.test` sites show someone else's 404
+
+Only one program on your machine can own ports **80** and **443**, and
+LocalKit's local-domains router needs them. LocalWP's nginx router binds both
+machine-wide *and* answers every unknown local hostname with its own "Site Not
+Found" page — so if it wins the port, `http://mysite.test` renders **Local's**
+404 rather than anything from LocalKit.
+
+LocalKit detects this before it can bite:
+
+- Enabling local domains runs a port pre-flight first. If something else holds
+  80/443 it names the process and stops, rather than writing hosts entries that
+  would point your sites at the other program.
+- Settings → **Local domains** shows the conflict with two ways out: **Use
+  fallback ports** (one click; the router moves to 8080/8443) or **Retry** after
+  you quit the other app.
+- `lk doctor` prints the active router mode and who owns the ports.
+
+On fallback ports your sites are reachable at
+`http://<slug>.test:8080` — the hosts entries are port-blind, so nothing else
+changes and both apps can run side by side. LocalKit deliberately uses the
+`.test` TLD (RFC 2606) while Local uses `.local`, so the hostnames themselves
+never collide; the fight is only ever over the ports.
+
+Prefer clean `http://<slug>.test` URLs? Quit the other program, set the router
+back to 80/443 in Settings → Local domains, and hit Retry.
+
+> **Note:** switching ports restarts the router and rewrites each running
+> site's WordPress `home`/`siteurl`, so bookmarks and absolute URLs follow.
 
 ---
 
@@ -219,12 +289,14 @@ docs/
 - **M1 — Local site lifecycle** ✅ create/start/stop/delete, compose projects, port allocation
 - **M2 — WordPress install & detail** ✅ wp-cli install, credentials, logs, wp info
 - **M3 — ServerKit connection** ✅ save/test connections, extension detection, browse remote sites
-- **M4 — Push / pull** ✅ push code, push DB, pull DB with URL rewrite, sync history
-- **M5 — Release polish** ⬜ installers, auto-update, OS keyring for API keys, test suite
-- **M6 — Local domains** ✅ `http(s)://<slug>.test` via a shared Caddy router, managed hosts block + local CA trust (plan 6)
-- **M7 — CLI (`lk`)** ✅ headless companion binary: lifecycle, wp passthrough, `env`, `doctor`, JSON output (plan 7)
+- **M4 — Push / pull** ✅ push code, push DB, pull DB with URL rewrite, sync history, import a remote site as a new local site, chunked resumable transfers with byte progress and cancel
+- **M5 — Release polish** ✅ update checker, OS keyring for API keys, OS notifications, real test suite; installers ship via the release workflow
+- **M6 — Local domains** ✅ `http(s)://<slug>.test` via a shared Caddy router, managed hosts block + local CA trust, port-conflict pre-flight + fallback ports (plan 6, 16)
+- **M7 — CLI (`lk`)** ✅ headless companion binary: lifecycle, wp passthrough, `env`, `doctor`, JSON output — plus connections, push/pull, blueprints, completions (plan 7, 21)
+- **M8 — System tray** ✅ close-to-tray, quick site actions, single-instance focus (plan 8)
+- **M9 — Multi-stack** ✅ kind/capability model, generic Docker-app import, PHP/Laravel stack with engine-native DB sync (plan 22, 26)
 
-Full details, per-plan phases, and build order: [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md).
+Everything after the milestones is tracked per plan — snapshots (17), remote-site import (18), sync v2 (19), clone & blueprints (20), status reconciliation (23), site tools (24), and more: [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md).
 
 ---
 

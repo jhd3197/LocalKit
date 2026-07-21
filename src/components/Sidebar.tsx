@@ -1,3 +1,4 @@
+import { useDocker } from "../stores/docker";
 import { useNav } from "../stores/nav";
 import { GearIcon, TerminalIcon } from "./icons";
 import logo from "../assets/logo.png";
@@ -7,6 +8,10 @@ export default function Sidebar() {
   const navigate = useNav((s) => s.navigate);
   const settingsOpen = useNav((s) => s.settingsOpen);
   const setSettingsOpen = useNav((s) => s.setSettingsOpen);
+  const docker = useDocker((s) => s.status);
+  // Only claim "unavailable" once a check has actually returned (plan 23) — a
+  // null status is "not checked yet", not "down".
+  const dockerDown = docker != null && !docker.available;
 
   const sitesActive = (page.name === "sites" || page.name === "site") && !settingsOpen;
   const terminalActive = page.name === "terminal" && !settingsOpen;
@@ -43,7 +48,19 @@ export default function Sidebar() {
           Terminal
         </button>
       </nav>
-      <div className="mt-auto flex items-center justify-between border-t border-zinc-800 px-3 py-2.5">
+      {dockerDown && (
+        <button
+          onClick={() => setSettingsOpen(true)}
+          title={docker?.error ?? "Docker is not available."}
+          className="mt-auto mx-3 mb-1 flex items-center gap-2 rounded-md border border-amber-800 bg-amber-500/10 px-2.5 py-2 text-left text-xs font-medium text-amber-400 hover:bg-amber-500/15"
+        >
+          <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-current" />
+          <span className="truncate">Docker unavailable</span>
+        </button>
+      )}
+      <div
+        className={`${dockerDown ? "" : "mt-auto"} flex items-center justify-between border-t border-zinc-800 px-3 py-2.5`}
+      >
         <span className="px-1 text-xs text-zinc-600">v0.1.0</span>
         <button
           onClick={() => setSettingsOpen(true)}

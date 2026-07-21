@@ -17,6 +17,10 @@ export default defineConfig(({ mode }) => ({
             "@tauri-apps/api/core": path.resolve(__dirname, "src/mock/core.ts"),
             "@tauri-apps/api/event": path.resolve(__dirname, "src/mock/event.ts"),
             "@tauri-apps/plugin-opener": path.resolve(__dirname, "src/mock/opener.ts"),
+            "@tauri-apps/plugin-notification": path.resolve(
+              __dirname,
+              "src/mock/notification.ts"
+            ),
           }
         : {},
   },

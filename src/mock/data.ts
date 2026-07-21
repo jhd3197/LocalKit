@@ -3,14 +3,56 @@
 // populated for screenshots and manual previews, with no Docker or Tauri.
 import type {
   AppInfo,
+  Blueprint,
+  Capabilities,
   RemoteWpSite,
   RouterStatus,
   ServerKitConnection,
   SiteDetail,
   SiteWithStatus,
+  Snapshot,
   SyncRecord,
   WpInfo,
 } from "../lib/types";
+
+/** Capability matrices (plan 22) — mirror `site::Capabilities` in the backend. */
+export const WP_CAPS: Capabilities = {
+  domains: true,
+  terminal: true,
+  logs: true,
+  snapshots: true,
+  db_gui: true,
+  db_sync: true,
+  code_sync: true,
+  one_click_login: true,
+  wp_tools: true,
+  search_replace: true,
+};
+export const DOCKER_CAPS: Capabilities = {
+  domains: true,
+  terminal: true,
+  logs: true,
+  snapshots: true,
+  db_gui: false,
+  db_sync: false,
+  code_sync: true,
+  one_click_login: false,
+  wp_tools: false,
+  search_replace: false,
+};
+/** PHP/Laravel stack (plan 26): everything but the WordPress-only trio. */
+export const PHP_CAPS: Capabilities = {
+  domains: true,
+  terminal: true,
+  logs: true,
+  snapshots: true,
+  db_gui: true,
+  db_sync: true,
+  code_sync: true,
+  one_click_login: false,
+  wp_tools: false,
+  search_replace: false,
+};
 
 // Keep in sync with WP_VERSIONS / PHP_VERSIONS in src-tauri/src/site.rs.
 export const appInfo: AppInfo = {
@@ -18,7 +60,19 @@ export const appInfo: AppInfo = {
   sites_dir: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites",
   wp_versions: ["6.7", "6.6", "6.5"],
   php_versions: ["8.3", "8.2", "8.1"],
+  kinds: [
+    { kind: "wordpress", capabilities: WP_CAPS },
+    { kind: "docker", capabilities: DOCKER_CAPS },
+    { kind: "php", capabilities: PHP_CAPS },
+  ],
 };
+
+/** The WordPress kind fields every WP mock site carries (plan 22). */
+const WP_KIND = {
+  kind: "wordpress",
+  config: { service: "wordpress", sync_path: "wp-content" },
+  capabilities: WP_CAPS,
+} as const;
 
 interface MockSite extends SiteWithStatus {
   db_password: string;
@@ -39,6 +93,9 @@ export const sites: MockSite[] = [
     admin_pass: "cr0iss4nt-velvet-42",
     created_at: "2026-07-02T09:14:00Z",
     db_password: "m4ri4-pix3l-9917",
+    connection_id: null,
+    remote_site_id: null,
+    ...WP_KIND,
   },
   {
     id: "site-acme-corporate",
@@ -54,6 +111,32 @@ export const sites: MockSite[] = [
     admin_pass: "acme-roadrunner-88",
     created_at: "2026-06-18T15:40:00Z",
     db_password: "m4ri4-acm3-5542",
+    // Imported from the Production connection (plan 18) — drives the link
+    // badge on the dashboard.
+    connection_id: "conn-prod",
+    remote_site_id: 12,
+    ...WP_KIND,
+  },
+  // Up but unhealthy (plan 23): containers are running yet the app is failing
+  // its health check, so the reconciler settled it to `degraded` — amber badge,
+  // still openable and stoppable, distinct from both running and stopped.
+  {
+    id: "site-recipe-vault",
+    name: "Recipe Vault",
+    slug: "recipe-vault",
+    path: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites\\recipe-vault",
+    port: 8086,
+    wp_version: "6.6",
+    php_version: "8.2",
+    status: "degraded",
+    live_status: "degraded",
+    admin_user: "admin",
+    admin_pass: "whisk-basil-6620",
+    created_at: "2026-07-11T08:30:00Z",
+    db_password: "m4ri4-r3c1p3-7788",
+    connection_id: null,
+    remote_site_id: null,
+    ...WP_KIND,
   },
   {
     id: "site-hiking-blog",
@@ -69,6 +152,31 @@ export const sites: MockSite[] = [
     admin_pass: "summit-trail-2026",
     created_at: "2026-05-30T11:02:00Z",
     db_password: "m4ri4-h1k3-3308",
+    connection_id: null,
+    remote_site_id: null,
+    ...WP_KIND,
+  },
+  // A create killed mid-install (plan 23): status stuck at `creating`, no
+  // completion marker → the dashboard flags it "Setup incomplete" and offers
+  // Resume setup / Clean up instead of the usual actions.
+  {
+    id: "site-beta-launch",
+    name: "Beta Launch",
+    slug: "beta-launch",
+    path: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites\\beta-launch",
+    port: 8087,
+    wp_version: "6.7",
+    php_version: "8.3",
+    status: "creating",
+    live_status: "stopped",
+    incomplete: true,
+    admin_user: "admin",
+    admin_pass: "",
+    created_at: "2026-07-20T22:05:00Z",
+    db_password: "m4ri4-b3t4-4410",
+    connection_id: null,
+    remote_site_id: null,
+    ...WP_KIND,
   },
   {
     id: "site-client-demo",
@@ -84,16 +192,66 @@ export const sites: MockSite[] = [
     admin_pass: "d3mo-spr1ng-7741",
     created_at: "2026-07-19T01:58:00Z",
     db_password: "m4ri4-d3m0-1120",
+    connection_id: null,
+    remote_site_id: null,
+    ...WP_KIND,
+  },
+  // A generic Docker app (plan 22) — proves the capability gating: no WP Admin,
+  // no credentials/database panels, no clone/blueprint/push, just the generic
+  // lifecycle, logs, terminal, a `.test` domain, and code snapshots.
+  {
+    id: "site-analytics-api",
+    name: "Analytics API",
+    slug: "analytics-api",
+    path: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites\\analytics-api",
+    port: 8085,
+    wp_version: "",
+    php_version: "",
+    status: "running",
+    live_status: "running",
+    admin_user: "",
+    admin_pass: "",
+    created_at: "2026-07-14T16:20:00Z",
+    db_password: "",
+    connection_id: null,
+    remote_site_id: null,
+    kind: "docker",
+    config: { service: "api", sync_path: ".", app_port: 4000, db_engine: "postgres", db_service: "db" },
+    capabilities: DOCKER_CAPS,
+  },
+  // A PHP/Laravel stack (plan 26) — like WordPress it has a database (Adminer,
+  // engine-native sync), but none of the WP-only tools (no WP Admin, no
+  // search-replace, no wp-config editor).
+  {
+    id: "site-checkout-api",
+    name: "Checkout API",
+    slug: "checkout-api",
+    path: "C:\\Users\\demo\\AppData\\Roaming\\localkit\\sites\\checkout-api",
+    port: 8086,
+    wp_version: "",
+    php_version: "8.3",
+    status: "running",
+    live_status: "running",
+    admin_user: "",
+    admin_pass: "",
+    created_at: "2026-07-16T09:05:00Z",
+    db_password: "laravel-Rb7Kq2mZ",
+    connection_id: null,
+    remote_site_id: null,
+    kind: "php",
+    config: { service: "app", sync_path: "app", db_engine: "mariadb", db_service: "db" },
+    capabilities: PHP_CAPS,
   },
 ];
 
 export function siteDetail(site: MockSite): SiteDetail {
+  const dbUser = site.kind === "php" ? "laravel" : "wordpress";
   return {
     ...site,
     db_host: "127.0.0.1",
     db_port: site.port + 10000,
-    db_name: "wordpress",
-    db_user: "wordpress",
+    db_name: dbUser,
+    db_user: dbUser,
   };
 }
 
@@ -134,6 +292,11 @@ export const siteLogs: Record<string, string> = {
   ].join("\n"),
   "site-hiking-blog": "No logs — containers are stopped.",
   "site-client-demo": "Creating containers…",
+  "site-analytics-api": [
+    'api-1  | {"level":"info","msg":"listening on :4000","ts":"2026-07-14T16:20:41Z"}',
+    'api-1  | {"level":"info","msg":"connected to postgres","ts":"2026-07-14T16:20:42Z"}',
+    'db-1   | 2026-07-14 16:20:40 UTC [1] LOG:  database system is ready to accept connections',
+  ].join("\n"),
 };
 
 // M6 local domains: fictional router state. Enabled + running so dashboard /
@@ -143,7 +306,18 @@ export const routerStatus: RouterStatus = {
   running: true,
   ca_trusted: false,
   error: null,
+  conflicts: [],
+  http_port: 80,
+  https_port: 443,
 };
+
+/**
+ * Plan 16: a fictional LocalWP-style router holding 80/443, so the conflict UX
+ * is exercisable in mock mode. The router starts *already running*, so the
+ * default screenshots are unaffected — toggle domains off then on to hit it,
+ * and "Use fallback ports" resolves it (8080/8443 are free here).
+ */
+export const heldPorts: Record<number, string> = { 80: "httpd.exe", 443: "httpd.exe" };
 
 /** In-memory app_settings KV (e.g. run_in_background for the tray toggle). */
 export const appSettings: Record<string, string> = {};
@@ -166,6 +340,9 @@ export const remoteSites: Record<string, RemoteWpSite[]> = {
       url: "https://acme-corporate.example",
       status: "running",
       wp_version: "6.5",
+      php_version: "8.1",
+      kind: "wordpress",
+      multisite: false,
       environment_count: 2,
     },
     {
@@ -174,6 +351,9 @@ export const remoteSites: Record<string, RemoteWpSite[]> = {
       url: "https://pixelbakery.example",
       status: "running",
       wp_version: "6.7",
+      php_version: "8.3",
+      kind: "wordpress",
+      multisite: false,
       environment_count: 3,
     },
     {
@@ -182,10 +362,165 @@ export const remoteSites: Record<string, RemoteWpSite[]> = {
       url: null,
       status: "stopped",
       wp_version: "6.6",
+      php_version: "8.2",
+      kind: "wordpress",
+      multisite: false,
       environment_count: 1,
+    },
+    // Exercises the two Import-blocked states: a multisite (never importable)
+    // and a version pair with no exact local image (importable, with a warning).
+    {
+      id: 44,
+      name: "agency-network",
+      url: "https://network.agency.example",
+      status: "running",
+      wp_version: "6.7",
+      php_version: "8.2",
+      kind: "wordpress",
+      multisite: true,
+      environment_count: 0,
+    },
+    {
+      id: 51,
+      name: "legacy-shop",
+      url: "https://legacy-shop.example",
+      status: "running",
+      wp_version: "6.2",
+      php_version: "7.4",
+      kind: "wordpress",
+      multisite: false,
+      environment_count: 0,
+    },
+    // A PHP/Laravel remote (plan 26) — importable as a php local site.
+    {
+      id: 63,
+      name: "checkout-service",
+      url: "https://checkout.acme.example",
+      status: "running",
+      wp_version: null,
+      php_version: "8.3",
+      kind: "php",
+      multisite: false,
+      environment_count: 0,
     },
   ],
 };
+
+/**
+ * Plan 17 snapshots. Pixel Bakery shows the full mix — a manual one plus the
+ * automatic ones push/pull/delete leave behind — so the kind badges and the
+ * retention story are visible without Docker. Hiking Blog has none, which is
+ * the empty state.
+ */
+export const snapshots: Record<string, Snapshot[]> = {
+  "site-pixel-bakery": [
+    {
+      id: "20260719-084500-120",
+      site_id: "site-pixel-bakery",
+      site_name: "Pixel Bakery",
+      site_slug: "pixel-bakery",
+      created_at: "2026-07-19T08:45:00Z",
+      kind: "pre_pull",
+      note: "Production (#27 on https://panel.acme-hosting.example)",
+      db_bytes: 4_312_770,
+      code_bytes: 224_512_900,
+      wp_version: "6.7",
+    },
+    {
+      id: "20260718-142200-880",
+      site_id: "site-pixel-bakery",
+      site_name: "Pixel Bakery",
+      site_slug: "pixel-bakery",
+      created_at: "2026-07-18T14:22:00Z",
+      kind: "manual",
+      note: "before the checkout rewrite",
+      db_bytes: 4_298_115,
+      code_bytes: 223_998_042,
+      wp_version: "6.7",
+    },
+    {
+      id: "20260715-135500-410",
+      site_id: "site-pixel-bakery",
+      site_name: "Pixel Bakery",
+      site_slug: "pixel-bakery",
+      created_at: "2026-07-15T13:55:00Z",
+      kind: "pre_push",
+      note: "Production (#27 on https://panel.acme-hosting.example)",
+      db_bytes: 4_105_663,
+      code_bytes: 219_774_301,
+      wp_version: "6.7",
+    },
+  ],
+  "site-acme-corporate": [
+    {
+      id: "20260716-101200-005",
+      site_id: "site-acme-corporate",
+      site_name: "Acme Corporate",
+      site_slug: "acme-corporate",
+      created_at: "2026-07-16T10:12:00Z",
+      kind: "manual",
+      note: "",
+      db_bytes: 1_884_204,
+      code_bytes: 48_220_118,
+      wp_version: "6.5",
+    },
+  ],
+  // A docker app's snapshot is code-only — the DB dump is empty (db_bytes 0).
+  "site-analytics-api": [
+    {
+      id: "20260714-170000-000",
+      site_id: "site-analytics-api",
+      site_name: "Analytics API",
+      site_slug: "analytics-api",
+      created_at: "2026-07-14T17:00:00Z",
+      kind: "manual",
+      note: "before the schema change",
+      db_bytes: 0,
+      code_bytes: 3_204_880,
+      wp_version: "",
+    },
+  ],
+};
+
+/**
+ * Plan 20 blueprints: reusable site recipes, so the NewSiteDialog "From
+ * blueprint" section and its plugin/theme chips are reviewable without Docker.
+ */
+export const blueprints: Blueprint[] = [
+  {
+    id: "starter-shop",
+    name: "Starter Shop",
+    description: "WooCommerce storefront with our base theme and a set of starter products.",
+    wp_version: "6.7",
+    php_version: "8.3",
+    plugins: [
+      { name: "woocommerce", status: "active", version: "9.6.0" },
+      { name: "contact-form-7", status: "active", version: "6.0.3" },
+      { name: "akismet", status: "inactive", version: "5.3.5" },
+    ],
+    theme: "storefront",
+    created_at: "2026-07-10T09:00:00Z",
+    source_site_name: "Pixel Bakery",
+    db_bytes: 3_120_400,
+    code_bytes: 168_442_000,
+  },
+  {
+    id: "agency-base",
+    name: "Agency Base",
+    description: "ACF + our block library and brand theme — the starting point for a client build.",
+    wp_version: "6.6",
+    php_version: "8.2",
+    plugins: [
+      { name: "advanced-custom-fields", status: "active", version: "6.3.12" },
+      { name: "wordfence", status: "active", version: "8.0.3" },
+    ],
+    theme: "twentytwentyfive",
+    created_at: "2026-06-28T14:30:00Z",
+    source_site_name: "Acme Corporate",
+    db_bytes: 1_902_880,
+    code_bytes: 52_004_120,
+  },
+];
 
 export const syncHistory: Record<string, SyncRecord[]> = {
   "site-pixel-bakery": [

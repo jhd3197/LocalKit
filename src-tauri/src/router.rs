@@ -23,6 +23,14 @@ pub const TLD: &str = "test";
 const KEY_ENABLED: &str = "domains_enabled";
 const KEY_CA_TRUSTED: &str = "router_ca_trusted";
 const KEY_LAST_ERROR: &str = "router_last_error";
+/// Default router host ports (the clean-URL mode).
+pub const DEFAULT_HTTP_PORT: u16 = 80;
+pub const DEFAULT_HTTPS_PORT: u16 = 443;
+/// Suggested fallback pair when another program owns 80/443.
+pub const FALLBACK_HTTP_PORT: u16 = 8080;
+pub const FALLBACK_HTTPS_PORT: u16 = 8443;
+const KEY_HTTP_PORT: &str = "router_http_port";
+const KEY_HTTPS_PORT: &str = "router_https_port";
 /// Path of Caddy's local-CA root cert inside the container.
 const CA_CERT_CONTAINER_PATH: &str = "/data/caddy/pki/authorities/local/root.crt";
 /// Managed-block markers in the OS hosts file.
@@ -35,6 +43,51 @@ pub struct RouterStatus {
     pub running: bool,
     pub ca_trusted: bool,
     pub error: Option<String>,
+    /// Router ports another program is holding (empty = free, or the router
+    /// itself is up and holding them legitimately).
+    pub conflicts: Vec<PortConflict>,
+    pub http_port: u16,
+    pub https_port: u16,
+}
+
+/// A router port held by some other program, with a best-effort owner name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PortConflict {
+    pub port: u16,
+    pub process: Option<String>,
+}
+
+/// Host ports the Caddy router publishes on. Container ports are always
+/// 80/443 — only the host side moves, so the Caddyfile is port-blind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RouterPorts {
+    pub http: u16,
+    pub https: u16,
+}
+
+impl Default for RouterPorts {
+    fn default() -> Self {
+        Self { http: DEFAULT_HTTP_PORT, https: DEFAULT_HTTPS_PORT }
+    }
+}
+
+impl RouterPorts {
+    /// Clean-URL mode: browsers imply 80/443, so no `:port` suffix is needed.
+    pub fn is_default(&self) -> bool {
+        self.http == DEFAULT_HTTP_PORT && self.https == DEFAULT_HTTPS_PORT
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for port in [self.http, self.https] {
+            if port == 0 {
+                return Err("Router ports must be between 1 and 65535.".into());
+            }
+        }
+        if self.http == self.https {
+            return Err("The HTTP and HTTPS router ports must be different.".into());
+        }
+        Ok(())
+    }
 }
 
 pub fn router_dir(data_dir: &Path) -> PathBuf {
@@ -42,32 +95,66 @@ pub fn router_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// The URL a site is reachable at through the router.
-pub fn site_url(slug: &str, ca_trusted: bool) -> String {
+///
+/// On the default ports this is the clean `http(s)://<slug>.test`. On fallback
+/// ports the browser needs the port spelled out, and we deliberately stay on
+/// http: a non-standard https port would prompt for a second certificate
+/// exception even after the CA is trusted.
+pub fn site_url(slug: &str, ca_trusted: bool, ports: RouterPorts) -> String {
+    if !ports.is_default() {
+        return format!("http://{slug}.{TLD}:{}", ports.http);
+    }
     let scheme = if ca_trusted { "https" } else { "http" };
     format!("{scheme}://{slug}.{TLD}")
 }
 
 /// The URL a site should be opened at (mirrors the frontend's `siteUrl`):
 /// its `*.test` domain when local domains are enabled, else `localhost:<port>`.
+/// The single source of truth for "where does this site live" — tray menu,
+/// one-click login, WP install URL and the CLI all funnel through here.
 pub fn site_public_url(state: &AppState, site: &Site) -> String {
     let (domains_on, ca_trusted) = enabled_and_trusted(state);
-    if domains_on {
-        site_url(&site.slug, ca_trusted)
+    if domains_on && site.capabilities.domains {
+        site_url(&site.slug, ca_trusted, router_ports(state))
     } else {
-        format!("http://localhost:{}", site.port)
+        // The app's own port for a docker project whose compose publishes on a
+        // different port than the reserved site port; the site port for WP.
+        format!("http://localhost:{}", site.config.upstream_port(site.port))
     }
 }
 
-fn render_compose() -> String {
-    r#"name: localkit-router
+/// Where a site's Adminer database GUI is reached (plan 24): `db-<slug>.test`
+/// when local domains are on and the site has a db GUI, else
+/// `localhost:<adminer_port>`. Mirrors `site_public_url`; a non-default https
+/// port stays on http for the same reason (a second cert-exception prompt).
+pub fn adminer_public_url(state: &AppState, site: &Site) -> String {
+    let (domains_on, ca_trusted) = enabled_and_trusted(state);
+    if domains_on && site.capabilities.domains && site.capabilities.db_gui {
+        let ports = router_ports(state);
+        if !ports.is_default() {
+            format!("http://db-{}.{TLD}:{}", site.slug, ports.http)
+        } else {
+            let scheme = if ca_trusted { "https" } else { "http" };
+            format!("{scheme}://db-{}.{TLD}", site.slug)
+        }
+    } else {
+        format!("http://localhost:{}", site.adminer_port())
+    }
+}
+
+fn render_compose(ports: RouterPorts) -> String {
+    // Container ports stay 80/443 — only the host mapping moves, so the
+    // Caddyfile (and the hosts block) are unaffected by fallback mode.
+    format!(
+        r#"name: localkit-router
 
 services:
   caddy:
     image: caddy:2
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "{http}:80"
+      - "{https}:443"
     # Route to sites via their published host ports — no shared network,
     # no changes to per-site compose projects.
     extra_hosts:
@@ -78,28 +165,43 @@ services:
 
 volumes:
   caddy-data:
-"#
-    .to_string()
+"#,
+        http = ports.http,
+        https = ports.https,
+    )
 }
 
 fn render_caddyfile(sites: &[Site]) -> String {
     let mut out = String::from("# Generated by LocalKit — do not edit by hand.\n\n");
-    for site in sites {
+    for site in sites.iter().filter(|s| s.capabilities.domains) {
+        // Proxy to the app's upstream port — the site port for WordPress, or a
+        // docker project's own published port when it differs (plan 22).
         out.push_str(&format!(
             "http://{slug}.{TLD} {{\n\treverse_proxy host.docker.internal:{port}\n}}\n\n\
              https://{slug}.{TLD} {{\n\ttls internal\n\treverse_proxy host.docker.internal:{port}\n}}\n\n",
             slug = site.slug,
-            port = site.port,
+            port = site.config.upstream_port(site.port),
         ));
+        // Adminer database GUI at db-<slug>.test when the kind has a db GUI
+        // (plan 24). The route exists whether or not Adminer is currently
+        // running — starting it is on-demand from Tools -> Database.
+        if site.capabilities.db_gui {
+            out.push_str(&format!(
+                "http://db-{slug}.{TLD} {{\n\treverse_proxy host.docker.internal:{port}\n}}\n\n\
+                 https://db-{slug}.{TLD} {{\n\ttls internal\n\treverse_proxy host.docker.internal:{port}\n}}\n\n",
+                slug = site.slug,
+                port = site.adminer_port(),
+            ));
+        }
     }
     out
 }
 
 /// Write the router compose project + Caddyfile for the given sites.
-fn write_files(data_dir: &Path, sites: &[Site]) -> Result<PathBuf, String> {
+fn write_files(data_dir: &Path, sites: &[Site], ports: RouterPorts) -> Result<PathBuf, String> {
     let dir = router_dir(data_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create router directory: {e}"))?;
-    std::fs::write(dir.join("docker-compose.yml"), render_compose())
+    std::fs::write(dir.join("docker-compose.yml"), render_compose(ports))
         .map_err(|e| format!("failed to write router docker-compose.yml: {e}"))?;
     std::fs::write(dir.join("Caddyfile"), render_caddyfile(sites))
         .map_err(|e| format!("failed to write Caddyfile: {e}"))?;
@@ -117,7 +219,9 @@ async fn reload(dir: &Path) -> Result<(), String> {
     docker::compose_restart(dir).await
 }
 
-/// Add a "what's probably holding the port" hint to bind failures.
+/// Add a "what's probably holding the port" hint to bind failures. Used only
+/// as a backstop — the pre-flight probe (`probe_ports`) catches the common
+/// case *before* we touch the hosts file or Docker.
 fn port_conflict_hint(err: &str) -> String {
     let lower = err.to_lowercase();
     if lower.contains("port is already allocated")
@@ -126,13 +230,187 @@ fn port_conflict_hint(err: &str) -> String {
         || lower.contains("permission denied") && lower.contains("80")
     {
         format!(
-            "Could not start the local-domains router: ports 80/443 appear to be in use \
+            "Could not start the local-domains router: its ports appear to be in use \
              by another program (LocalWP's router, IIS, Skype, or another web server). \
-             Stop whatever is bound to port 80/443 and try again.\n\nDetails: {err}"
+             Stop it, or switch LocalKit to fallback ports in Settings → Domains.\
+             \n\nDetails: {err}"
         )
     } else {
         format!("Could not start the local-domains router: {err}")
     }
+}
+
+// ---------------------------------------------------------------------------
+// Port pre-flight (plan 16)
+//
+// LocalWP's nginx router is the canonical conflict: it binds 80/443
+// machine-wide and answers *every* unknown local host with its own "Site Not
+// Found" page, so without this probe a LocalKit site at `http://x.test/`
+// silently hits Local's router while LocalKit's Caddy is down. Probing with a
+// plain `TcpListener::bind` costs nothing and runs before any hosts-file or
+// Docker mutation, so it can never race our own containers.
+// ---------------------------------------------------------------------------
+
+/// Can we bind `port`? Checks both the wildcard and the loopback address: on
+/// Windows a program bound only to `127.0.0.1:80` still wins loopback traffic
+/// even though `0.0.0.0:80` binds fine, which is exactly the case that makes
+/// a site silently answer from the other app's router.
+///
+/// NOT sufficient on its own — see `probe_port`.
+fn bind_free(port: u16) -> bool {
+    use std::net::{Ipv4Addr, TcpListener};
+    TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok()
+        && TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+/// Is `port` held by something else? Combines two independent signals,
+/// because neither is reliable alone:
+///
+/// - the OS listener table (`Get-NetTCPConnection` / `lsof`) — authoritative,
+///   and it names the owner;
+/// - a probe bind — catches listeners the query misses or can't see.
+///
+/// Bind-probing alone is a false-negative trap on Windows: a socket bound
+/// with SO_REUSEADDR (Docker's port publisher does exactly this) lets us bind
+/// the *same* address again, so a genuinely busy port reports free. Verified
+/// on a machine where a container published 8080: the wildcard bind succeeded
+/// while `netstat` showed it LISTENING.
+async fn probe_port(port: u16) -> Option<PortConflict> {
+    let process = identify_port_owner(port).await;
+    if process.is_some() || !bind_free(port) {
+        Some(PortConflict { port, process })
+    } else {
+        None
+    }
+}
+
+/// Best-effort process name holding `port` (`None` when we can't tell — the
+/// message then falls back to the generic "another web server" hint).
+async fn identify_port_owner(port: u16) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let output = {
+        let ps = format!(
+            "$c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue \
+             | Select-Object -First 1; \
+             if ($c) {{ (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue).ProcessName }}"
+        );
+        docker::no_window(
+            tokio::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]),
+        )
+        .output()
+        .await
+    };
+    #[cfg(not(target_os = "windows"))]
+    let output = docker::no_window(tokio::process::Command::new("lsof").args([
+        "-nP",
+        &format!("-iTCP:{port}"),
+        "-sTCP:LISTEN",
+        "-F",
+        "c",
+    ]))
+    .output()
+    .await;
+
+    let out = output.ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let name = stdout
+        .lines()
+        // `lsof -F c` prefixes the command name with 'c'; PowerShell prints it bare.
+        .filter_map(|l| Some(l.trim()).filter(|l| !l.is_empty()))
+        .map(|l| l.strip_prefix('c').unwrap_or(l))
+        .next()?
+        .to_string();
+    Some(name).filter(|n| !n.is_empty())
+}
+
+/// Every TCP port in LISTEN state on the host, from one OS query.
+///
+/// `probe_port` answers "who holds *this* port" and costs a subprocess per
+/// call; port *allocation* needs the whole set at once (site.rs walks upward
+/// from 8081), so it gets this instead — one spawn, no owner lookup.
+///
+/// Same authority as `probe_port` and for the same reason: a bare bind test
+/// misses ports published by Docker (SO_REUSEADDR lets the wildcard address be
+/// re-bound), which would hand out a port that then fails at `compose up`.
+/// Best effort — an empty set on error just falls back to bind-only checks.
+pub async fn listening_ports() -> std::collections::HashSet<u16> {
+    #[cfg(target_os = "windows")]
+    let output = docker::no_window(tokio::process::Command::new("powershell").args([
+        "-NoProfile",
+        "-Command",
+        "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue \
+         | Select-Object -ExpandProperty LocalPort",
+    ]))
+    .output()
+    .await;
+    #[cfg(not(target_os = "windows"))]
+    let output = docker::no_window(tokio::process::Command::new("lsof").args([
+        "-nP",
+        "-iTCP",
+        "-sTCP:LISTEN",
+        "-F",
+        "n",
+    ]))
+    .output()
+    .await;
+
+    match output {
+        Ok(out) => parse_listening_ports(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => std::collections::HashSet::new(),
+    }
+}
+
+/// Parse the listener query output. Windows prints one bare port per line;
+/// `lsof -F n` prints `n<addr>:<port>` (addr may be `*`, IPv4, or a bracketed
+/// IPv6 literal), interleaved with other `-F` field lines we ignore.
+fn parse_listening_ports(stdout: &str) -> std::collections::HashSet<u16> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let candidate = match line.strip_prefix('n') {
+                // lsof: take everything after the last ':' (IPv6 has several).
+                Some(addr) => addr.rsplit(':').next()?,
+                None => line,
+            };
+            candidate.parse::<u16>().ok()
+        })
+        .collect()
+}
+
+/// Which of the router's ports are held by something else.
+pub async fn probe_ports(http: u16, https: u16) -> Vec<PortConflict> {
+    let mut conflicts = Vec::new();
+    for port in [http, https] {
+        if let Some(conflict) = probe_port(port).await {
+            conflicts.push(conflict);
+        }
+    }
+    conflicts
+}
+
+/// User-facing explanation of a port conflict. Pure (unit-tested); the
+/// remediation half depends on whether the user is already on fallback ports.
+fn conflict_message(conflicts: &[PortConflict], on_default_ports: bool) -> String {
+    let held = conflicts
+        .iter()
+        .map(|c| match &c.process {
+            Some(p) => format!("port {} is held by {p}", c.port),
+            None => format!("port {} is in use", c.port),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let fix = if on_default_ports {
+        "Quit the other program (LocalWP's router, IIS, Skype, or another web server), \
+         or switch LocalKit to fallback ports (8080/8443) in Settings → Domains."
+    } else {
+        "Quit whatever is holding those ports, or pick different router ports in \
+         Settings → Domains."
+    };
+    format!("Local domains could not start: {held}. {fix}")
 }
 
 // ---------------------------------------------------------------------------
@@ -321,11 +599,16 @@ async fn sync_hosts(slugs: &[String]) -> Result<(), String> {
 }
 
 fn site_slugs(state: &AppState) -> Vec<String> {
-    list_sites(state)
-        .unwrap_or_default()
-        .iter()
-        .map(|s| s.slug.clone())
-        .collect()
+    let mut slugs = Vec::new();
+    for s in list_sites(state).unwrap_or_default().iter().filter(|s| s.capabilities.domains) {
+        slugs.push(s.slug.clone());
+        // Adminer's `db-<slug>.test` needs its own hosts entry too, or the
+        // Caddy db-route the caddyfile carries never resolves (plan 24).
+        if s.capabilities.db_gui {
+            slugs.push(format!("db-{}", s.slug));
+        }
+    }
+    slugs
 }
 
 fn get_flag(state: &AppState, key: &str) -> Result<bool, String> {
@@ -349,9 +632,29 @@ fn list_sites(state: &AppState) -> Result<Vec<Site>, String> {
     db.list_sites()
 }
 
+/// Configured router host ports (`app_settings` KV — no migration). Never
+/// fails: unset or unparseable values fall back to 80/443.
+pub fn router_ports(state: &AppState) -> RouterPorts {
+    let Ok(db) = state.db.lock() else {
+        return RouterPorts::default();
+    };
+    let read = |key: &str, fallback: u16| -> u16 {
+        db.get_setting(key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|p| *p > 0)
+            .unwrap_or(fallback)
+    };
+    RouterPorts {
+        http: read(KEY_HTTP_PORT, DEFAULT_HTTP_PORT),
+        https: read(KEY_HTTPS_PORT, DEFAULT_HTTPS_PORT),
+    }
+}
+
 /// (domains_enabled, ca_trusted) — used by site creation to pick the
 /// WordPress install URL. Never fails; defaults to (false, false).
-pub fn enabled_and_trusted(state: &AppState) -> (bool, bool) {
+fn enabled_and_trusted(state: &AppState) -> (bool, bool) {
     let Ok(db) = state.db.lock() else {
         return (false, false);
     };
@@ -374,34 +677,57 @@ pub async fn status(state: &AppState) -> Result<RouterStatus, String> {
             db.get_setting(KEY_LAST_ERROR)?.filter(|s| !s.is_empty()),
         )
     };
-    let dir = router_dir(&state.data_dir);
-    let running = if dir.join("docker-compose.yml").exists() {
-        match docker::compose_ps(&dir).await {
-            Ok(containers) => containers
-                .iter()
-                .any(|c| c.service == "caddy" && c.state == "running"),
-            Err(_) => false,
-        }
+    let running = is_running(state).await;
+    let ports = router_ports(state);
+    // Diagnose a persistent conflict on every status read, so reopening the
+    // app while LocalWP still holds 80/443 shows the same named cause instead
+    // of a bare "router is not running".
+    let conflicts = if enabled && !running {
+        probe_ports(ports.http, ports.https).await
     } else {
-        false
+        Vec::new()
     };
     Ok(RouterStatus {
         enabled,
         running,
         ca_trusted,
         error: last_error,
+        conflicts,
+        http_port: ports.http,
+        https_port: ports.https,
     })
+}
+
+/// Is our own Caddy container up? (Distinguishes "port 80 is busy because the
+/// router owns it" from a real foreign conflict.)
+async fn is_running(state: &AppState) -> bool {
+    let dir = router_dir(&state.data_dir);
+    if !dir.join("docker-compose.yml").exists() {
+        return false;
+    }
+    match docker::compose_ps(&dir).await {
+        Ok(containers) => containers
+            .iter()
+            .any(|c| c.service == "caddy" && c.state == "running"),
+        Err(_) => false,
+    }
 }
 
 /// Best-effort rewrite of `home`/`siteurl` for every running site.
 /// Returns messages for the sites that failed (never fails the caller).
 async fn rewrite_site_urls(state: &AppState, to_domains: bool) -> Vec<String> {
     let ca_trusted = get_flag(state, KEY_CA_TRUSTED).unwrap_or(false);
+    let ports = router_ports(state);
     let sites = list_sites(state).unwrap_or_default();
     let mut failures = Vec::new();
-    for site in sites.iter().filter(|s| s.status == "running") {
+    // Only WordPress-shaped sites have `home`/`siteurl` to rewrite; a docker
+    // app is reached at its domain with nothing baked into a database.
+    for site in sites
+        .iter()
+        .filter(|s| s.status == "running" && s.capabilities.search_replace)
+    {
         let url = if to_domains {
-            site_url(&site.slug, ca_trusted)
+            site_url(&site.slug, ca_trusted, ports)
         } else {
             format!("http://localhost:{}", site.port)
         };
@@ -414,8 +740,24 @@ async fn rewrite_site_urls(state: &AppState, to_domains: bool) -> Vec<String> {
 
 pub async fn set_enabled(state: &AppState, enabled: bool) -> Result<RouterStatus, String> {
     if enabled {
+        // Pre-flight BEFORE touching the hosts file: writing `127.0.0.1
+        // <slug>.test` while another program owns port 80 would point every
+        // site at that program's router (LocalWP answers unknown hosts with
+        // its own 404), which looks like LocalKit is broken.
+        let ports = router_ports(state);
+        if !is_running(state).await {
+            let conflicts = probe_ports(ports.http, ports.https).await;
+            if !conflicts.is_empty() {
+                let msg = conflict_message(&conflicts, ports.is_default());
+                set_last_error(state, Some(&msg));
+                let mut st = status(state).await?;
+                st.error = Some(msg);
+                st.conflicts = conflicts;
+                return Ok(st);
+            }
+        }
         let sites = list_sites(state)?;
-        let dir = write_files(&state.data_dir, &sites)?;
+        let dir = write_files(&state.data_dir, &sites, ports)?;
         // Hosts entries first: if the user declines elevation, nothing else
         // changes and the flag stays off.
         if let Err(e) = sync_hosts(&site_slugs(state)).await {
@@ -495,8 +837,76 @@ pub async fn refresh_routes(state: &AppState) {
         return;
     }
     let Ok(sites) = list_sites(state) else { return };
-    let Ok(dir) = write_files(&state.data_dir, &sites) else { return };
+    let ports = router_ports(state);
+    let Ok(dir) = write_files(&state.data_dir, &sites, ports) else { return };
     let _ = reload(&dir).await;
+}
+
+/// Change the router's host ports (fallback mode). Validates, pre-flights the
+/// *new* ports, regenerates compose, restarts the router on them, and rewrites
+/// running sites' WordPress URLs — the same path the enable toggle uses, so
+/// `home`/`siteurl` never drift from where the site is actually served.
+pub async fn set_ports(state: &AppState, http: u16, https: u16) -> Result<RouterStatus, String> {
+    let ports = RouterPorts { http, https };
+    ports.validate()?;
+    if ports == router_ports(state) {
+        return status(state).await;
+    }
+
+    let enabled = get_flag(state, KEY_ENABLED).unwrap_or(false);
+    let dir = router_dir(&state.data_dir);
+    // Free the old ports before probing the new ones — otherwise a swap that
+    // reuses one of them would see our own container as the conflict.
+    if enabled && dir.join("docker-compose.yml").exists() {
+        let _ = docker::compose_down(&dir, false).await;
+    }
+    if enabled {
+        let conflicts = probe_ports(ports.http, ports.https).await;
+        if !conflicts.is_empty() {
+            // Leave the old ports in settings: the router is down either way,
+            // but the user's previous working config is worth preserving.
+            let msg = conflict_message(&conflicts, ports.is_default());
+            set_last_error(state, Some(&msg));
+            let mut st = status(state).await?;
+            st.error = Some(msg);
+            st.conflicts = conflicts;
+            return Ok(st);
+        }
+    }
+
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_setting(KEY_HTTP_PORT, &ports.http.to_string())?;
+        db.set_setting(KEY_HTTPS_PORT, &ports.https.to_string())?;
+    }
+
+    if !enabled {
+        // Ports are recorded; the router starts on them at the next enable.
+        return status(state).await;
+    }
+
+    let sites = list_sites(state)?;
+    let dir = write_files(&state.data_dir, &sites, ports)?;
+    if let Err(e) = docker::compose_up(&dir).await {
+        let msg = port_conflict_hint(&e);
+        set_last_error(state, Some(&msg));
+        let mut st = status(state).await?;
+        st.error = Some(msg);
+        return Ok(st);
+    }
+    set_last_error(state, None);
+    let _ = reload(&dir).await;
+    let failures = rewrite_site_urls(state, true).await;
+    let mut st = status(state).await?;
+    if !failures.is_empty() {
+        st.error = Some(format!(
+            "Router restarted on ports {}/{}, but the WordPress URL rewrite failed for: {}",
+            ports.http,
+            ports.https,
+            failures.join("; ")
+        ));
+    }
+    Ok(st)
 }
 
 /// Reconcile the managed hosts block after site create/delete (the slug set
@@ -589,6 +999,30 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    #[test]
+    fn parses_the_windows_listener_table() {
+        // `Select-Object -ExpandProperty LocalPort`: one bare port per line.
+        let ports = parse_listening_ports("80\r\n443\r\n8081\r\n18081\r\n");
+        assert_eq!(ports.len(), 4);
+        assert!(ports.contains(&8081) && ports.contains(&18081));
+    }
+
+    #[test]
+    fn parses_lsof_listener_output() {
+        // `lsof -F n` interleaves `p<pid>` lines; IPv6 names carry extra colons.
+        let ports = parse_listening_ports("p123\nn*:8081\nn127.0.0.1:18081\np456\nn[::1]:443\n");
+        assert_eq!(ports.len(), 3);
+        assert!(ports.contains(&8081));
+        assert!(ports.contains(&18081));
+        assert!(ports.contains(&443), "IPv6 literal should not eat the port");
+    }
+
+    #[test]
+    fn listener_parsing_ignores_junk() {
+        let ports = parse_listening_ports("\nLocalPort\n-------\n\nnot-a-port\n99999999\n8082\n");
+        assert_eq!(ports, std::collections::HashSet::from([8082]));
+    }
+
     const SAMPLE: &str = "# Copyright (c) Microsoft Corp.\r\n\
                           \r\n\
                           127.0.0.1  localhost\r\n\
@@ -645,6 +1079,206 @@ mod tests {
         let out = update_hosts_content(lf, &slugs(&["x"]));
         assert!(!out.contains("\r\n"));
         assert!(out.contains("127.0.0.1  x.test"));
+    }
+
+    // --- plan 16: port pre-flight -----------------------------------------
+
+    #[test]
+    fn bind_free_reports_true_for_an_unbound_port() {
+        // Bind an ephemeral port, learn its number, release it, then probe.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(bind_free(port));
+    }
+
+    #[test]
+    fn bind_free_reports_false_while_a_port_is_held() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!bind_free(port), "a bound loopback port is not free");
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn probe_catches_a_wildcard_listener_that_still_allows_rebinding() {
+        // The Windows SO_REUSEADDR trap: a wildcard listener can be re-bound,
+        // so `bind_free` alone reports the port free. The OS listener table
+        // is what actually catches it, so `probe_port` must still flag it.
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(
+            probe_port(port).await.is_some(),
+            "a port with a live wildcard listener must be reported as in use \
+             (bind_free said free={})",
+            bind_free(port)
+        );
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn probe_returns_empty_when_ports_are_free() {
+        let a = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let b = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (pa, pb) = (a.local_addr().unwrap().port(), b.local_addr().unwrap().port());
+        drop(a);
+        drop(b);
+        assert_eq!(probe_ports(pa, pb).await, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn probe_reports_the_held_port_only() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let taken = held.local_addr().unwrap().port();
+        let free_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free = free_listener.local_addr().unwrap().port();
+        drop(free_listener);
+
+        let conflicts = probe_ports(taken, free).await;
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].port, taken);
+        drop(held);
+    }
+
+    // --- plan 16: configurable ports --------------------------------------
+
+    #[test]
+    fn site_url_is_clean_on_default_ports() {
+        let d = RouterPorts::default();
+        assert_eq!(site_url("acme", false, d), "http://acme.test");
+        assert_eq!(site_url("acme", true, d), "https://acme.test");
+    }
+
+    #[test]
+    fn site_url_carries_the_port_in_fallback_mode() {
+        let fb = RouterPorts { http: FALLBACK_HTTP_PORT, https: FALLBACK_HTTPS_PORT };
+        assert_eq!(site_url("acme", false, fb), "http://acme.test:8080");
+        // Even with a trusted CA we stay on http: a non-standard https port
+        // would prompt for a second certificate exception.
+        assert_eq!(site_url("acme", true, fb), "http://acme.test:8080");
+    }
+
+    #[test]
+    fn render_compose_maps_host_ports_to_container_80_443() {
+        let yml = render_compose(RouterPorts { http: 8080, https: 8443 });
+        assert!(yml.contains("\"8080:80\""), "{yml}");
+        assert!(yml.contains("\"8443:443\""), "{yml}");
+        // The default render is unchanged from the M6 template.
+        let default_yml = render_compose(RouterPorts::default());
+        assert!(default_yml.contains("\"80:80\""));
+        assert!(default_yml.contains("\"443:443\""));
+    }
+
+    #[test]
+    fn caddyfile_is_port_blind() {
+        // Only the host mapping moves — the Caddyfile never mentions host ports.
+        let sites: Vec<Site> = Vec::new();
+        assert_eq!(render_caddyfile(&sites), render_caddyfile(&sites));
+        assert!(!render_caddyfile(&sites).contains("8080"));
+    }
+
+    /// Build a Site for the routing tests. `app_port` overrides the upstream
+    /// (a docker project on its own published port); `None` = the site port.
+    fn site_for(slug: &str, port: u16, kind: &str, app_port: Option<u16>) -> Site {
+        let mut s = Site {
+            id: slug.into(),
+            name: slug.into(),
+            slug: slug.into(),
+            path: format!("/tmp/{slug}"),
+            port,
+            wp_version: String::new(),
+            php_version: String::new(),
+            status: "running".into(),
+            status_updated_at: "2026-07-21T00:00:00Z".into(),
+            admin_user: "admin".into(),
+            admin_pass: String::new(),
+            created_at: "2026-07-21T00:00:00Z".into(),
+            connection_id: None,
+            remote_site_id: None,
+            kind: kind.into(),
+            config: crate::site::SiteConfig { app_port, ..Default::default() },
+            capabilities: crate::site::Capabilities::default(),
+        };
+        s.refresh_capabilities();
+        s
+    }
+
+    /// Plan 22: a WordPress site routes to its site port, while a docker app
+    /// routes to its own published app port — the "domain → app port" contract.
+    #[test]
+    fn caddyfile_routes_a_docker_app_to_its_app_port() {
+        let wp = site_for("blog", 8081, crate::site::KIND_WORDPRESS, None);
+        let app = site_for("api", 8090, crate::site::KIND_DOCKER, Some(3000));
+        let out = render_caddyfile(&[wp, app]);
+        assert!(out.contains("http://blog.test"));
+        assert!(out.contains("reverse_proxy host.docker.internal:8081"), "WP → site port:\n{out}");
+        assert!(out.contains("http://api.test"));
+        assert!(
+            out.contains("reverse_proxy host.docker.internal:3000"),
+            "docker → app_port, not the reserved site port:\n{out}"
+        );
+        assert!(!out.contains("8090"), "the reserved site port must not be the upstream:\n{out}");
+    }
+
+    /// Plan 24: a db-GUI site gets a `db-<slug>.test` route to its Adminer port
+    /// (db_port + 1000); a code-only docker app does not.
+    #[test]
+    fn caddyfile_adds_a_db_route_for_db_gui_sites_only() {
+        let wp = site_for("blog", 8081, crate::site::KIND_WORDPRESS, None);
+        let app = site_for("api", 8090, crate::site::KIND_DOCKER, Some(3000));
+        let out = render_caddyfile(&[wp, app]);
+        // blog: adminer_port = 8081 + 10000 + 1000 = 19081.
+        assert!(out.contains("http://db-blog.test"), "{out}");
+        assert!(out.contains("reverse_proxy host.docker.internal:19081"), "{out}");
+        assert!(!out.contains("db-api.test"), "a code-only docker app must not get a db route:\n{out}");
+    }
+
+    #[test]
+    fn port_validation_rejects_zero_and_duplicates() {
+        assert!(RouterPorts::default().validate().is_ok());
+        assert!(RouterPorts { http: 0, https: 443 }.validate().is_err());
+        assert!(RouterPorts { http: 8080, https: 8080 }.validate().is_err());
+        assert!(RouterPorts { http: 8080, https: 8443 }.validate().is_ok());
+    }
+
+    #[test]
+    fn is_default_only_for_80_443() {
+        assert!(RouterPorts::default().is_default());
+        assert!(!RouterPorts { http: 8080, https: 443 }.is_default());
+        assert!(!RouterPorts { http: 80, https: 8443 }.is_default());
+    }
+
+    #[test]
+    fn conflict_message_names_the_process_and_offers_fallback() {
+        let msg = conflict_message(
+            &[PortConflict { port: 80, process: Some("httpd.exe".into()) }],
+            true,
+        );
+        assert!(msg.contains("port 80 is held by httpd.exe"), "{msg}");
+        assert!(msg.contains("fallback ports (8080/8443)"), "{msg}");
+    }
+
+    #[test]
+    fn conflict_message_falls_back_when_the_owner_is_unknown() {
+        let msg = conflict_message(
+            &[
+                PortConflict { port: 80, process: None },
+                PortConflict { port: 443, process: None },
+            ],
+            true,
+        );
+        assert!(msg.contains("port 80 is in use"), "{msg}");
+        assert!(msg.contains("port 443 is in use"), "{msg}");
+    }
+
+    #[test]
+    fn conflict_message_on_fallback_ports_does_not_suggest_fallback_again() {
+        let msg = conflict_message(
+            &[PortConflict { port: 8080, process: Some("node".into()) }],
+            false,
+        );
+        assert!(msg.contains("port 8080 is held by node"), "{msg}");
+        assert!(!msg.contains("8080/8443"), "must not loop the same advice: {msg}");
     }
 
     #[test]

@@ -10,6 +10,12 @@ export interface Toast {
   /** Pinned toasts (in-flight progress) don't auto-expire. */
   pinned?: boolean;
   spinner?: boolean;
+  /**
+   * Inline action, e.g. Cancel on a running transfer (plan 19). Lives on the
+   * toast because the progress toast is the only thing on screen that knows a
+   * long operation is happening — the page behind it may have moved on.
+   */
+  action?: { label: string; onClick: () => void };
 }
 
 interface ToastState {
@@ -88,9 +94,12 @@ export const toast = {
   info: (title: string, message?: string) =>
     useToast.getState().add({ kind: "info", title, message }),
   /** Pinned in-flight toast with a spinner; finish it with `toast.resolve`. */
-  progress: (title: string) =>
-    useToast.getState().add({ kind: "info", title, pinned: true, spinner: true }),
+  progress: (title: string, action?: Toast["action"]) =>
+    useToast.getState().add({ kind: "info", title, pinned: true, spinner: true, action }),
   /** Turn a pinned progress toast into a final success/error toast. */
   resolve: (id: number, kind: ToastKind, title: string, message?: string) =>
-    useToast.getState().update(id, { kind, title, message, pinned: false, spinner: false }),
+    useToast
+      .getState()
+      // The action goes with the spinner: there is nothing left to cancel.
+      .update(id, { kind, title, message, pinned: false, spinner: false, action: undefined }),
 };

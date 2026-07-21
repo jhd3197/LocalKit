@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useServerKit } from "../stores/serverkit";
-import type { ServerKitConnection } from "../lib/types";
+import type { RemoteWpSite, ServerKitConnection } from "../lib/types";
 
 export default function ServerKitSettings() {
   const connections = useServerKit((s) => s.connections);
@@ -180,6 +180,7 @@ function ConnectionCard({ conn }: { conn: ServerKitConnection }) {
                   <th className="pb-1 font-medium">Status</th>
                   <th className="pb-1 font-medium">WP</th>
                   <th className="pb-1 font-medium">Envs</th>
+                  <th className="pb-1" />
                 </tr>
               </thead>
               <tbody>
@@ -192,6 +193,13 @@ function ConnectionCard({ conn }: { conn: ServerKitConnection }) {
                     </td>
                     <td className="py-1.5 text-zinc-500">{s.wp_version ?? "—"}</td>
                     <td className="py-1.5 text-zinc-500">{s.environment_count}</td>
+                    <td className="py-1.5 text-right">
+                      <ImportButton
+                        connectionId={conn.id}
+                        site={s}
+                        canImport={remote.canImport}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -200,5 +208,41 @@ function ConnectionCard({ conn }: { conn: ServerKitConnection }) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Per-site "clone this down here". Disabled — with the reason in the tooltip —
+ * rather than hidden when the site or server can't support it: a missing
+ * button reads as a bug, a disabled one explains itself.
+ */
+function ImportButton({
+  connectionId,
+  site,
+  canImport,
+}: {
+  connectionId: string;
+  site: RemoteWpSite;
+  canImport: boolean | null;
+}) {
+  const openImport = useServerKit((s) => s.openImport);
+
+  const blocked = site.multisite
+    ? "Multisite installs cannot be imported."
+    : canImport === false
+      ? "The serverkit-localkit extension on this server is too old to import sites."
+      : canImport === null
+        ? "Checking what this server supports…"
+        : null;
+
+  return (
+    <button
+      onClick={() => openImport(connectionId, site)}
+      disabled={blocked !== null}
+      title={blocked ?? `Import "${site.name}" as a new local site`}
+      className="rounded-md border border-violet-800 px-2.5 py-1 text-xs font-medium text-violet-300 hover:border-violet-600 hover:text-violet-200 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-600"
+    >
+      Import
+    </button>
   );
 }

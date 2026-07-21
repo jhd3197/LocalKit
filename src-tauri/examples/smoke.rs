@@ -1,17 +1,28 @@
 //! End-to-end smoke test driver for the real LocalKit site lifecycle.
 //! Runs outside the Tauri runtime (no AppHandle; events are skipped).
 //!
-//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|delete|cleanup>
+//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|reconcile|recover|clone|blueprint|tools|config|adminer|php|delete|cleanup>
 //!
 //! Uses a fixed smoke data dir + site name so subcommands can run as separate
 //! invocations (each one reconstructs the same AppState).
 
+use std::path::Path;
 use std::sync::Mutex;
 
-use localkit_lib::{db::Db, docker, site, wordpress, AppState};
+use localkit_lib::{blueprint, db::Db, docker, php, reconcile, site, snapshot, wordpress, AppState};
 
 const SMOKE_NAME: &str = "Smoke Test";
 const SMOKE_SLUG: &str = "smoke-test";
+/// Plan 26 php-stack verification: a self-contained PHP/Laravel smoke site.
+const PHP_NAME: &str = "PHP Smoke";
+const PHP_SLUG: &str = "php-smoke";
+/// Plan 20 clone verification: a throwaway copy of the smoke site.
+const CLONE_NAME: &str = "Smoke Clone";
+const CLONE_SLUG: &str = "smoke-clone";
+/// Plan 20 blueprint verification: a template + a site stamped from it.
+const BP_NAME: &str = "Smoke Blueprint";
+const BP_FROM_NAME: &str = "Smoke From BP";
+const BP_FROM_SLUG: &str = "smoke-from-bp";
 
 fn make_state() -> AppState {
     let data_dir = std::env::temp_dir().join("localkit-smoke");
@@ -21,6 +32,8 @@ fn make_state() -> AppState {
         db: Mutex::new(db),
         data_dir,
         terminals: localkit_lib::terminal::PtyManager::new(),
+        transfers: Default::default(),
+        in_flight: Default::default(),
     }
 }
 
@@ -37,6 +50,15 @@ fn http_code(url: &str) -> String {
         .args(["-s", "-o", "NUL", "-w", "%{http_code}", "--max-time", "20", url])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|e| format!("curl failed: {e}"))
+}
+
+/// The response body (for asserting on a page's rendered content).
+fn http_body(url: &str) -> String {
+    std::process::Command::new("curl")
+        .args(["-s", "--max-time", "20", url])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_else(|e| format!("curl failed: {e}"))
 }
 
@@ -126,10 +148,619 @@ async fn start(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Backdate a site's status write via a second connection to the smoke DB, so
+/// the reconciler's 60 s grace window does not shield an "external stop". This
+/// is the one thing the public `Db::set_status` (which always stamps `now`)
+/// deliberately won't do — hence the raw UPDATE, kept here in the dev tool.
+fn force_status(state: &AppState, id: &str, status: &str, ts: &str) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(state.data_dir.join("localkit.db"))
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE sites SET status = ?1, status_updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![status, ts, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn db_status(state: &AppState, id: &str) -> Result<String, String> {
+    Ok(state.db.lock().map_err(|e| e.to_string())?.get_site(id)?.status)
+}
+
+/// Stop a site's containers *without* removing them (`docker compose stop`),
+/// simulating an external `docker stop` — LocalKit's own stop uses `down`.
+fn compose_stop(dir: &Path) -> Result<(), String> {
+    let out = std::process::Command::new("docker")
+        .args(["compose", "stop"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("docker compose stop failed to run: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
+/// Reconciler verification (plan 23) against real Docker drift: stop the
+/// site's containers behind LocalKit's back and confirm the reconciler settles
+/// running→stopped, then bring them back and confirm it settles stopped→
+/// running. The DB is manipulated directly to create the drift a crash / an
+/// external `docker stop` would leave.
+async fn reconcile_smoke(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    // Start from a known-up state.
+    docker::compose_up(&s.dir()).await?;
+    site::start(state, &s.id).await?;
+
+    // --- External stop: containers down, DB still says running (backdated past
+    //     the grace window so the reconciler is allowed to downgrade). ---
+    println!("stopping containers externally (docker compose stop)...");
+    compose_stop(&s.dir())?;
+    force_status(state, &s.id, "running", "2000-01-01T00:00:00+00:00")?;
+    let events = reconcile::reconcile_once(state).await;
+    println!("after external stop -> {} settle(s): {events:?}", events.len());
+    assert_eq!(db_status(state, &s.id)?, "stopped", "external stop must settle to stopped");
+    assert!(
+        events.iter().any(|e| e.to == "stopped" && e.reason == "external stop"),
+        "expected an external-stop settle event"
+    );
+
+    // --- External start: containers up, DB still says stopped. ---
+    println!("starting containers externally (docker compose up -d)...");
+    docker::compose_up(&s.dir()).await?;
+    // Give the container a moment to report `running` to `docker ps`.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    force_status(state, &s.id, "stopped", "2000-01-01T00:00:00+00:00")?;
+    let events = reconcile::reconcile_once(state).await;
+    println!("after external start -> {} settle(s): {events:?}", events.len());
+    assert_eq!(db_status(state, &s.id)?, "running", "external start must settle to running");
+
+    // --- Forward-only: a fresh command write must NOT be clobbered by a stale
+    //     reconcile observation. Stop the containers but keep a *now* running
+    //     write; the reconciler must leave it alone (grace window). ---
+    compose_stop(&s.dir())?;
+    state.db.lock().map_err(|e| e.to_string())?.set_status(&s.id, "running")?;
+    let events = reconcile::reconcile_once(state).await;
+    assert_eq!(db_status(state, &s.id)?, "running", "a fresh running write must survive the grace window");
+    assert!(events.is_empty(), "grace window should suppress the downgrade");
+    println!("forward-only grace window held: fresh running write survived");
+
+    // Leave the smoke site genuinely running for the next subcommand.
+    site::start(state, &s.id).await?;
+    println!("RECONCILE OK");
+    Ok(())
+}
+
+/// Half-created recovery verification (plan 23): simulate a create killed
+/// mid-flight (remove the completion marker, force `status = creating`), confirm
+/// the site reports as `incomplete`, then resume it and confirm it comes back
+/// running, complete, and no longer flagged.
+async fn recover(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    let dir = s.dir();
+
+    // Arrange: a killed create leaves no marker and a stuck `creating` status.
+    let marker = dir.join(site::INSTALL_MARKER);
+    let _ = std::fs::remove_file(&marker);
+    force_status(state, &s.id, "creating", "2000-01-01T00:00:00+00:00")?;
+    assert!(!site::is_complete(&dir), "marker should be gone");
+
+    // Assert: the list flags it incomplete.
+    let listed = site::list(state).await?;
+    let entry = listed
+        .iter()
+        .find(|e| e.site.id == s.id)
+        .ok_or("smoke site missing from list")?;
+    assert!(entry.incomplete, "a marker-less creating site must read as incomplete");
+    println!("flagged incomplete: slug={} status={}", entry.site.slug, entry.site.status);
+
+    // Act: resume.
+    let resumed = site::resume(None, state, &s.id).await?;
+    println!("RESUMED status={}", resumed.status);
+
+    // Assert: running, complete, no longer flagged.
+    assert_eq!(resumed.status, "running", "resume should leave the site running");
+    assert!(site::is_complete(&dir), "resume must re-write the completion marker");
+    let after = site::list(state).await?;
+    let entry = after.iter().find(|e| e.site.id == s.id).unwrap();
+    assert!(!entry.incomplete, "resumed site must no longer read as incomplete");
+
+    // It actually serves HTTP.
+    let home = http_code(&format!("http://localhost:{}/", resumed.port));
+    assert!(["200", "301", "302"].contains(&home.as_str()), "resumed site not serving: {home}");
+    println!("RECOVER OK");
+    Ok(())
+}
+
+async fn wp(s: &site::Site, args: &[&str]) -> Result<String, String> {
+    let mut full: Vec<&str> = vec!["wp"];
+    full.extend_from_slice(args);
+    docker::compose_run(&s.dir(), "wpcli", &full).await
+}
+
+fn read_db_password(dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(dir.join(".env")).ok()?;
+    for line in content.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == "DB_PASSWORD" {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Clone verification (plan 20): create a marker post on the source, clone it,
+/// and assert the post rode along, the clone answers HTTP, its DB password and
+/// port are fresh, its admin login carried over, and the transient
+/// `clone_source` snapshot was pruned.
+async fn clone(state: &AppState) -> Result<(), String> {
+    let source = find_site(state)?;
+    // Idempotent: drop a clone left by a previous (killed) run.
+    remove_clone(state).await;
+
+    if source.status != "running" {
+        site::start(state, &source.id).await?;
+    }
+
+    // Arrange: a uniquely-titled published post on the source.
+    const MARKER: &str = "LocalKit clone smoke marker";
+    let titles = wp(
+        &source,
+        &["post", "list", "--post_status=publish", "--field=post_title", "--format=csv"],
+    )
+    .await
+    .unwrap_or_default();
+    if !titles.contains(MARKER) {
+        wp(
+            &source,
+            &["post", "create", &format!("--post_title={MARKER}"), "--post_status=publish"],
+        )
+        .await?;
+    }
+
+    // Act.
+    let clone = site::clone_site(None, state, &source.id, CLONE_NAME.to_string()).await?;
+    println!(
+        "CLONED id={} slug={} port={} admin={}",
+        clone.id, clone.slug, clone.port, clone.admin_user
+    );
+
+    // Assert: the clone serves HTTP.
+    let url = format!("http://localhost:{}", clone.port);
+    let home = http_code(&format!("{url}/"));
+    assert!(
+        ["200", "301", "302"].contains(&home.as_str()),
+        "clone home returned unexpected status: {home}"
+    );
+
+    // Assert: the marker post rode along in the copied database.
+    let clone_titles = wp(
+        &clone,
+        &["post", "list", "--post_status=publish", "--field=post_title", "--format=csv"],
+    )
+    .await?;
+    assert!(
+        clone_titles.contains(MARKER),
+        "marker post missing from the clone: {clone_titles:?}"
+    );
+    println!("marker post present in the clone");
+
+    // Assert: secrets are fresh (never copied), port is distinct.
+    let src_pw = read_db_password(&source.dir()).ok_or("source .env missing DB_PASSWORD")?;
+    let clone_pw = read_db_password(&clone.dir()).ok_or("clone .env missing DB_PASSWORD")?;
+    assert_ne!(src_pw, clone_pw, "clone reused the source's DB password");
+    assert_ne!(source.port, clone.port, "clone reused the source's port");
+    println!("fresh DB password + distinct port confirmed");
+
+    // Assert: the admin login carries over (the copied DB holds it).
+    assert_eq!(clone.admin_user, source.admin_user, "admin user should carry over");
+    assert_eq!(clone.admin_pass, source.admin_pass, "admin password should carry over");
+
+    // Assert: the transient clone_source snapshot was pruned from the source.
+    let snaps = snapshot::list(state, &source.id)?;
+    assert!(
+        snaps.iter().all(|s| s.kind != snapshot::KIND_CLONE_SOURCE),
+        "a clone_source snapshot was left behind on the source"
+    );
+    println!("CLONE OK on {url}");
+
+    // Tidy up so re-runs stay idempotent.
+    remove_clone(state).await;
+    Ok(())
+}
+
+/// Blueprint verification (plan 20): save the smoke site as a blueprint, assert
+/// its artifacts landed and the transient snapshot was pruned, then stamp a new
+/// site out of it and assert the source's content rode along.
+async fn blueprint_smoke(state: &AppState) -> Result<(), String> {
+    let source = find_site(state)?;
+    // Idempotent: drop leftovers from a previous run.
+    remove_from_bp(state).await;
+    for bp in blueprint::list(state)?.iter().filter(|b| b.manifest.name == BP_NAME) {
+        let _ = blueprint::delete(state, &bp.id);
+    }
+
+    if source.status != "running" {
+        site::start(state, &source.id).await?;
+    }
+
+    // Arrange: a uniquely-titled published post on the source.
+    const MARKER: &str = "LocalKit blueprint smoke marker";
+    let titles = wp(
+        &source,
+        &["post", "list", "--post_status=publish", "--field=post_title", "--format=csv"],
+    )
+    .await
+    .unwrap_or_default();
+    if !titles.contains(MARKER) {
+        wp(
+            &source,
+            &["post", "create", &format!("--post_title={MARKER}"), "--post_status=publish"],
+        )
+        .await?;
+    }
+
+    // Save.
+    let bp = blueprint::save(
+        None,
+        state,
+        &source.id,
+        BP_NAME.to_string(),
+        Some("smoke blueprint".into()),
+    )
+    .await?;
+    println!(
+        "BLUEPRINT id={} plugins={} theme={} db={} B code={} B",
+        bp.id,
+        bp.manifest.plugins.len(),
+        bp.manifest.theme,
+        bp.db_bytes,
+        bp.code_bytes
+    );
+
+    // Assert: artifacts landed.
+    let dir = blueprint::blueprints_root(&state.data_dir).join(&bp.id);
+    for f in ["blueprint.json", "db.sql.gz", "wp-content.tar.gz"] {
+        assert!(dir.join(f).exists(), "blueprint missing {f}");
+    }
+    assert!(bp.db_bytes > 0, "empty blueprint database dump");
+    assert!(bp.code_bytes > 0, "empty blueprint wp-content archive");
+
+    // Assert: the transient blueprint_source snapshot was pruned.
+    let snaps = snapshot::list(state, &source.id)?;
+    assert!(
+        snaps.iter().all(|s| s.kind != snapshot::KIND_BLUEPRINT_SOURCE),
+        "a blueprint_source snapshot was left behind"
+    );
+
+    // Act: stamp a new site out of the blueprint.
+    let created = blueprint::create_site(None, state, &bp.id, Some(BP_FROM_NAME.to_string())).await?;
+    println!(
+        "CREATED FROM BLUEPRINT id={} slug={} port={} admin={}",
+        created.id, created.slug, created.port, created.admin_user
+    );
+
+    // Assert: it serves HTTP and carries the source's content.
+    let url = format!("http://localhost:{}", created.port);
+    let home = http_code(&format!("{url}/"));
+    assert!(
+        ["200", "301", "302"].contains(&home.as_str()),
+        "blueprint site home returned unexpected status: {home}"
+    );
+    let created_titles = wp(
+        &created,
+        &["post", "list", "--post_status=publish", "--field=post_title", "--format=csv"],
+    )
+    .await?;
+    assert!(
+        created_titles.contains(MARKER),
+        "marker post missing from the blueprint site: {created_titles:?}"
+    );
+    println!("BLUEPRINT SMOKE OK on {url}");
+
+    // Tidy up.
+    remove_from_bp(state).await;
+    let _ = blueprint::delete(state, &bp.id);
+    Ok(())
+}
+
+async fn remove_from_bp(state: &AppState) {
+    let sites = {
+        let db = state.db.lock().expect("lock db");
+        db.list_sites().unwrap_or_default()
+    };
+    for s in sites {
+        if s.slug == BP_FROM_SLUG || s.slug.starts_with(&format!("{BP_FROM_SLUG}-")) {
+            let _ = site::delete(None, state, &s.id, true).await;
+            println!("cleaned blueprint site {}", s.slug);
+        }
+    }
+    let orphan = state.data_dir.join("sites").join(BP_FROM_SLUG);
+    if orphan.exists() {
+        let _ = docker::compose_down(&orphan, true).await;
+        let _ = std::fs::remove_dir_all(&orphan);
+    }
+}
+
+/// Force-remove any clone leftovers (compose project + dir + db rows + snapshots).
+async fn remove_clone(state: &AppState) {
+    let sites = {
+        let db = state.db.lock().expect("lock db");
+        db.list_sites().unwrap_or_default()
+    };
+    for s in sites {
+        if s.slug == CLONE_SLUG || s.slug.starts_with(&format!("{CLONE_SLUG}-")) {
+            let _ = site::delete(None, state, &s.id, true).await;
+            println!("cleaned clone {}", s.slug);
+        }
+    }
+    let orphan = state.data_dir.join("sites").join(CLONE_SLUG);
+    if orphan.exists() {
+        let _ = docker::compose_down(&orphan, true).await;
+        let _ = std::fs::remove_dir_all(&orphan);
+    }
+}
+
+/// Site-tools verification (plan 24) against real Docker. Exercises the
+/// wp-cli-backed tools on the smoke site and asserts the real wp-cli output
+/// parses the way the pure unit tests assume:
+///   - search-replace dry-run finds the baked-in home/siteurl without writing;
+///   - Apply (with a pre_search_replace snapshot) actually rewrites them;
+///   - the URL is restored so later subcommands keep working.
+async fn tools_smoke(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    if s.status != "running" {
+        site::start(state, &s.id).await?;
+    }
+    let dir = s.dir();
+    let from = format!("http://localhost:{}", s.port);
+    let to = "http://smoke-sr.test".to_string();
+
+    // --- Search & replace: dry run must find home/siteurl and write nothing. ---
+    let dry = wordpress::search_replace_report(&dir, &from, &to, true).await?;
+    println!("DRY total={} changes={}", dry.total, dry.changes.len());
+    assert!(dry.total > 0, "dry-run found nothing to replace (expected home/siteurl)");
+    assert!(!dry.changes.is_empty(), "dry-run parsed no per-column rows from real wp-cli output");
+    let home_before = wp(&s, &["option", "get", "home"]).await?;
+    assert_eq!(home_before.trim(), from, "dry-run must not write: home changed");
+
+    // --- Apply, with the pre_search_replace snapshot the command takes. ---
+    let snap = snapshot::create(
+        None,
+        state,
+        &s.id,
+        snapshot::KIND_PRE_SEARCH_REPLACE,
+        Some("smoke search-replace".into()),
+    )
+    .await?;
+    println!("pre_search_replace snapshot {} taken", snap.id);
+    let applied = wordpress::search_replace_report(&dir, &from, &to, false).await?;
+    println!("APPLIED total={} changes={}", applied.total, applied.changes.len());
+    assert!(applied.total > 0, "apply reported no changes");
+    let home_after = wp(&s, &["option", "get", "home"]).await?;
+    assert_eq!(home_after.trim(), to, "apply did not rewrite home");
+
+    let snaps = snapshot::list(state, &s.id)?;
+    assert!(
+        snaps.iter().any(|x| x.kind == snapshot::KIND_PRE_SEARCH_REPLACE),
+        "pre_search_replace snapshot not listed after apply"
+    );
+    println!("pre_search_replace snapshot listed OK");
+
+    // Restore the original URL so the smoke site stays usable for later runs.
+    wordpress::search_replace_report(&dir, &to, &from, false).await?;
+    let home_restored = wp(&s, &["option", "get", "home"]).await?;
+    assert_eq!(home_restored.trim(), from, "failed to restore the original home URL");
+    println!("search-replace OK");
+
+    // --- Debug mode: toggle round-trips through wp-config.php (root writer). ---
+    let before = wordpress::debug_status(&dir).await?;
+    let on = wordpress::set_debug(&dir, true).await?;
+    println!("DEBUG on -> enabled={} log_bytes={}", on.enabled, on.log_bytes);
+    assert!(on.enabled, "set_debug(true) did not enable WP_DEBUG");
+    let off = wordpress::set_debug(&dir, false).await?;
+    assert!(!off.enabled, "set_debug(false) did not disable WP_DEBUG");
+    // Restore whatever the site started with.
+    wordpress::set_debug(&dir, before.enabled).await?;
+    // The log helpers never error even when the file is absent.
+    let _ = wordpress::read_debug_log(&dir);
+    wordpress::clear_debug_log(&dir)?;
+    println!("debug toggle OK");
+
+    println!("TOOLS OK (search-replace + debug)");
+    Ok(())
+}
+
+/// Config-editor verification (plan 24), split from `tools` so it runs fast
+/// (a couple of `compose cp` calls, not a chain of wpcli spin-ups):
+///   - wp-config.php reads out of the running container and a write round-trips
+///     without breaking the site;
+///   - the `.env` reads/writes as a plain host file.
+async fn config_smoke(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    if s.status != "running" {
+        site::start(state, &s.id).await?;
+    }
+    let dir = s.dir();
+    let svc = s.app_service();
+
+    let wpconfig = wordpress::read_wp_config(&dir, svc).await?;
+    assert!(wpconfig.contains("<?php"), "wp-config.php read did not return PHP");
+    assert!(wpconfig.contains("DB_NAME"), "wp-config.php missing expected define");
+    println!("read wp-config.php ({} bytes)", wpconfig.len());
+
+    // Write a harmless comment back, confirm it persists, confirm the site still
+    // serves (valid PHP preserved), then restore the original.
+    let marker = "// localkit smoke marker";
+    let edited = format!("{}\n{marker}\n", wpconfig.trim_end());
+    wordpress::write_wp_config(&dir, svc, &edited).await?;
+    let reread = wordpress::read_wp_config(&dir, svc).await?;
+    assert!(reread.contains(marker), "wp-config.php edit did not persist");
+    let home = http_code(&format!("http://localhost:{}/", s.port));
+    assert!(["200", "301", "302"].contains(&home.as_str()), "site broke after wp-config write: {home}");
+    wordpress::write_wp_config(&dir, svc, &wpconfig).await?;
+    let restored = wordpress::read_wp_config(&dir, svc).await?;
+    assert!(!restored.contains(marker), "wp-config.php was not restored");
+    println!("wp-config.php write round-trip OK");
+
+    // .env is a plain host file.
+    let env = site::read_env_file(&dir)?;
+    assert!(env.contains("WP_PORT"), ".env missing WP_PORT");
+    site::write_env_file(&dir, &env)?; // no-op rewrite, must not error
+    println!("read/write .env OK");
+
+    println!("CONFIG OK (wp-config.php cp round-trip + .env)");
+    Ok(())
+}
+
+/// Adminer sidecar verification (plan 24): rewrite the compose file to add the
+/// profile-gated `adminer` service (the smoke site predates the feature), start
+/// it on demand, and assert it serves its login page on db_port + 1000. Stops
+/// just Adminer afterward.
+async fn adminer_smoke(state: &AppState) -> Result<(), String> {
+    let s = find_site(state)?;
+    if s.status != "running" {
+        site::start(state, &s.id).await?;
+    }
+    let dir = s.dir();
+    // Ensure the compose file carries the adminer service (deterministic render).
+    std::fs::write(dir.join("docker-compose.yml"), site::render_compose(&s))
+        .map_err(|e| format!("failed to rewrite docker-compose.yml: {e}"))?;
+    docker::compose_up_profile_service(&dir, "tools", "adminer").await?;
+
+    let port = s.adminer_port();
+    println!("adminer starting on port {port} (db_port {} + 1000)...", s.db_port());
+    let mut code = String::new();
+    for _ in 0..15 {
+        code = http_code(&format!("http://localhost:{port}/"));
+        if code == "200" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    assert_eq!(code, "200", "Adminer did not serve its login page on port {port}");
+    println!("adminer serving HTTP 200 on {port}");
+
+    // Tidy: stop just the Adminer service (leave wordpress/db running).
+    let _ = std::process::Command::new("docker")
+        .args(["compose", "--profile", "tools", "stop", "adminer"])
+        .current_dir(&dir)
+        .output();
+    println!("ADMINER OK on db-{}.test-equivalent port {port}", s.slug);
+    Ok(())
+}
+
+/// Plan 26: create a PHP/Laravel stack site, prove it serves and (via the
+/// skeleton page's PDO probe) that php-fpm can reach the bundled mariadb, then
+/// delete it. Self-contained — its own site, cleaned up on the way out.
+async fn php_smoke(state: &AppState) -> Result<(), String> {
+    // Idempotent: drop any php-smoke leftovers from a prior run first.
+    let existing: Vec<site::Site> = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.list_sites()?.into_iter().filter(|s| s.slug == PHP_SLUG).collect()
+    };
+    for s in existing {
+        let _ = site::delete(None, state, &s.id, true).await;
+    }
+
+    let s = php::create_php_site(None, state, PHP_NAME.to_string(), "8.3".to_string(), None, false)
+        .await?;
+    println!(
+        "CREATED php id={} slug={} port={} db_port={} kind={}",
+        s.id, s.slug, s.port, s.db_port(), s.kind
+    );
+    assert_eq!(s.kind, site::KIND_PHP, "kind should be php");
+    assert!(s.capabilities.db_sync, "php claims db_sync");
+    assert!(!s.capabilities.wp_tools, "php has no WP tools");
+
+    let url = format!("http://localhost:{}", s.port);
+    let home = http_code(&format!("{url}/"));
+    println!("HTTP / -> {home}");
+    assert_eq!(home, "200", "the skeleton webroot should serve 200");
+
+    // The skeleton page runs a PDO connectivity check against the bundled db —
+    // "connected" proves php-fpm has pdo_mysql AND mariadb is reachable.
+    let body = http_body(&format!("{url}/"));
+    assert!(body.contains("Your PHP stack is running"), "unexpected body:\n{body}");
+    assert!(
+        body.contains("connected"),
+        "php-fpm could not reach the database (pdo_mysql/mariadb):\n{body}"
+    );
+    println!("skeleton page rendered + database reachable");
+
+    // The app code is bind-mounted from ./app on the host.
+    assert!(
+        s.dir().join("app").join("public").join("index.php").exists(),
+        "app/public/index.php missing on host"
+    );
+    assert_eq!(s.status, "running", "db status should be running");
+
+    // Engine-native DB snapshot round-trip (plan 26 phase 2): mysqldump export +
+    // mysql import, no wp-cli. Write a marker row, snapshot, wipe it, restore,
+    // and assert it is back — proving the mariadb dump/restore path works.
+    let dir = s.dir();
+    let pw = localkit_lib::site::db_password(&dir);
+    php_sql(
+        &dir,
+        &pw,
+        "CREATE TABLE lk_marker (id INT PRIMARY KEY, note VARCHAR(64)); \
+         INSERT INTO lk_marker VALUES (1, 'before-snapshot');",
+    )
+    .await?;
+    let snap = snapshot::create(None, state, &s.id, snapshot::KIND_MANUAL, Some("php smoke".into()))
+        .await?;
+    assert!(snap.db_bytes > 0, "php snapshot captured no database (empty dump)");
+    println!("snapshot took an engine-native dump ({} db bytes)", snap.db_bytes);
+
+    php_sql(&dir, &pw, "DELETE FROM lk_marker;").await?;
+    let gone = php_query(&dir, &pw, "SELECT COUNT(*) FROM lk_marker;").await?;
+    assert_eq!(gone.trim(), "0", "marker row was not deleted before restore");
+
+    snapshot::restore(None, state, &s.id, &snap.id).await?;
+    let restored = php_query(&dir, &pw, "SELECT note FROM lk_marker WHERE id=1;").await?;
+    assert_eq!(
+        restored.trim(),
+        "before-snapshot",
+        "engine-native restore did not bring the marker row back"
+    );
+    println!("engine-native snapshot restore round-trip OK");
+
+    // Clean up wholesale (drop snapshots too — this is a throwaway).
+    site::delete(None, state, &s.id, true).await?;
+    assert!(!s.dir().exists(), "php site dir survived delete");
+    println!("PHP SMOKE OK on {url}");
+    Ok(())
+}
+
+/// Run a SQL statement against a php site's mariadb via its own client.
+async fn php_sql(dir: &Path, pw: &str, sql: &str) -> Result<String, String> {
+    docker::compose_exec_env(
+        dir,
+        "db",
+        &[("MYSQL_PWD", pw)],
+        &["mariadb", "-u", "laravel", "laravel", "-e", sql],
+    )
+    .await
+}
+
+/// Run a scalar query (no column headers) against a php site's mariadb.
+async fn php_query(dir: &Path, pw: &str, sql: &str) -> Result<String, String> {
+    docker::compose_exec_env(
+        dir,
+        "db",
+        &[("MYSQL_PWD", pw)],
+        &["mariadb", "-N", "-B", "-u", "laravel", "laravel", "-e", sql],
+    )
+    .await
+}
+
 async fn delete(state: &AppState) -> Result<(), String> {
     let s = find_site(state)?;
     let dir = s.dir();
-    site::delete(state, &s.id).await?;
+    // Keep the snapshots so `snapshot_smoke` can assert they survive the site.
+    site::delete(None, state, &s.id, false).await?;
     assert!(!dir.exists(), "site dir still exists after delete");
     let db = state.db.lock().map_err(|e| e.to_string())?;
     assert!(db.list_sites()?.is_empty(), "db rows left after delete");
@@ -139,6 +770,9 @@ async fn delete(state: &AppState) -> Result<(), String> {
 
 /// Force-remove any smoke-test leftovers (compose project + dir + db rows).
 async fn cleanup(state: &AppState) -> Result<(), String> {
+    // Sites the `clone` / `blueprint` subcommands leave behind are leftovers too.
+    remove_clone(state).await;
+    remove_from_bp(state).await;
     let sites = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.list_sites()?
@@ -180,6 +814,14 @@ async fn main() {
         "info" => info(&state).await,
         "stop" => stop(&state).await,
         "start" => start(&state).await,
+        "reconcile" => reconcile_smoke(&state).await,
+        "recover" => recover(&state).await,
+        "clone" => clone(&state).await,
+        "blueprint" => blueprint_smoke(&state).await,
+        "tools" => tools_smoke(&state).await,
+        "config" => config_smoke(&state).await,
+        "adminer" => adminer_smoke(&state).await,
+        "php" => php_smoke(&state).await,
         "delete" => delete(&state).await,
         "cleanup" => cleanup(&state).await,
         other => Err(format!("unknown command: {other}")),

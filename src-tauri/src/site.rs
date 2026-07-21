@@ -15,6 +15,158 @@ pub const DEFAULT_ADMIN_USER: &str = "admin";
 pub const BASE_PORT: u16 = 8081;
 /// Host DB port = site port + this offset (8081 -> 18081).
 pub const DB_PORT_OFFSET: u16 = 10000;
+/// Host Adminer port = DB port + this offset (18081 -> 19081), deterministic so
+/// the profile-gated `adminer` service needs no allocator change (plan 24).
+pub const ADMINER_PORT_OFFSET: u16 = 1000;
+
+/// Site kinds. WordPress is the reference implementation with every capability;
+/// `docker` is a bring-your-own-compose project (plan 22); `php` is a generated
+/// PHP/Laravel stack (plan 26). The stored default is `wordpress`, so every
+/// pre-plan-22 row migrates cleanly.
+pub const KIND_WORDPRESS: &str = "wordpress";
+pub const KIND_DOCKER: &str = "docker";
+pub const KIND_PHP: &str = "php";
+
+/// Per-kind settings, persisted as the `config_json` column (plan 22).
+///
+/// Every field is de-hardcoded from a WordPress assumption LocalKit used to
+/// bake in: the terminal/log service name, the code-sync path, the router
+/// upstream port, and (for docker apps) which compose service is a recognized
+/// database engine. The defaults ARE the WordPress values, so a legacy row with
+/// `config_json = '{}'` deserializes to exactly the behaviour it had before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SiteConfig {
+    /// Compose service the terminal shells into and single-service logs read.
+    #[serde(default = "SiteConfig::default_service")]
+    pub service: String,
+    /// Path under the site directory that code sync + snapshots archive.
+    #[serde(default = "SiteConfig::default_sync_path")]
+    pub sync_path: String,
+    /// Host port the router proxies to; `None` = the site's own `port`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_port: Option<u16>,
+    /// Recognized DB engine in a docker app's compose (`mysql`|`mariadb`|
+    /// `postgres`), which flips on `db_sync`. `None` = a code-only app.
+    /// WordPress leaves this unset — it always has `db_sync` via wp-cli.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_engine: Option<String>,
+    /// The compose service of that DB engine, for native dumps (plan 22 phase 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_service: Option<String>,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        Self {
+            service: Self::default_service(),
+            sync_path: Self::default_sync_path(),
+            app_port: None,
+            db_engine: None,
+            db_service: None,
+        }
+    }
+}
+
+impl SiteConfig {
+    fn default_service() -> String {
+        KIND_WORDPRESS.to_string()
+    }
+    fn default_sync_path() -> String {
+        "wp-content".to_string()
+    }
+    /// The host port the router should proxy to — the app's own port when a
+    /// docker project publishes on a different one, else the site port.
+    pub fn upstream_port(&self, site_port: u16) -> u16 {
+        self.app_port.unwrap_or(site_port)
+    }
+}
+
+/// What a site's kind (plus config) supports. Every feature in the app checks
+/// one of these instead of assuming WordPress (plan 22). WordPress = all true;
+/// docker = `domains, terminal, logs, snapshots, code_sync` (and `db_sync` when
+/// a recognized DB engine is in its compose).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Capabilities {
+    pub domains: bool,
+    pub terminal: bool,
+    pub logs: bool,
+    pub snapshots: bool,
+    pub db_gui: bool,
+    pub db_sync: bool,
+    pub code_sync: bool,
+    pub one_click_login: bool,
+    pub wp_tools: bool,
+    pub search_replace: bool,
+}
+
+impl Capabilities {
+    pub const WORDPRESS: Self = Self {
+        domains: true,
+        terminal: true,
+        logs: true,
+        snapshots: true,
+        db_gui: true,
+        db_sync: true,
+        code_sync: true,
+        one_click_login: true,
+        wp_tools: true,
+        search_replace: true,
+    };
+    pub const DOCKER: Self = Self {
+        domains: true,
+        terminal: true,
+        logs: true,
+        snapshots: true,
+        db_gui: false,
+        db_sync: false,
+        code_sync: true,
+        one_click_login: false,
+        wp_tools: false,
+        search_replace: false,
+    };
+    /// PHP/Laravel stack (plan 26): everything a WordPress site claims *except*
+    /// the WP-specific trio (one-click login, the WP tools tab, search-replace).
+    /// Its database is synced engine-native (`db_sync`) and it gets the Adminer
+    /// GUI (`db_gui`), a bundled compose template like WordPress — so unlike a
+    /// bring-your-own docker app it can carry a first-class DB.
+    pub const PHP: Self = Self {
+        domains: true,
+        terminal: true,
+        logs: true,
+        snapshots: true,
+        db_gui: true,
+        db_sync: true,
+        code_sync: true,
+        one_click_login: false,
+        wp_tools: false,
+        search_replace: false,
+    };
+
+    /// Derive the capability set for a kind + its config. Every kind × every
+    /// capability is an explicit decision here (unit-tested), never an `if`
+    /// scattered through a feature.
+    pub fn for_kind(kind: &str, _config: &SiteConfig) -> Self {
+        match kind {
+            // Docker apps are code-only for now: `config.db_engine` is detected
+            // and stored so engine-native DB snapshots/dumps can land later, but
+            // `db_sync` stays off until they actually work — a kind must not
+            // claim a capability it can't deliver (the plan's own guardrail).
+            KIND_DOCKER => Self::DOCKER,
+            // PHP/Laravel: a generated stack with a bundled mariadb, so it has
+            // real DB sync + an Adminer GUI, but none of the WordPress-only tools.
+            KIND_PHP => Self::PHP,
+            // `wordpress` and any unknown/legacy kind fall back to the fully
+            // capable WordPress set — the safe default for a pre-plan-22 row.
+            _ => Self::WORDPRESS,
+        }
+    }
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self::WORDPRESS
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Site {
@@ -26,9 +178,39 @@ pub struct Site {
     pub wp_version: String,
     pub php_version: String,
     pub status: String,
+    /// When `status` was last written (RFC3339, UTC). The reconciler's
+    /// forward-only guard: a settle only lands if the stored timestamp still
+    /// matches what the reconciler observed, so a newer command/event write is
+    /// never clobbered by a stale inspect — and vice versa (plan 23). Empty on
+    /// a pre-plan-23 row, which sorts as "long ago".
+    #[serde(default)]
+    pub status_updated_at: String,
     pub admin_user: String,
     pub admin_pass: String,
     pub created_at: String,
+    /// Plan 18 — where this site came from. Both are set together when a site
+    /// is imported from a ServerKit server, and `None` on hand-made sites;
+    /// they let a future pull default to the right remote.
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub remote_site_id: Option<i64>,
+    /// Plan 22 — stack kind (`wordpress` | `docker`) and its per-kind settings.
+    /// `kind` defaults to WordPress so legacy rows migrate cleanly; `config`
+    /// defaults to the WordPress values (service `wordpress`, sync path
+    /// `wp-content`).
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub config: SiteConfig,
+    /// Derived, read-only: what this site supports. Recomputed from `kind` +
+    /// `config` at every read (never persisted), so it can never drift.
+    #[serde(default, skip_deserializing)]
+    pub capabilities: Capabilities,
+}
+
+fn default_kind() -> String {
+    KIND_WORDPRESS.to_string()
 }
 
 impl Site {
@@ -36,9 +218,57 @@ impl Site {
         self.port + DB_PORT_OFFSET
     }
 
+    /// Host port the Adminer database GUI is published on: `db_port + 1000`
+    /// (plan 24). A deterministic offset, so the profile-gated `adminer` service
+    /// needs no allocator change — it is mapped in the compose template.
+    pub fn adminer_port(&self) -> u16 {
+        self.db_port() + ADMINER_PORT_OFFSET
+    }
+
     pub fn dir(&self) -> PathBuf {
         PathBuf::from(&self.path)
     }
+
+    /// Recompute `capabilities` from the current `kind`/`config`. Call after
+    /// building or mutating a `Site` so the derived field stays in sync.
+    pub fn refresh_capabilities(&mut self) {
+        self.capabilities = Capabilities::for_kind(&self.kind, &self.config);
+    }
+
+    /// The live-status service to watch — `wordpress` for a WP site, the chosen
+    /// app service for a docker project.
+    pub fn app_service(&self) -> &str {
+        &self.config.service
+    }
+
+    /// Guard a capability-gated command with a clean, user-displayable refusal
+    /// (the frontends hide the affordance; this catches a direct invoke / CLI).
+    pub fn require(&self, cap: bool, action: &str) -> Result<(), String> {
+        if cap {
+            Ok(())
+        } else {
+            Err(format!(
+                "{action} is not supported for {} sites.",
+                self.kind
+            ))
+        }
+    }
+}
+
+/// Filename of the completion marker written as the last step of a successful
+/// create/import/clone (plan 23). A site directory that lacks it is a
+/// half-created site — a create killed mid-flight.
+pub const INSTALL_MARKER: &str = ".localkit-install-complete";
+
+/// Write the completion marker (best-effort — a marker write failure must not
+/// fail an otherwise-finished create; the next startup backfill re-adds it).
+pub(crate) fn mark_complete(dir: &Path) {
+    let _ = std::fs::write(dir.join(INSTALL_MARKER), b"");
+}
+
+/// Whether a site directory carries the completion marker.
+pub fn is_complete(dir: &Path) -> bool {
+    dir.join(INSTALL_MARKER).exists()
 }
 
 /// A site row plus its live container status.
@@ -47,6 +277,10 @@ pub struct SiteWithStatus {
     #[serde(flatten)]
     pub site: Site,
     pub live_status: String,
+    /// A half-created site (plan 23): its directory exists but the completion
+    /// marker is absent and no create is in flight. The UI offers Resume / Clean
+    /// up instead of the usual actions.
+    pub incomplete: bool,
 }
 
 /// Detail payload for the site page (includes DB credentials from .env).
@@ -55,6 +289,8 @@ pub struct SiteDetail {
     #[serde(flatten)]
     pub site: Site,
     pub live_status: String,
+    /// See `SiteWithStatus::incomplete` (plan 23).
+    pub incomplete: bool,
     pub db_host: String,
     pub db_port: u16,
     pub db_name: String,
@@ -67,12 +303,45 @@ pub struct SiteEvent {
     pub id: String,
     pub stage: String,
     pub message: String,
+    /// Byte counters, present only during a chunked transfer (plan 19).
+    /// Absent everywhere else, so every non-transfer stage keeps rendering
+    /// as the plain stage message it always was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_done: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
 }
 
 /// Emit a progress event to the frontend. `app` is optional so the lifecycle
 /// can also be driven from tests / example binaries / the `lk` CLI without a
 /// Tauri runtime; in that case progress is printed to stderr instead.
 pub(crate) fn emit(app: Option<&AppHandle>, id: &str, stage: &str, message: &str) {
+    dispatch(app, id, stage, message, None, None);
+}
+
+/// Emit a transfer-progress event carrying byte counters.
+///
+/// These fire once per chunk, so the frontend gets a real byte readout instead
+/// of one coarse "Uploading..." that sits there for ten minutes.
+pub(crate) fn emit_bytes(
+    app: Option<&AppHandle>,
+    id: &str,
+    stage: &str,
+    message: &str,
+    done: u64,
+    total: u64,
+) {
+    dispatch(app, id, stage, message, Some(done), Some(total));
+}
+
+fn dispatch(
+    app: Option<&AppHandle>,
+    id: &str,
+    stage: &str,
+    message: &str,
+    bytes_done: Option<u64>,
+    bytes_total: Option<u64>,
+) {
     match app {
         Some(app) => {
             let _ = app.emit(
@@ -81,10 +350,19 @@ pub(crate) fn emit(app: Option<&AppHandle>, id: &str, stage: &str, message: &str
                     id: id.to_string(),
                     stage: stage.to_string(),
                     message: message.to_string(),
+                    bytes_done,
+                    bytes_total,
                 },
             );
         }
-        None => eprintln!("[{stage}] {message}"),
+        None => match (bytes_done, bytes_total) {
+            (Some(done), Some(total)) => eprintln!(
+                "[{stage}] {message} ({} / {})",
+                crate::transfer::human_bytes(done),
+                crate::transfer::human_bytes(total)
+            ),
+            _ => eprintln!("[{stage}] {message}"),
+        },
     }
 }
 
@@ -119,16 +397,29 @@ fn unique_slug(state: &AppState, base: &str) -> Result<String, String> {
     Err("could not generate a unique slug".into())
 }
 
-/// Pick a free host port starting at BASE_PORT: not used by another site and
-/// not already bound on the host.
-fn free_port(state: &AppState) -> Result<u16, String> {
+/// Pick a free host port starting at BASE_PORT: not used by another site, and
+/// with neither it nor its DB port already held on the host.
+///
+/// The host check consults the OS listener table, not just a trial bind. A
+/// bind-only test is the plan-16 SO_REUSEADDR trap all over again: Docker's
+/// port publisher binds the wildcard address with SO_REUSEADDR, so binding
+/// 127.0.0.1:8081 still succeeds while a container is published on 8081 — we
+/// would hand out that port and creation would die at `compose up`, after the
+/// image pull, with a raw Docker error. Both ports matter: only the site port
+/// was ever checked, so a free site port with a taken DB port failed the same
+/// way.
+async fn free_port(state: &AppState) -> Result<u16, String> {
     let used = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.used_ports()?
     };
+    let listening = router::listening_ports().await;
+    let free = |port: u16| -> bool {
+        !listening.contains(&port) && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    };
     let mut port = BASE_PORT;
     loop {
-        if !used.contains(&port) && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if !used.contains(&port) && free(port) && free(port + DB_PORT_OFFSET) {
             return Ok(port);
         }
         port += 1;
@@ -156,7 +447,17 @@ pub fn site_dir(data_dir: &Path, slug: &str) -> PathBuf {
 // Compose / env templates
 // ---------------------------------------------------------------------------
 
+/// Render the deterministic compose file for a site, dispatched on kind. The
+/// render is deterministic so a rewrite (e.g. Adminer's on-demand start) is safe
+/// on a running site — it only ever adds the profile-gated tooling services.
 pub fn render_compose(site: &Site) -> String {
+    match site.kind.as_str() {
+        KIND_PHP => crate::php::render_compose(site),
+        _ => render_wordpress_compose(site),
+    }
+}
+
+fn render_wordpress_compose(site: &Site) -> String {
     format!(
         r#"name: localkit-{slug}
 
@@ -215,6 +516,21 @@ services:
       - wp-data:/var/www/html
       - ./wp-content:/var/www/html/wp-content
 
+  # Adminer database GUI (single-file PHP, ~0.5 MB). Profile-gated + off by
+  # default; started on demand from Tools -> Database (plan 24). The host port is
+  # deterministic (db_port + 1000), so no allocator change is needed.
+  adminer:
+    image: adminer:4-standalone
+    profiles: ["tools"]
+    restart: unless-stopped
+    ports:
+      - "{adminer_port}:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   wp-data:
   db-data:
@@ -222,7 +538,26 @@ volumes:
         slug = site.slug,
         wp = site.wp_version,
         php = site.php_version,
+        adminer_port = site.adminer_port(),
     )
+}
+
+/// The site's application DB password from `.env`, for pre-filling the Adminer
+/// login (plan 24). Empty when `.env` is missing.
+pub fn db_password(dir: &Path) -> String {
+    read_env_value(dir, "DB_PASSWORD").unwrap_or_default()
+}
+
+/// The site's application DB name from `.env`. Defaults to `wordpress` so a WP
+/// site whose `.env` predates this reader is unchanged; a `php` site records its
+/// own (`laravel`).
+pub fn db_name(dir: &Path) -> String {
+    read_env_value(dir, "DB_NAME").unwrap_or_else(|| "wordpress".to_string())
+}
+
+/// The site's application DB user from `.env` (defaults to `wordpress`, as above).
+pub fn db_user(dir: &Path) -> String {
+    read_env_value(dir, "DB_USER").unwrap_or_else(|| "wordpress".to_string())
 }
 
 pub fn render_env(site: &Site, db_password: &str) -> String {
@@ -232,6 +567,18 @@ pub fn render_env(site: &Site, db_password: &str) -> String {
         site.db_port(),
         db_password
     )
+}
+
+/// Read the raw `.env` for the config editor (plan 24). A plain host file —
+/// unlike `wp-config.php`, which lives in the wp-data volume.
+pub fn read_env_file(dir: &Path) -> Result<String, String> {
+    std::fs::read_to_string(dir.join(".env")).map_err(|e| format!("failed to read .env: {e}"))
+}
+
+/// Overwrite the `.env` (plan 24). Compose only picks changes up on the next
+/// `up` (recreate), which is why the editor offers a restart afterward.
+pub fn write_env_file(dir: &Path, contents: &str) -> Result<(), String> {
+    std::fs::write(dir.join(".env"), contents).map_err(|e| format!("failed to write .env: {e}"))
 }
 
 fn read_env_value(dir: &Path, key: &str) -> Option<String> {
@@ -250,29 +597,54 @@ fn read_env_value(dir: &Path, key: &str) -> Option<String> {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-pub async fn create(
-    app: Option<&AppHandle>,
+/// Where a new site came from (plan 18): `None` for a hand-made site, or the
+/// connection + remote site id it was imported from.
+pub type Origin = Option<(String, i64)>;
+
+/// Reserve a site: validate versions, allocate a unique slug and free ports,
+/// and insert the `creating` row. Shared by `create` and `sync::import_site` —
+/// both need an identical reservation, and doing it in one place is what keeps
+/// slug/port allocation race-free across the two entry points.
+///
+/// `kind`/`config` carry the plan-22 stack (WordPress callers pass
+/// `KIND_WORDPRESS` + `SiteConfig::default()`). WP/PHP version validation only
+/// runs for the WordPress kind — a docker project has no such versions.
+pub(crate) async fn reserve(
     state: &AppState,
     name: String,
+    kind: String,
     wp_version: String,
     php_version: String,
+    config: SiteConfig,
+    origin: Origin,
 ) -> Result<Site, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Site name is required".into());
     }
-    if !WP_VERSIONS.contains(&wp_version.as_str()) {
-        return Err(format!("unsupported WordPress version: {wp_version}"));
-    }
-    if !PHP_VERSIONS.contains(&php_version.as_str()) {
+    if kind == KIND_WORDPRESS {
+        if !WP_VERSIONS.contains(&wp_version.as_str()) {
+            return Err(format!("unsupported WordPress version: {wp_version}"));
+        }
+        if !PHP_VERSIONS.contains(&php_version.as_str()) {
+            return Err(format!("unsupported PHP version: {php_version}"));
+        }
+    } else if kind == KIND_PHP && !PHP_VERSIONS.contains(&php_version.as_str()) {
+        // A php site has no WordPress version, but its PHP version is still from
+        // the allowlist (it becomes the app image's `FROM php:<ver>-fpm` tag).
         return Err(format!("unsupported PHP version: {php_version}"));
     }
 
     let slug = unique_slug(state, &slugify(&name))?;
-    let port = free_port(state)?;
+    let port = free_port(state).await?;
     let dir = site_dir(&state.data_dir, &slug);
+    let (connection_id, remote_site_id) = match origin {
+        Some((c, r)) => (Some(c), Some(r)),
+        None => (None, None),
+    };
 
-    let site = Site {
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let mut site = Site {
         id: Uuid::new_v4().to_string(),
         name,
         slug,
@@ -281,15 +653,58 @@ pub async fn create(
         wp_version,
         php_version,
         status: "creating".into(),
+        status_updated_at: created_at.clone(),
         admin_user: DEFAULT_ADMIN_USER.into(),
         admin_pass: String::new(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at,
+        connection_id,
+        remote_site_id,
+        kind,
+        config,
+        capabilities: Capabilities::default(),
     };
+    site.refresh_capabilities();
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.insert_site(&site)?;
     }
+    Ok(site)
+}
 
+/// Write a reserved site's project files: directory, compose file, `.env`, and
+/// the one-click-login MU plugin.
+pub(crate) fn write_project_files(site: &Site) -> Result<(), String> {
+    let dir = site.dir();
+    std::fs::create_dir_all(dir.join("wp-content"))
+        .map_err(|e| format!("failed to create site directory: {e}"))?;
+    let db_password = random_password(24);
+    std::fs::write(dir.join("docker-compose.yml"), render_compose(site))
+        .map_err(|e| format!("failed to write docker-compose.yml: {e}"))?;
+    std::fs::write(dir.join(".env"), render_env(site, &db_password))
+        .map_err(|e| format!("failed to write .env: {e}"))?;
+    wordpress::ensure_login_plugin(&dir)
+}
+
+pub async fn create(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    name: String,
+    wp_version: String,
+    php_version: String,
+) -> Result<Site, String> {
+    let site = reserve(
+        state,
+        name,
+        KIND_WORDPRESS.to_string(),
+        wp_version,
+        php_version,
+        SiteConfig::default(),
+        None,
+    )
+    .await?;
+
+    // Own this site's status until the create finishes (plan 23).
+    let _guard = state.in_flight.guard(&site.id);
     match do_create(app, state, &site).await {
         Ok(site) => Ok(site),
         Err(e) => {
@@ -304,14 +719,7 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
     let dir = site.dir();
 
     emit(app, &site.id, "files", "Writing project files...");
-    std::fs::create_dir_all(dir.join("wp-content"))
-        .map_err(|e| format!("failed to create site directory: {e}"))?;
-    let db_password = random_password(24);
-    std::fs::write(dir.join("docker-compose.yml"), render_compose(site))
-        .map_err(|e| format!("failed to write docker-compose.yml: {e}"))?;
-    std::fs::write(dir.join(".env"), render_env(site, &db_password))
-        .map_err(|e| format!("failed to write .env: {e}"))?;
-    wordpress::ensure_login_plugin(&dir)?;
+    write_project_files(site)?;
 
     emit(
         app,
@@ -332,13 +740,9 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
     emit(app, &site.id, "waiting", "Waiting for WordPress to come online...");
     wait_for_port(site.port, 180).await?;
 
-    // Install at the site's local domain when the router is enabled (M6).
-    let (domains_on, ca_trusted) = router::enabled_and_trusted(state);
-    let install_url = if domains_on {
-        router::site_url(&site.slug, ca_trusted)
-    } else {
-        format!("http://localhost:{}", site.port)
-    };
+    // Install at the site's local domain when the router is enabled (M6),
+    // including the `:port` suffix in fallback mode (plan 16).
+    let install_url = router::site_public_url(state, site);
     let admin_pass = random_password(16);
     wordpress::install(&dir, site, &admin_pass, &install_url, app).await?;
 
@@ -350,6 +754,9 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
         db.set_status(&site.id, "running")?;
         db.update_credentials(&site.id, &site.admin_user, &site.admin_pass)?;
     }
+    // Last step: the completion marker. Its absence is what flags a create that
+    // was killed mid-flight (plan 23).
+    mark_complete(&dir);
     // Add the new site to the router's Caddyfile + hosts block (no-op when disabled).
     router::refresh_routes(state).await;
     router::refresh_hosts(state).await;
@@ -362,18 +769,200 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
     Ok(site)
 }
 
-async fn cleanup(state: &AppState, site: &Site) -> Result<(), String> {
+// ---------------------------------------------------------------------------
+// Clone (plan 20)
+// ---------------------------------------------------------------------------
+
+/// Clone an existing local site into a brand-new one.
+///
+/// Built directly on the plan-17 snapshot engine: the source is snapshotted,
+/// a fresh target is provisioned (unique slug, fresh ports, fresh DB password
+/// and WP salts — secrets are never copied), and the snapshot's data is laid
+/// down on top, then its baked-in URLs are search-replaced to the clone's.
+///
+/// Emits the same `site-event` stages the create/import flows do, so the
+/// progress toast works unchanged: `snapshot` (against the source) →
+/// `files` → `containers` → `waiting` → `import` → `done` (against the clone).
+pub async fn clone_site(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    source_id: &str,
+    new_name: String,
+) -> Result<Site, String> {
+    let source = get(state, source_id)?;
+    // Clone provisions a WordPress-shaped target (compose/env/wp-cli); a docker
+    // project is not clonable through this flow yet (plan 26).
+    source.require(source.kind == KIND_WORDPRESS, "Cloning")?;
+
+    // 1. Snapshot the source. This reuses the retry-heavy DB export and the
+    //    shared archive format, and gives the clone a consistent point-in-time
+    //    copy. `snapshot::create` emits its own `snapshot`-stage progress.
+    let snap = crate::snapshot::create(
+        app,
+        state,
+        source_id,
+        crate::snapshot::KIND_CLONE_SOURCE,
+        Some(format!("cloning {}", source.name)),
+    )
+    .await
+    .map_err(|e| format!("could not snapshot the source site: {e}"))?;
+
+    // 2. Reserve the target: unique slug, fresh ports, `creating` row. Same
+    //    versions as the source so the snapshot's DB/plugins land on a matching
+    //    stack. A hand-made clone has no remote origin.
+    let target = match reserve(
+        state,
+        new_name,
+        source.kind.clone(),
+        source.wp_version.clone(),
+        source.php_version.clone(),
+        source.config.clone(),
+        None,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            // Nothing was provisioned yet; just drop the transient snapshot.
+            let _ = crate::snapshot::delete(state, source_id, &snap.id);
+            return Err(e);
+        }
+    };
+
+    let _guard = state.in_flight.guard(&target.id);
+    match do_clone(app, state, &source, &snap.id, &target).await {
+        Ok(site) => {
+            // The clone_source snapshot is an implementation detail — prune it
+            // aggressively the moment it has served its purpose.
+            let _ = crate::snapshot::delete(state, source_id, &snap.id);
+            let url = router::site_public_url(state, &site);
+            emit(
+                app,
+                &site.id,
+                "done",
+                &format!("{} cloned from {} — now running at {url}", site.name, source.name),
+            );
+            Ok(site)
+        }
+        Err(e) => {
+            let _ = crate::snapshot::delete(state, source_id, &snap.id);
+            emit(app, &target.id, "error", &format!("Clone failed: {e}"));
+            let _ = cleanup(state, &target).await;
+            Err(e)
+        }
+    }
+}
+
+/// The provisioning half of a clone: everything after the source snapshot and
+/// the target reservation, so a failure here can be cleaned up wholesale.
+async fn do_clone(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    source: &Site,
+    snapshot_id: &str,
+    target: &Site,
+) -> Result<Site, String> {
+    let dir = target.dir();
+    let id = target.id.as_str();
+
+    emit(app, id, "files", "Writing project files...");
+    write_project_files(target)?;
+
+    // The source runs the same WP/PHP versions, so its images are already
+    // pulled; `compose_up` fetches anything missing rather than stalling
+    // silently, but there is normally nothing to fetch.
+    emit(app, id, "containers", "Starting Docker containers...");
+    docker::compose_up(&dir).await?;
+
+    emit(app, id, "waiting", "Waiting for WordPress to come online...");
+    wait_for_port(target.port, 180).await?;
+    // The port answering is not the same as WordPress being ready (see
+    // `wordpress::wait_for_config`); without this the first wp-cli call races
+    // the image entrypoint still writing wp-config.php.
+    wordpress::wait_for_config(&dir, 24).await?;
+
+    // 3. Lay the source's database + wp-content down onto the fresh target.
+    emit(app, id, "import", &format!("Copying {}'s content...", source.name));
+    crate::snapshot::restore_into(state, &source.id, snapshot_id, target).await?;
+    // The archive brought the source's mu-plugins over the one just written;
+    // one-click login must survive the clone.
+    wordpress::ensure_login_plugin(&dir)?;
+
+    // 4. Rewrite the source's baked-in URLs to the clone's own public URL.
+    let source_url = router::site_public_url(state, source);
+    let target_url = router::site_public_url(state, target);
+    emit(app, id, "import", "Rewriting URLs to the clone...");
+    wordpress::update_site_urls(&dir, &target_url).await?;
+    if source_url != target_url {
+        wordpress::search_replace(&dir, &source_url, &target_url).await?;
+    }
+    // Permalinks are rules tied to the old host; regenerate or every page 404s.
+    // Best effort — a rewrite/cache hiccup must not throw away a live clone.
+    let _ = docker::compose_run(&dir, "wpcli", &["wp", "rewrite", "flush"]).await;
+    let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
+
+    // 5. The clone's admin login is the source's: the copied database carries
+    //    the source's users table, so the source's WP admin password works
+    //    here too. (The MySQL/WP secrets in `.env`/wp-config are fresh — those
+    //    are what "never copy secrets" refers to.)
+    let mut site = target.clone();
+    site.status = "running".into();
+    site.admin_user = source.admin_user.clone();
+    site.admin_pass = source.admin_pass.clone();
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_status(id, "running")?;
+        db.update_credentials(id, &site.admin_user, &site.admin_pass)?;
+    }
+    mark_complete(&dir);
+    // A new running site joins the router's Caddyfile + hosts block (no-op when
+    // local domains are disabled).
+    router::refresh_routes(state).await;
+    router::refresh_hosts(state).await;
+    Ok(site)
+}
+
+/// Remove a site's project directory, retrying briefly on a transient lock.
+///
+/// On Windows, `docker compose down` can return while Docker Desktop still holds
+/// a handle on a bind-mounted file for a moment, so an immediate `remove_dir_all`
+/// fails with "The process cannot access the file because it is being used by
+/// another process" (os error 32). A few short retries clear it; using
+/// `tokio::time::sleep` (not `thread::sleep`) keeps the executor thread free.
+pub(crate) async fn remove_site_dir(dir: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 10;
+    let mut last = None;
+    for attempt in 1..=ATTEMPTS {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            // Already gone (e.g. a prior partial attempt finished the job).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                if attempt < ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+            }
+        }
+    }
+    Err(last.expect("loop runs at least once"))
+}
+
+/// Undo a partial creation: tear the compose project down, remove the files,
+/// and drop the DB row. Shared with the import flow — a failed import must not
+/// leave a half-built site on the dashboard.
+pub(crate) async fn cleanup(state: &AppState, site: &Site) -> Result<(), String> {
     let dir = site.dir();
     if dir.exists() {
         let _ = docker::compose_down(&dir, true).await;
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = remove_site_dir(&dir).await;
     }
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.delete_site(&site.id)
 }
 
 /// Wait until something (Apache) accepts TCP connections on the site port.
-async fn wait_for_port(port: u16, timeout_secs: u64) -> Result<(), String> {
+pub(crate) async fn wait_for_port(port: u16, timeout_secs: u64) -> Result<(), String> {
     let addr = format!("127.0.0.1:{port}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
@@ -394,18 +983,22 @@ pub fn detail(state: &AppState, id: &str) -> Result<SiteDetail, String> {
     let site = get(state, id)?;
     let dir = site.dir();
     let db_password = read_env_value(&dir, "DB_PASSWORD").unwrap_or_default();
+    let incomplete = dir.exists() && !is_complete(&dir) && !state.in_flight.contains(&site.id);
     Ok(SiteDetail {
         db_port: site.db_port(),
         live_status: site.status.clone(),
+        incomplete,
         db_host: "127.0.0.1".into(),
-        db_name: "wordpress".into(),
-        db_user: "wordpress".into(),
+        db_name: db_name(&dir),
+        db_user: db_user(&dir),
         db_password,
         site,
     })
 }
 
 pub async fn start(state: &AppState, id: &str) -> Result<Site, String> {
+    // Hold the reconciler off this site while its status is in flight (plan 23).
+    let _guard = state.in_flight.guard(id);
     let site = get(state, id)?;
     docker::compose_up(&site.dir()).await?;
     {
@@ -417,6 +1010,7 @@ pub async fn start(state: &AppState, id: &str) -> Result<Site, String> {
 }
 
 pub async fn stop(state: &AppState, id: &str) -> Result<Site, String> {
+    let _guard = state.in_flight.guard(id);
     let site = get(state, id)?;
     docker::compose_down(&site.dir(), false).await?;
     {
@@ -427,13 +1021,156 @@ pub async fn stop(state: &AppState, id: &str) -> Result<Site, String> {
     get(state, id)
 }
 
-pub async fn delete(state: &AppState, id: &str) -> Result<(), String> {
+/// Restart a site so an edited `.env` takes effect (plan 24 config editor).
+///
+/// `docker compose up -d` recreates any service whose resolved config changed —
+/// including `.env` values — which a plain `compose restart` would NOT pick up.
+/// Leaves the site running regardless of its prior state.
+pub async fn restart(state: &AppState, id: &str) -> Result<Site, String> {
+    let _guard = state.in_flight.guard(id);
+    let site = get(state, id)?;
+    docker::compose_up(&site.dir()).await?;
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_status(id, "running")?;
+    }
+    router::refresh_routes(state).await;
+    get(state, id)
+}
+
+/// Finish a half-created site (plan 23): a create killed mid-flight left
+/// `status = creating` and no completion marker. Re-runs the tail — bring the
+/// containers up, wait, and (for a fresh WordPress create that never installed)
+/// run `wp core install` — then marks it complete. The containers exist and the
+/// images are pulled, so this is normally just the wait + install tail.
+pub async fn resume(app: Option<&AppHandle>, state: &AppState, id: &str) -> Result<Site, String> {
+    let _guard = state.in_flight.guard(id);
+    let site = get(state, id)?;
+    if !site.dir().exists() {
+        return Err(format!(
+            "\"{}\" has no project directory to resume — clean it up instead.",
+            site.name
+        ));
+    }
+    match do_resume(app, state, &site).await {
+        Ok(site) => {
+            let url = router::site_public_url(state, &site);
+            emit(
+                app,
+                &site.id,
+                "done",
+                &format!("{} setup finished — now running at {url}", site.name),
+            );
+            Ok(site)
+        }
+        Err(e) => {
+            emit(app, &site.id, "error", &format!("Resume failed: {e}"));
+            Err(e)
+        }
+    }
+}
+
+async fn do_resume(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Result<Site, String> {
+    let dir = site.dir();
+    let id = site.id.as_str();
+
+    // The compose project is the first, fast create stage, so it is almost
+    // always present. If a WordPress site's is somehow missing we can
+    // regenerate it; a docker app's project was copied and cannot be rebuilt.
+    if site.kind == KIND_WORDPRESS && !dir.join("docker-compose.yml").exists() {
+        write_project_files(site)?;
+    }
+
+    emit(app, id, "containers", "Starting Docker containers...");
+    docker::compose_up(&dir).await?;
+
+    emit(app, id, "waiting", "Waiting for the app to come online...");
+    let _ = wait_for_port(site.config.upstream_port(site.port), 180).await;
+
+    let mut resumed = site.clone();
+    if site.kind == KIND_WORDPRESS {
+        wordpress::wait_for_config(&dir, 24).await?;
+        if !wordpress::is_installed(&dir).await {
+            // An imported/clone/blueprint site's data lands via an archive, not
+            // `wp core install` — if it never installed, that data step never
+            // ran and cannot be reconstructed here. Only a fresh create's tail
+            // is safe to re-run.
+            if site.connection_id.is_some() {
+                return Err(
+                    "This imported site never finished importing its data — clean it up and import it again."
+                        .into(),
+                );
+            }
+            let admin_pass = random_password(16);
+            let install_url = router::site_public_url(state, site);
+            emit(app, id, "install", "Finishing WordPress setup...");
+            wordpress::install(&dir, site, &admin_pass, &install_url, app).await?;
+            resumed.admin_pass = admin_pass;
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            db.update_credentials(id, &resumed.admin_user, &resumed.admin_pass)?;
+        }
+    }
+
+    resumed.status = "running".into();
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_status(id, "running")?;
+    }
+    mark_complete(&dir);
+    router::refresh_routes(state).await;
+    router::refresh_hosts(state).await;
+    Ok(resumed)
+}
+
+/// Delete a site. Unless `delete_snapshots` is set, a `pre_delete` snapshot is
+/// taken first and the site's snapshot directory survives the deletion — the
+/// only copy of the data once the containers, volumes and files are gone
+/// (plan 17; also the groundwork for a future "restore deleted site").
+///
+/// The snapshot is best effort: a site whose Docker stack is broken must still
+/// be deletable, so a snapshot failure is reported through the event stream
+/// rather than blocking the delete.
+pub async fn delete(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    id: &str,
+    delete_snapshots: bool,
+) -> Result<(), String> {
+    let _guard = state.in_flight.guard(id);
     let site = get(state, id)?;
     let dir = site.dir();
+
+    if !delete_snapshots && dir.exists() {
+        emit(app, id, "snapshot", "Taking a snapshot before deleting...");
+        if let Err(e) = crate::snapshot::create(
+            app,
+            state,
+            id,
+            crate::snapshot::KIND_PRE_DELETE,
+            Some(format!("before deleting {}", site.name)),
+        )
+        .await
+        {
+            emit(
+                app,
+                id,
+                "snapshot",
+                &format!("Could not snapshot before deleting ({e}) — deleting anyway"),
+            );
+        }
+    }
+
     if dir.exists() {
         // Best effort: even if Docker is down we still remove local state.
         let _ = docker::compose_down(&dir, true).await;
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to remove site directory: {e}"))?;
+        // Retry through the transient Windows bind-mount lock `compose down`
+        // can leave behind (see `remove_site_dir`).
+        remove_site_dir(&dir)
+            .await
+            .map_err(|e| format!("failed to remove site directory: {e}"))?;
+    }
+    if delete_snapshots {
+        let _ = crate::snapshot::delete_all(&state.data_dir, id);
     }
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -454,20 +1191,22 @@ pub async fn list(state: &AppState) -> Result<Vec<SiteWithStatus>, String> {
     let mut out = Vec::new();
     for site in sites {
         let live_status = match docker::compose_ps(&site.dir()).await {
-            Ok(containers) => {
-                if containers
-                    .iter()
-                    .any(|c| c.service == "wordpress" && c.state == "running")
-                {
-                    "running".to_string()
-                } else {
-                    "stopped".to_string()
-                }
-            }
+            // Same classifier the reconciler uses, so a running-but-unhealthy
+            // container reads as `degraded` in the live view too (plan 23) — not
+            // as a plain `running` that hides the problem.
+            Ok(containers) => match crate::reconcile::classify(&containers, site.app_service()) {
+                crate::reconcile::Observed::Running => "running".to_string(),
+                crate::reconcile::Observed::Degraded => "degraded".to_string(),
+                crate::reconcile::Observed::Down => "stopped".to_string(),
+            },
             // Docker unavailable/off: fall back to the stored status.
             Err(_) => site.status.clone(),
         };
-        out.push(SiteWithStatus { site, live_status });
+        // Half-created? Dir present, completion marker absent, no create in
+        // flight (plan 23). Startup backfill marks known-complete legacy sites.
+        let incomplete =
+            site.dir().exists() && !is_complete(&site.dir()) && !state.in_flight.contains(&site.id);
+        out.push(SiteWithStatus { site, live_status, incomplete });
     }
     Ok(out)
 }
@@ -475,4 +1214,209 @@ pub async fn list(state: &AppState) -> Result<Vec<SiteWithStatus>, String> {
 pub async fn logs(state: &AppState, id: &str, tail: u32) -> Result<String, String> {
     let site = get(state, id)?;
     docker::compose_logs(&site.dir(), tail).await
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the plan-22 capability matrix + config serde defaults
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_lowercases_and_dashes_word_boundaries() {
+        assert_eq!(slugify("My Blog"), "my-blog");
+        assert_eq!(slugify("  Trim Me  "), "trim-me");
+        assert_eq!(slugify("Hello, World!"), "hello-world");
+        assert_eq!(slugify("foo   bar"), "foo-bar"); // runs collapse to one dash
+        assert_eq!(slugify("v1.2"), "v1-2");
+        assert_eq!(slugify("A"), "a");
+    }
+
+    #[test]
+    fn slugify_never_yields_an_empty_or_edge_dashed_slug() {
+        // A slug is a table key and a directory name — it must never be empty
+        // and never lead/trail with a dash.
+        assert_eq!(slugify(""), "site");
+        assert_eq!(slugify("---"), "site");
+        assert_eq!(slugify("!!!"), "site");
+        assert_eq!(slugify("  "), "site");
+        assert_eq!(slugify("-lead and trail-"), "lead-and-trail");
+        // Non-ASCII is dropped (acts as a separator), never transliterated.
+        assert_eq!(slugify("café"), "caf");
+    }
+
+    /// The WordPress reference stack claims every capability — the whole point
+    /// of the model is that WP is not an `if` branch but the maximal kind.
+    #[test]
+    fn wordpress_claims_every_capability() {
+        let caps = Capabilities::for_kind(KIND_WORDPRESS, &SiteConfig::default());
+        assert_eq!(caps, Capabilities::WORDPRESS);
+        for on in [
+            caps.domains,
+            caps.terminal,
+            caps.logs,
+            caps.snapshots,
+            caps.db_gui,
+            caps.db_sync,
+            caps.code_sync,
+            caps.one_click_login,
+            caps.wp_tools,
+            caps.search_replace,
+        ] {
+            assert!(on, "WordPress must claim every capability");
+        }
+    }
+
+    /// A plain docker app gets lifecycle + domains + terminal + logs +
+    /// snapshots (code) but never the WordPress-only affordances.
+    #[test]
+    fn docker_claims_only_the_generic_capabilities() {
+        let caps = Capabilities::for_kind(KIND_DOCKER, &SiteConfig::default());
+        assert!(caps.domains && caps.terminal && caps.logs && caps.snapshots && caps.code_sync);
+        assert!(
+            !caps.db_gui
+                && !caps.db_sync
+                && !caps.one_click_login
+                && !caps.wp_tools
+                && !caps.search_replace,
+            "a code-only docker app must not claim WordPress capabilities"
+        );
+    }
+
+    /// A recognized DB engine is captured in config, but a docker app stays
+    /// code-only for now — `db_sync` only turns on once engine-native dumps
+    /// actually work (the plan's "ships only when it works" guardrail).
+    #[test]
+    fn a_recognized_db_engine_is_captured_but_stays_code_only() {
+        let config = SiteConfig {
+            db_engine: Some("mariadb".into()),
+            db_service: Some("db".into()),
+            ..SiteConfig::default()
+        };
+        let caps = Capabilities::for_kind(KIND_DOCKER, &config);
+        assert!(!caps.db_sync, "docker is code-only until native dumps land");
+        assert!(caps.code_sync && caps.snapshots, "code snapshots still work");
+        assert!(!caps.wp_tools && !caps.one_click_login && !caps.search_replace);
+    }
+
+    /// A PHP/Laravel site (plan 26) claims everything WordPress does *except*
+    /// the WP-specific trio — but crucially keeps engine-native DB sync and the
+    /// Adminer GUI, which a code-only docker app does not.
+    #[test]
+    fn php_claims_db_sync_and_gui_but_not_the_wordpress_trio() {
+        let caps = Capabilities::for_kind(KIND_PHP, &SiteConfig::default());
+        assert_eq!(caps, Capabilities::PHP);
+        assert!(
+            caps.domains
+                && caps.terminal
+                && caps.logs
+                && caps.snapshots
+                && caps.db_gui
+                && caps.db_sync
+                && caps.code_sync,
+            "a php site has domains, terminal, logs, snapshots, db_gui, db_sync, code_sync"
+        );
+        assert!(
+            !caps.one_click_login && !caps.wp_tools && !caps.search_replace,
+            "a php site does not claim the WordPress-only trio"
+        );
+    }
+
+    /// An unknown/legacy kind falls back to the fully-capable WordPress set —
+    /// the safe default for a row written before this kind existed.
+    #[test]
+    fn an_unknown_kind_falls_back_to_wordpress() {
+        assert_eq!(
+            Capabilities::for_kind("something-new", &SiteConfig::default()),
+            Capabilities::WORDPRESS
+        );
+    }
+
+    /// A legacy `config_json` of `{}` (what migration 6 back-fills) deserializes
+    /// to the WordPress `SiteConfig` — service `wordpress`, sync path
+    /// `wp-content`, no app-port override.
+    #[test]
+    fn empty_config_json_is_the_wordpress_default() {
+        let config: SiteConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, SiteConfig::default());
+        assert_eq!(config.service, "wordpress");
+        assert_eq!(config.sync_path, "wp-content");
+        assert_eq!(config.app_port, None);
+        assert_eq!(config.upstream_port(8081), 8081);
+    }
+
+    /// An explicit app port overrides the site port for the router upstream;
+    /// unknown JSON fields are ignored rather than failing the read.
+    #[test]
+    fn config_serde_round_trips_and_tolerates_extra_fields() {
+        let json = r#"{"service":"app","sync_path":"data","app_port":3000,"future_field":true}"#;
+        let config: SiteConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.service, "app");
+        assert_eq!(config.sync_path, "data");
+        assert_eq!(config.upstream_port(8081), 3000);
+        // Round-trips back to JSON and parses to the same value.
+        let back: SiteConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(back, config);
+    }
+
+    /// Plan 24: Adminer is a profile-gated service published on db_port + 1000,
+    /// mapped at render time so no allocator change is needed.
+    #[test]
+    fn compose_publishes_adminer_on_the_db_plus_1000_port() {
+        let mut s = Site {
+            id: "s".into(),
+            name: "Blog".into(),
+            slug: "blog".into(),
+            path: "/tmp/blog".into(),
+            port: 8081,
+            wp_version: "6.7".into(),
+            php_version: "8.3".into(),
+            status: "running".into(),
+            status_updated_at: "2026-01-01T00:00:00Z".into(),
+            admin_user: DEFAULT_ADMIN_USER.into(),
+            admin_pass: String::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            connection_id: None,
+            remote_site_id: None,
+            kind: KIND_WORDPRESS.into(),
+            config: SiteConfig::default(),
+            capabilities: Capabilities::default(),
+        };
+        s.refresh_capabilities();
+        assert_eq!(s.adminer_port(), 19081, "db_port (18081) + 1000");
+        let yml = render_compose(&s);
+        assert!(yml.contains("adminer:4-standalone"), "{yml}");
+        assert!(yml.contains("\"19081:8080\""), "adminer host port mapping:\n{yml}");
+        // Off by default: gated behind the tools profile, like wpcli.
+        assert_eq!(yml.matches("profiles: [\"tools\"]").count(), 2, "wpcli + adminer are profile-gated");
+    }
+
+    #[test]
+    fn require_refuses_a_missing_capability_with_the_kind_named() {
+        let mut s = Site {
+            id: "d".into(),
+            name: "API".into(),
+            slug: "api".into(),
+            path: "/tmp/api".into(),
+            port: 8081,
+            wp_version: String::new(),
+            php_version: String::new(),
+            status: "running".into(),
+            status_updated_at: "2026-01-01T00:00:00Z".into(),
+            admin_user: DEFAULT_ADMIN_USER.into(),
+            admin_pass: String::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            connection_id: None,
+            remote_site_id: None,
+            kind: KIND_DOCKER.into(),
+            config: SiteConfig::default(),
+            capabilities: Capabilities::default(),
+        };
+        s.refresh_capabilities();
+        let err = s.require(s.capabilities.wp_tools, "WordPress info").unwrap_err();
+        assert!(err.contains("docker"), "the refusal names the kind: {err}");
+        assert!(s.require(s.capabilities.terminal, "Terminal").is_ok());
+    }
 }

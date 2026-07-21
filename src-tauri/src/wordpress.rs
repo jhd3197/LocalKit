@@ -6,8 +6,9 @@
 //! `docker compose run --rm -T wpcli wp <args...>`.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::AppHandle;
+use uuid::Uuid;
 
 use crate::docker;
 use crate::site::{self, Site};
@@ -217,6 +218,17 @@ async fn wp(dir: &Path, args: &[&str]) -> Result<String, String> {
     docker::compose_run(dir, "wpcli", &full).await
 }
 
+/// Run wp-cli as root, for commands that write `wp-config.php` (root-owned in
+/// the wp-data volume — see `docker::compose_run_root`). `--allow-root` is
+/// appended because wp-cli refuses to run as root without it.
+async fn wp_root(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let mut full: Vec<&str> = Vec::with_capacity(args.len() + 2);
+    full.push("wp");
+    full.extend_from_slice(args);
+    full.push("--allow-root");
+    docker::compose_run_root(dir, "wpcli", &full).await
+}
+
 /// Auto-install WordPress with generated admin credentials.
 /// `url` is the public URL the site will be reached at (localhost:<port> or,
 /// when local domains are enabled, http(s)://<slug>.test).
@@ -273,6 +285,35 @@ pub async fn install(
     Err(format!("WordPress install failed: {last_err}"))
 }
 
+/// Whether WordPress core is already installed (plan 23 resume: don't re-run
+/// `core install` on a site whose database already holds one).
+pub async fn is_installed(dir: &Path) -> bool {
+    wp(dir, &["core", "is-installed"]).await.is_ok()
+}
+
+/// Wait until wp-cli can see the site's `wp-config.php`.
+///
+/// `site::wait_for_port` is not a sufficient readiness signal on its own:
+/// Docker publishes the host port as soon as the container is *created*, so a
+/// TCP connect succeeds while the wordpress image's entrypoint is still
+/// unpacking core and writing wp-config.php. `install` happens to survive this
+/// because it retries for a minute; anything else that shells into wp-cli
+/// straight after `compose up` has to wait explicitly, or it fails with a bare
+/// "'wp-config.php' not found".
+pub async fn wait_for_config(dir: &Path, attempts: u32) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match wp(dir, &["config", "path"]).await {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e,
+        }
+        if attempt < attempts {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
+    Err(format!("WordPress did not finish initializing: {last}"))
+}
+
 /// Read-only info for the UI: core version + plugin list.
 pub async fn info(dir: &Path) -> Result<WpInfo, String> {
     let core_version = wp(dir, &["core", "version"]).await?.trim().to_string();
@@ -298,11 +339,52 @@ pub async fn export_db(dir: &Path, dest: &Path) -> Result<(), String> {
     std::fs::write(dest, sql).map_err(|e| format!("failed to write database dump: {e}"))
 }
 
-/// Import a SQL dump through wp-cli's stdin (`wp db import -`).
+/// Import a SQL dump.
+///
+/// The dump is staged to a transient file inside the bind-mounted `wp-content`
+/// and imported with `wp db import <file>` — **not** piped to `wp db import -`
+/// on stdin. `docker compose run -T` does not reliably propagate stdin EOF into
+/// the container on all platforms (observed hanging indefinitely on Windows —
+/// the same reason the config editor writes `wp-config.php` via `compose cp`
+/// rather than piped stdin), so a piped import can wait forever for input that
+/// already ended. Reading a file has no EOF to lose.
 pub async fn import_db(dir: &Path, sql: &[u8]) -> Result<(), String> {
-    docker::compose_run_stdin(dir, "wpcli", &["wp", "db", "import", "-"], sql)
-        .await
-        .map(|_| ())
+    import_db_via_file(dir, |path| std::fs::write(path, sql)).await
+}
+
+/// Import a gzipped dump, decompressing it to the transient file on the way in
+/// (streamed off disk, never held decompressed in memory — plan 19).
+pub async fn import_db_from_gz(dir: &Path, gz_path: &Path) -> Result<(), String> {
+    import_db_via_file(dir, |path| {
+        let src = std::fs::File::open(gz_path)?;
+        let mut reader = flate2::read::GzDecoder::new(std::io::BufReader::new(src));
+        let mut out = std::fs::File::create(path)?;
+        std::io::copy(&mut reader, &mut out)?;
+        Ok(())
+    })
+    .await
+}
+
+/// Stage a SQL dump into a transient file under the bind-mounted `wp-content`
+/// (the one host-writable path the wpcli container sees), run `wp db import` on
+/// it, and remove it — always, even on failure. This is what sidesteps the
+/// piped-stdin hang (see `import_db`).
+async fn import_db_via_file(
+    dir: &Path,
+    write_dump: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let wp_content = dir.join("wp-content");
+    std::fs::create_dir_all(&wp_content)
+        .map_err(|e| format!("failed to prepare the import staging dir: {e}"))?;
+    let name = format!(".localkit-import-{}.sql", Uuid::new_v4().simple());
+    let host_path = wp_content.join(&name);
+    write_dump(&host_path).map_err(|e| format!("failed to stage the database dump: {e}"))?;
+    // The wpcli container's workdir is /var/www/html and wp-content is mounted
+    // there, so this relative path resolves to the staged file inside it.
+    let rel = format!("wp-content/{name}");
+    let result = docker::compose_run(dir, "wpcli", &["wp", "db", "import", &rel]).await;
+    let _ = std::fs::remove_file(&host_path);
+    result.map(|_| ())
 }
 
 /// Serialization-safe URL rewrite across all tables.
@@ -312,9 +394,296 @@ pub async fn search_replace(dir: &Path, from: &str, to: &str) -> Result<(), Stri
         .map(|_| ())
 }
 
+/// One `table.column` line of a search-replace report.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchReplaceChange {
+    pub table: String,
+    pub column: String,
+    pub count: u64,
+}
+
+/// The outcome of a search-replace: total replacements and the per-column
+/// breakdown wp-cli reports (only changed columns, `--report-changed-only`).
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchReplaceResult {
+    pub dry_run: bool,
+    pub total: u64,
+    pub changes: Vec<SearchReplaceChange>,
+}
+
+/// Run a serialization-safe search-replace and report what changed.
+///
+/// `wp search-replace <from> <to> --all-tables --precise --report-changed-only
+/// [--dry-run]` — never a raw SQL `REPLACE`, so PHP-serialized values (widget
+/// data, options) survive. `--dry-run` counts without writing, which is what the
+/// UI runs first so the user sees the cost before committing. The table output
+/// is parsed into a structured result; the total is the sum of the per-column
+/// counts.
+pub async fn search_replace_report(
+    dir: &Path,
+    from: &str,
+    to: &str,
+    dry_run: bool,
+) -> Result<SearchReplaceResult, String> {
+    let mut args = vec![
+        "search-replace",
+        from,
+        to,
+        "--all-tables",
+        "--precise",
+        "--report-changed-only",
+    ];
+    if dry_run {
+        args.push("--dry-run");
+    }
+    let output = wp(dir, &args).await?;
+    let (total, changes) = parse_search_replace_table(&output);
+    Ok(SearchReplaceResult { dry_run, total, changes })
+}
+
+/// Parse wp-cli's search-replace report into (total, per-column rows).
+///
+/// The columns are `Table Column Replacements Type`, and
+/// `--report-changed-only` shows only rows with a non-zero count (a zero-change
+/// run prints no table at all → empty stdout → 0 changes). wp-cli emits this in
+/// one of two shapes depending on whether stdout is a TTY: the plain
+/// tab-separated form (what LocalKit gets, since it captures a pipe) or the
+/// bordered `| a | b |` grid. Both are handled. Column *positions* come from the
+/// header row rather than being assumed, so a reordered/extra column still maps.
+fn parse_search_replace_table(output: &str) -> (u64, Vec<SearchReplaceChange>) {
+    let cells_of = |line: &str| -> Vec<String> {
+        if line.contains('|') {
+            // Bordered grid: `| a | b |` — drop the empty ends the outer pipes
+            // produce, but keep genuinely empty inner cells.
+            let mut cells: Vec<String> = line.split('|').map(|c| c.trim().to_string()).collect();
+            if cells.first().is_some_and(|s| s.is_empty()) {
+                cells.remove(0);
+            }
+            if cells.last().is_some_and(|s| s.is_empty()) {
+                cells.pop();
+            }
+            cells
+        } else {
+            // Tab-separated (the non-TTY form wp-cli actually gives us).
+            line.split('\t').map(|c| c.trim().to_string()).collect()
+        }
+    };
+
+    let rows: Vec<Vec<String>> = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('+') && (l.contains('|') || l.contains('\t')))
+        .map(cells_of)
+        .collect();
+
+    // Locate the header and the columns we care about within it.
+    let Some(header_idx) = rows
+        .iter()
+        .position(|r| r.iter().any(|c| c.eq_ignore_ascii_case("Replacements")))
+    else {
+        return (0, Vec::new());
+    };
+    let header = &rows[header_idx];
+    let col = |name: &str| header.iter().position(|c| c.eq_ignore_ascii_case(name));
+    let (table_i, column_i, count_i) = (col("Table"), col("Column"), col("Replacements"));
+    let Some(count_i) = count_i else {
+        return (0, Vec::new());
+    };
+
+    let mut total = 0u64;
+    let mut changes = Vec::new();
+    for row in &rows[header_idx + 1..] {
+        let count = row.get(count_i).and_then(|c| c.parse::<u64>().ok());
+        let Some(count) = count else { continue };
+        total += count;
+        changes.push(SearchReplaceChange {
+            table: table_i.and_then(|i| row.get(i)).cloned().unwrap_or_default(),
+            column: column_i.and_then(|i| row.get(i)).cloned().unwrap_or_default(),
+            count,
+        });
+    }
+    (total, changes)
+}
+
+// ---------------------------------------------------------------------------
+// Debug mode + log viewer (plan 24)
+// ---------------------------------------------------------------------------
+
+/// WP_DEBUG state + the size of the debug log, for the Tools → Debug UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugStatus {
+    pub enabled: bool,
+    /// Bytes in `wp-content/debug.log` (0 when absent), so the UI can say
+    /// "empty" without shipping the whole file just to check.
+    pub log_bytes: u64,
+}
+
+/// Host path of the WordPress debug log. `WP_DEBUG_LOG = true` logs to
+/// `WP_CONTENT_DIR/debug.log`, and `wp-content` is bind-mounted, so this is a
+/// plain host file — read/cleared without touching the container.
+fn debug_log_path(dir: &Path) -> PathBuf {
+    dir.join("wp-content").join("debug.log")
+}
+
+/// Read WP_DEBUG. `wp config get WP_DEBUG` *evaluates* the constant, so a true
+/// value prints `1` and a false/undefined one prints empty.
+pub async fn debug_status(dir: &Path) -> Result<DebugStatus, String> {
+    let value = wp(dir, &["config", "get", "WP_DEBUG"]).await.unwrap_or_default();
+    let value = value.trim();
+    let enabled = value == "1" || value.eq_ignore_ascii_case("true");
+    let log_bytes = std::fs::metadata(debug_log_path(dir))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    Ok(DebugStatus { enabled, log_bytes })
+}
+
+/// Toggle debug mode: `WP_DEBUG` and `WP_DEBUG_LOG` follow `enabled`, while
+/// `WP_DEBUG_DISPLAY` is pinned false — errors go to the log, never to the
+/// screen (a visible fatal on a shared preview URL is its own footgun). Writing
+/// `wp-config.php` needs the root runner (see `wp_root`).
+pub async fn set_debug(dir: &Path, enabled: bool) -> Result<DebugStatus, String> {
+    let raw = if enabled { "true" } else { "false" };
+    wp_root(dir, &["config", "set", "WP_DEBUG", raw, "--raw"]).await?;
+    wp_root(dir, &["config", "set", "WP_DEBUG_LOG", raw, "--raw"]).await?;
+    wp_root(dir, &["config", "set", "WP_DEBUG_DISPLAY", "false", "--raw"]).await?;
+    debug_status(dir).await
+}
+
+/// The debug log, tailed to the last ~128 KB so a runaway log never blows up
+/// the IPC payload. Empty string when the file does not exist yet.
+pub fn read_debug_log(dir: &Path) -> String {
+    let Ok(bytes) = std::fs::read(debug_log_path(dir)) else {
+        return String::new();
+    };
+    const MAX: usize = 128 * 1024;
+    let slice = if bytes.len() > MAX {
+        &bytes[bytes.len() - MAX..]
+    } else {
+        &bytes[..]
+    };
+    String::from_utf8_lossy(slice).to_string()
+}
+
+/// Truncate the debug log (kept as an empty file so PHP keeps appending to the
+/// same inode). A missing log is a no-op.
+pub fn clear_debug_log(dir: &Path) -> Result<(), String> {
+    let path = debug_log_path(dir);
+    if path.exists() {
+        std::fs::write(&path, b"").map_err(|e| format!("failed to clear the debug log: {e}"))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Config editor (plan 24) — wp-config.php lives in the wp-data volume, not on
+// the host, so it is copied in/out of the running wordpress container with
+// `docker compose cp` (which runs through the daemon as root, so it can
+// overwrite the root-owned file). Requires the container to exist — the command
+// layer gates this on the site running.
+// ---------------------------------------------------------------------------
+
+/// Path of `wp-config.php` inside the wordpress containers.
+const WP_CONFIG_PATH: &str = "/var/www/html/wp-config.php";
+
+/// A short-lived host path for staging a `wp-config.php` copy.
+fn wp_config_tmp() -> PathBuf {
+    std::env::temp_dir().join(format!("localkit-wpconfig-{}.php", Uuid::new_v4().simple()))
+}
+
+/// Read `wp-config.php` by copying it out of the wordpress container.
+pub async fn read_wp_config(dir: &Path, service: &str) -> Result<String, String> {
+    let tmp = wp_config_tmp();
+    docker::compose_cp(dir, service, WP_CONFIG_PATH, &tmp).await?;
+    let content = std::fs::read_to_string(&tmp).map_err(|e| format!("failed to read wp-config.php: {e}"));
+    let _ = std::fs::remove_file(&tmp);
+    content
+}
+
+/// Overwrite `wp-config.php` by copying a staged host file into the container.
+/// `docker compose cp` runs as the daemon (root), so it can replace the
+/// root-owned file — no fragile stdin piping.
+pub async fn write_wp_config(dir: &Path, service: &str, contents: &str) -> Result<(), String> {
+    let tmp = wp_config_tmp();
+    std::fs::write(&tmp, contents).map_err(|e| format!("failed to stage wp-config.php: {e}"))?;
+    let result = docker::compose_cp_into(dir, &tmp, service, WP_CONFIG_PATH).await;
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
 /// Point home/siteurl at the site's local URL.
 pub async fn update_site_urls(dir: &Path, url: &str) -> Result<(), String> {
     wp(dir, &["option", "update", "home", url]).await?;
     wp(dir, &["option", "update", "siteurl", url]).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REPORT: &str = "\
++------------+---------------+--------------+------+
+| Table      | Column        | Replacements | Type |
++------------+---------------+--------------+------+
+| wp_options | option_value  | 3            | PHP  |
+| wp_posts   | post_content  | 12           | SQL  |
+| wp_posts   | guid          | 4            | SQL  |
++------------+---------------+--------------+------+";
+
+    #[test]
+    fn parses_the_report_table_into_rows_and_a_total() {
+        let (total, changes) = parse_search_replace_table(REPORT);
+        assert_eq!(total, 19);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0].table, "wp_options");
+        assert_eq!(changes[0].column, "option_value");
+        assert_eq!(changes[0].count, 3);
+        assert_eq!(changes[1].count, 12);
+        assert_eq!(changes[2].column, "guid");
+    }
+
+    /// The shape LocalKit actually gets: wp-cli drops the ASCII grid when
+    /// stdout is a pipe and emits a tab-separated table instead (captured from a
+    /// real `wp search-replace ... --report-changed-only --dry-run`).
+    #[test]
+    fn parses_the_tab_separated_form_wp_cli_actually_emits() {
+        let tsv = "Table\tColumn\tReplacements\tType\n\
+                   wp_options\toption_value\t2\tPHP\n\
+                   wp_posts\tpost_content\t2\tPHP\n\
+                   wp_posts\tguid\t4\tPHP\n\
+                   wp_users\tuser_url\t1\tPHP";
+        let (total, changes) = parse_search_replace_table(tsv);
+        assert_eq!(total, 9);
+        assert_eq!(changes.len(), 4);
+        assert_eq!(changes[0].table, "wp_options");
+        assert_eq!(changes[0].column, "option_value");
+        assert_eq!(changes[0].count, 2);
+        assert_eq!(changes[3].table, "wp_users");
+        assert_eq!(changes[3].count, 1);
+    }
+
+    /// A zero-change dry run prints no table (wp-cli sends the "0 replacements"
+    /// line to stderr, which `compose_run` drops) — that must read as 0, [].
+    #[test]
+    fn empty_output_is_zero_changes() {
+        assert_eq!(parse_search_replace_table("").0, 0);
+        assert!(parse_search_replace_table("   \n\n").1.is_empty());
+    }
+
+    /// Column positions come from the header, so a reordered/extra-column table
+    /// still maps Replacements correctly and ignores unrelated columns.
+    #[test]
+    fn reads_columns_by_header_position() {
+        let reordered = "\
++--------------+------------+---------------+
+| Replacements | Table      | Column        |
++--------------+------------+---------------+
+| 7            | wp_meta    | meta_value    |
++--------------+------------+---------------+";
+        let (total, changes) = parse_search_replace_table(reordered);
+        assert_eq!(total, 7);
+        assert_eq!(changes[0].table, "wp_meta");
+        assert_eq!(changes[0].column, "meta_value");
+        assert_eq!(changes[0].count, 7);
+    }
 }

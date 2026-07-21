@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../lib/ipc";
-import type { AppInfo, DockerStatus } from "../lib/types";
+import { checkForUpdate, getLastUpdateResult } from "../lib/update";
+import type { AppInfo, DockerStatus, UpdateInfo } from "../lib/types";
+import { useDocker } from "../stores/docker";
 import { useNav } from "../stores/nav";
-import { useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
+import { useOsNotifications, useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
 import { useDialog } from "../hooks/useDialog";
 import ServerKitSettings from "../components/ServerKitSettings";
 import DomainsSettings from "../components/DomainsSettings";
 import KeyboardSettings from "../components/KeyboardSettings";
 import { CloseIcon, GlobeIcon, KeyboardIcon, ServerIcon, SlidersIcon, TerminalIcon } from "../components/icons";
 
-type SectionId = "general" | "terminal" | "keyboard" | "domains" | "serverkit";
+import type { SettingsSection as SectionId } from "../stores/nav";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "general", label: "General", icon: <SlidersIcon className="h-3.5 w-3.5" /> },
@@ -21,7 +24,9 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
 
 export default function Settings() {
   const setSettingsOpen = useNav((s) => s.setSettingsOpen);
-  const [active, setActive] = useState<SectionId>("general");
+  // Seeded from nav so callers can deep-link (e.g. the router-conflict banner
+  // on SiteDetail opens straight to Local domains).
+  const [active, setActive] = useState<SectionId>(useNav.getState().settingsSection);
   const { overlayProps, panelProps } = useDialog(() => setSettingsOpen(false));
 
   const activeLabel = SECTIONS.find((s) => s.id === active)?.label;
@@ -95,13 +100,32 @@ function GeneralSection() {
   const [checking, setChecking] = useState(false);
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [runInBackground, setRunInBackground] = useState(true);
+  const [update, setUpdate] = useState<UpdateInfo | null>(getLastUpdateResult());
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateError, setUpdateError] = useState(false);
+  const [osNotifications, setOsNotifications] = useOsNotifications();
 
-  const checkDocker = useCallback(async () => {
+  const checkDocker = useCallback(async (force = false) => {
     setChecking(true);
     try {
-      setDocker(await ipc.checkDocker());
+      const status = await ipc.checkDocker(force);
+      setDocker(status);
+      // Keep the sidebar's global pill in sync with a manual re-check.
+      useDocker.setState({ status });
     } finally {
       setChecking(false);
+    }
+  }, []);
+
+  const checkUpdate = useCallback(async () => {
+    setCheckingUpdate(true);
+    setUpdateError(false);
+    try {
+      setUpdate(await checkForUpdate());
+    } catch {
+      setUpdateError(true);
+    } finally {
+      setCheckingUpdate(false);
     }
   }, []);
 
@@ -112,7 +136,9 @@ function GeneralSection() {
       .getAppSetting("run_in_background")
       .then((v) => setRunInBackground(v !== "false"))
       .catch(() => {});
-  }, [checkDocker]);
+    // Only reach for GitHub if the launch check hasn't already cached a result.
+    if (!getLastUpdateResult()) void checkUpdate();
+  }, [checkDocker, checkUpdate]);
 
   const toggleRunInBackground = () => {
     const next = !runInBackground;
@@ -126,7 +152,7 @@ function GeneralSection() {
       <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Docker</h2>
-          <button onClick={() => void checkDocker()} className="text-xs text-zinc-500 hover:text-zinc-300">
+          <button onClick={() => void checkDocker(true)} className="text-xs text-zinc-500 hover:text-zinc-300">
             {checking ? "Checking…" : "Re-check"}
           </button>
         </div>
@@ -144,6 +170,48 @@ function GeneralSection() {
             </span>
           ) : (
             <span className="text-red-300">{docker.error ?? "Docker is unavailable"}</span>
+          )}
+        </div>
+      </section>
+
+      {/* Updates (plan 25) — a checker, not an auto-updater; links out. */}
+      <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Updates</h2>
+          <button
+            onClick={() => void checkUpdate()}
+            disabled={checkingUpdate}
+            className="text-xs text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+          >
+            {checkingUpdate ? "Checking…" : "Check now"}
+          </button>
+        </div>
+        <div className="mt-2.5 flex items-center gap-2 text-sm">
+          {update?.update_available ? (
+            <>
+              <span className="h-2.5 w-2.5 rounded-full bg-violet-400" />
+              <span className="text-zinc-300">
+                Version {update.latest} is available — you have {update.current}.
+              </span>
+              <button
+                onClick={() => void openUrl(update.url).catch(() => {})}
+                className="ml-auto rounded-md border border-violet-700 px-2.5 py-1 text-xs text-violet-300 hover:border-violet-600 hover:text-violet-200"
+              >
+                View release
+              </button>
+            </>
+          ) : updateError ? (
+            <>
+              <span className="h-2.5 w-2.5 rounded-full bg-zinc-600" />
+              <span className="text-zinc-500">Couldn’t check for updates right now.</span>
+            </>
+          ) : update ? (
+            <>
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+              <span className="text-zinc-300">You’re up to date (v{update.current}).</span>
+            </>
+          ) : (
+            <span className="text-zinc-500">{checkingUpdate ? "Checking for updates…" : "—"}</span>
           )}
         </div>
       </section>
@@ -173,6 +241,35 @@ function GeneralSection() {
           running in the background; reopen the window or quit from the tray icon. Running sites
           keep serving even after quitting the app — stop them from the dashboard or the tray
           menu.
+        </p>
+      </section>
+
+      {/* Desktop notifications (plan 25) */}
+      <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+            Desktop notifications
+          </h2>
+          <button
+            role="switch"
+            aria-checked={osNotifications}
+            aria-label="Show desktop notifications when long operations finish"
+            onClick={() => setOsNotifications(!osNotifications)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              osNotifications ? "bg-violet-600" : "bg-zinc-700"
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                osNotifications ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </button>
+        </div>
+        <p className="mt-2.5 text-sm text-zinc-500">
+          Notify when a long operation (site created, push/pull, restore) finishes while
+          LocalKit is in the background or closed to the tray. When the window is focused the
+          in-app toast is used instead, so you never get both.
         </p>
       </section>
 
