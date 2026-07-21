@@ -5,7 +5,7 @@ import { checkForUpdate, getLastUpdateResult } from "../lib/update";
 import type { AppInfo, DockerStatus, UpdateInfo } from "../lib/types";
 import { useDocker } from "../stores/docker";
 import { useNav } from "../stores/nav";
-import { useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
+import { useOsNotifications, useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
 import { useDialog } from "../hooks/useDialog";
 import ServerKitSettings from "../components/ServerKitSettings";
 import DomainsSettings from "../components/DomainsSettings";
@@ -103,6 +103,7 @@ function GeneralSection() {
   const [update, setUpdate] = useState<UpdateInfo | null>(getLastUpdateResult());
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateError, setUpdateError] = useState(false);
+  const [osNotifications, setOsNotifications] = useOsNotifications();
 
   const checkDocker = useCallback(async (force = false) => {
     setChecking(true);
@@ -240,6 +241,35 @@ function GeneralSection() {
           running in the background; reopen the window or quit from the tray icon. Running sites
           keep serving even after quitting the app — stop them from the dashboard or the tray
           menu.
+        </p>
+      </section>
+
+      {/* Desktop notifications (plan 25) */}
+      <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+            Desktop notifications
+          </h2>
+          <button
+            role="switch"
+            aria-checked={osNotifications}
+            aria-label="Show desktop notifications when long operations finish"
+            onClick={() => setOsNotifications(!osNotifications)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              osNotifications ? "bg-violet-600" : "bg-zinc-700"
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                osNotifications ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </button>
+        </div>
+        <p className="mt-2.5 text-sm text-zinc-500">
+          Notify when a long operation (site created, push/pull, restore) finishes while
+          LocalKit is in the background or closed to the tray. When the window is focused the
+          in-app toast is used instead, so you never get both.
         </p>
       </section>
 

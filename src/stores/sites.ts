@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "../lib/ipc";
 import { errMsg, markEventError, toastError } from "../lib/errors";
+import { notifyIfBackground } from "../lib/notify";
 import { toast, useToast, type ToastKind } from "./toast";
 import type { Site, SiteEvent, SiteWithStatus, WpInfo } from "../lib/types";
 
@@ -227,6 +228,14 @@ export const useSites = create<SitesState>((set, get) => ({
         progressToastId = null;
       } else {
         toast[terminal](event.message);
+      }
+      // OS notification when the window can't show the toast — unfocused or
+      // closed to tray (plan 25). A deliberate cancel isn't worth a ping, so
+      // only completions and failures notify.
+      if (event.stage === "done") {
+        void notifyIfBackground("LocalKit", event.message);
+      } else if (event.stage === "error") {
+        void notifyIfBackground("LocalKit — something went wrong", event.message);
       }
       // Both error and cancel reject the command promise as well; dedupe so
       // the user sees one message, not two.

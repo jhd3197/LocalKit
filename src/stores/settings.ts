@@ -182,3 +182,21 @@ export function getSnoozedUpdate(): string | undefined {
 export function snoozeUpdate(version: string): void {
   useSettings.getState().set(UPDATE_SNOOZED, version);
 }
+
+// ---------------------------------------------------------------------------
+// OS desktop notifications (plan 25) — default on
+// ---------------------------------------------------------------------------
+
+const OS_NOTIFICATIONS = "osNotifications";
+
+/** Non-hook read (the site-event handler lives outside React). Default on. */
+export function getOsNotificationsEnabled(): boolean {
+  return useSettings.getState().values[OS_NOTIFICATIONS] !== "false";
+}
+
+/** Settings toggle for OS notifications on long-op completion (default on). */
+export function useOsNotifications(): [boolean, (on: boolean) => void] {
+  const on = useSettings((s) => s.values[OS_NOTIFICATIONS] !== "false");
+  const set = useSettings((s) => s.set);
+  return [on, (v) => set(OS_NOTIFICATIONS, String(v))];
+}

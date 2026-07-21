@@ -309,6 +309,15 @@ src-tauri/               Rust backend (also a cargo workspace root)
   frontend-side in `lib/update.ts`), and an informational `lk doctor` line. If
   releases ever get signed, swap the checker for the real updater behind the
   same Settings row.
+- **OS notifications (plan 25):** `tauri-plugin-notification` fires a desktop
+  notification when a long op finishes **only while the window is unfocused or
+  closed to tray** (`lib/notify.ts`, gated on `document.hasFocus()`) — the toast
+  owns in-focus feedback, and double-notifying is worse than either. Wired into
+  `sites.ts handleEvent` on the `done`/`error` terminal stages (not `cancelled`,
+  which is deliberate). Settings → General toggle `osNotifications` (default
+  on); permission is requested once and a denial is remembered, never nagged.
+  Mock: `src/mock/notification.ts`, aliased in `vite.config.ts` for `--mode
+  mock`. Capability: `notification:default` in `capabilities/default.json`.
 - **wp-cli:** the stock `wordpress` image has no wp-cli; use the profile-gated
   `wpcli` service (`wordpress:cli-php<ver>`) via `docker::compose_run`, and
   always pass `wp` as the first argument (the cli image's `wp` CMD is replaced

@@ -846,6 +846,9 @@ pub fn run() {
             tray::show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        // OS desktop notifications for long-op completions (plan 25). Fired from
+        // the frontend only when the window is unfocused/closed-to-tray.
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             db: Mutex::new(db),
             data_dir,
