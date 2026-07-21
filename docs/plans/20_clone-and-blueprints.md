@@ -1,6 +1,6 @@
 # 20 — Site clone + reusable blueprints
 
-Status: ⬜ planned
+Status: ✅ shipped
 
 Two related creation flows: **clone** an existing local site in one click,
 and save any site as a named **blueprint** (content + config recipe) that

@@ -30,7 +30,8 @@ src/                     React 18 + TS + Vite frontend
                          palette/new-site/cheat-sheet dialog flags,
                          settings.ts = unified prefs over the app_settings KV —
                          seeded pre-paint from window.__LOCALKIT_SETTINGS__,
-                         sites.ts = data/actions, toast.ts = global toasts +
+                         sites.ts = data/actions, blueprints.ts = plan-20
+                         template data/actions, toast.ts = global toasts +
                          module-level toast.* helpers)
   pages/                 Dashboard (grid/list site views), SiteDetail,
                          Terminal (one tab per site, shell in the wordpress
@@ -39,7 +40,8 @@ src/                     React 18 + TS + Vite frontend
   components/            Sidebar, StatusBadge, CopyButton, NewSiteDialog,
                          CommandPalette, KeyboardSettings,
                          KeyboardShortcutsDialog, SnapshotsPanel,
-                         DeleteSiteDialog, ImportSiteDialog,
+                         DeleteSiteDialog, ImportSiteDialog, CloneSiteDialog,
+                         SaveBlueprintDialog (plan 20),
                          icons.tsx (inline SVGs, 1.75px rounded strokes)
   assets/logo.png        Vite-bundled brand logo (sidebar); master at assets/logo.png
   mock/                  in-browser mocks of @tauri-apps/* for `vite --mode mock`
@@ -69,7 +71,14 @@ src-tauri/               Rust backend (also a cargo workspace root)
                          subtraction, sha256 hashing writer, self-deleting
                          staged/temp files, per-site cancel registry
   src/snapshot.rs        plan 17 snapshots: DB dump + wp-content archive on
-                         disk (no DB table), restore, retention
+                         disk (no DB table), restore, retention; also
+                         restore_archives_into (seed a fresh site from a
+                         snapshot's archives — the shared core of clone/blueprint)
+  src/blueprint.rs       plan 20 blueprints: save a site as a reusable template
+                         (<data>/blueprints/<slug>/ = blueprint.json + db.sql.gz
+                         + wp-content.tar.gz, plugin/theme recipe), create new
+                         sites from one, and export/import a portable .lkbp.
+                         Clone itself lives in site.rs (clone_site)
   tauri.conf.json        v2 schema; capabilities/default.json grants opener plugin;
                          the main window is built in code (`lib.rs run()`), not
                          from the config `windows` array, so the settings init
@@ -94,9 +103,12 @@ src-tauri/               Rust backend (also a cargo workspace root)
   one-click recovery, port-bearing site URLs, SiteDetail banner). The mock
   fakes a LocalWP holding 80/443; `window.__LOCALKIT_MOCK__` (mock builds
   only) lets the script reach states the UI can't drive on its own.
-- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|delete|cleanup>`
+- `cd src-tauri && cargo run --example smoke -- <create|verify|info|stop|start|clone|blueprint|delete|cleanup>`
   — end-to-end lifecycle smoke test against real Docker (no Tauri runtime needed);
-  uses a scratch data dir under the OS temp dir.
+  uses a scratch data dir under the OS temp dir. `clone` and `blueprint` (plan 20)
+  create a marker post on the smoke site, then assert a one-click clone / a
+  save-then-create-from-blueprint carries the content across with fresh
+  ports/secrets; both clean up after themselves.
 - `node scripts/verify-snapshots.mjs` — headless runtime check of the plan-17
   snapshot UX against the mock server (listing + kind badges, take-with-note,
   restore taking a pre-restore snapshot first, delete, a DB pull leaving a
@@ -127,6 +139,10 @@ src-tauri/               Rust backend (also a cargo workspace root)
   import UX against the mock server (per-row Import buttons, the multisite
   refusal and its tooltip, the version-match readout and mismatch warning,
   the progress stages, the dashboard origin badge, the duplicate refusal).
+- `node scripts/verify-blueprints.mjs` — headless runtime check of the plan-20
+  clone + blueprint flows against the mock server (the New Site "From blueprint"
+  section with plugin/theme chips, selecting one to create-from, a one-click
+  Clone under a new name, and Save-as-blueprint round-tripping into the dialog).
 - `cd src-tauri && cargo test --lib router` — unit tests for the M6 hosts-file
   block logic (insert/replace/remove idempotency, CRLF preservation) plus the
   plan-16 port probe, listener-table parsing, compose port mapping and
@@ -137,9 +153,11 @@ src-tauri/               Rust backend (also a cargo workspace root)
   smoke site; **interactive only** (hosts-file writes trigger UAC/elevation
   prompts twice). Run `smoke -- create` first, `smoke -- cleanup` after.
 - `cd src-tauri && cargo run -p lk -- <cmd>` — headless CLI (`lk list |
-  create | start | stop | restart | delete | info | logs | wp | env | login |
-  snapshot list|create|restore|delete | import | doctor`); shares the GUI's data dir,
-  so use `--data-dir` (or
+  create [--blueprint <id|name>] | clone <site> <new-name> | start | stop |
+  restart | delete | info | logs | wp | env | login |
+  snapshot list|create|restore|delete |
+  blueprint list|save|delete|export|import | import | doctor`); shares the GUI's
+  data dir, so use `--data-dir` (or
   `LOCALKIT_DATA_DIR`) for throwaway tests. See docs/plans/7_cli.md.
 - CI: `.github/workflows/ci.yml` runs on push/PR to `main`/`dev` — `npm run
   build`, `cargo check --workspace --all-targets`, `cargo test --workspace`
@@ -419,7 +437,29 @@ src-tauri/               Rust backend (also a cargo workspace root)
   `pre_delete` one best-effort (a broken site must stay deletable) and keeps
   the snapshot dir unless the caller passes `delete_snapshots`. Retention is
   the pure, unit-tested `prunable()`: newest 5 per site per auto kind,
-  `manual` never pruned.
+  `manual` never pruned. Two transient kinds (`clone_source`,
+  `blueprint_source`) back the plan-20 flows and are hidden from the
+  user-facing `list()` (retention still caps orphans via `list_all`).
+- **Clone + blueprints (plan 20):** both build on the snapshot engine and share
+  `snapshot::restore_archives_into` (lay a `(db.sql.gz, wp-content.tar.gz)` pair
+  onto a fresh site, then rewrite the source URL to the clone's). `site::
+  clone_site` snapshots the live source, provisions a target (fresh slug/ports,
+  fresh DB password + WP salts — **secrets are never copied**; `admin_user`/
+  `admin_pass` DO carry over because the copied DB holds them), seeds it, and
+  deletes the transient snapshot. `blueprint.rs` is the same shape but the source
+  is a saved recipe under `<data>/blueprints/<slug>/`: `save` hardlinks the
+  snapshot's artifacts across (`hardlink_or_copy`, copy fallback) so bytes aren't
+  duplicated, captures the plugin/theme list as **display-only** metadata, and
+  drops the snapshot; `create_site` reserves a site (versions matched to the
+  current allowlist via the shared `sync::match_version`), lays the archives
+  down, and rewrites the URL read back out of the imported DB — **no `wp core
+  install`**, the recorded database IS the site, `admin_user` comes from its
+  first administrator with no stored password (mirrors import). A blueprint is
+  portable as a single `.lkbp` (tar.gz of the three artifacts); `import` is
+  safe-extract — only the three known filenames, each via `io::copy` so a
+  crafted link/path can't escape the staging dir. Both flows emit the standard
+  create/import `site-event` stages and call `router::refresh_routes` +
+  `refresh_hosts` — clones and blueprint-sites are ordinary sites.
 - **Port allocation:** `site::free_port` checks the OS listener table
   (`router::listening_ports`), not just a trial bind, and checks the DB port
   (site port + 10000) as well as the site port. Bind-only probing is the

@@ -27,7 +27,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 17 | `17_snapshots` | ✅ shipped | DB + wp-content snapshots with one-click restore; automatic before push/pull/delete. Safety net for 18–20. |
 | 18 | `18_import-remote-site` | ✅ shipped | Clone a ServerKit site down as a *new* local site; adds the extension's `pull/code` endpoint + a `features` capability contract. |
 | 19 | `19_sync-v2-chunked` | ✅ shipped | Chunked resumable push/pull with byte progress + cancel (breaks the 100 MB / in-memory limits). Server-side job-queue handoff deferred — see the plan. |
-| 20 | `20_clone-and-blueprints` | ⬜ | One-click site clone + save-site-as-blueprint creation flows (needs 17). |
+| 20 | `20_clone-and-blueprints` | ✅ shipped | One-click site clone + save-site-as-blueprint creation flows, portable `.lkbp` export/import (needs 17). |
 | 21 | `21_cli-serverkit` | ⬜ | `lk connection/push/pull` + remote listing + shell completions (Track D). |
 | 22 | `22_multi-stack-core` | ⬜ | Kind/capability site model + bring-your-own-compose Docker apps — before 23–25 so new features are capability-aware from day one. |
 | 23 | `23_reconciliation` | ⬜ | Settle DB site status against Docker ground truth; recover half-created sites; Docker-health gating. |
@@ -52,7 +52,10 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
 - ✅ Snapshots + one-click restore (plan 17): DB dump + wp-content archive per
   snapshot, taken automatically before every push, pull, delete and restore;
   retention capped per kind; Snapshots panel, `lk snapshot`, palette command
-- ⬜ Site duplication / clone (plan 20, with blueprints)
+- ✅ Site duplication / clone + reusable blueprints (plan 20): one-click clone
+  (fresh ports/secrets, admin login carried over), save-a-site-as-blueprint,
+  create-from-blueprint in the New Site dialog, and a portable `.lkbp`
+  export/import — all on the plan-17 snapshot engine
 
 ## Track B — ServerKit (M3–M4)
 
@@ -102,6 +105,8 @@ Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferre
   exports), `lk doctor`, `-o json` / `--quiet` / `--data-dir` global flags
 - ✅ `lk import <connection> <remote-site>` (plan 18) — the first ServerKit
   command in the CLI; the rest lands with plan 21
+- ✅ `lk clone <site> <new-name>`, `lk blueprint list|save|delete|export|import`
+  and `lk create --blueprint <id|name>` (plan 20)
 - ⬜ ServerKit from the CLI: `lk connection add/list`, `lk push`, `lk pull`
   (plan 21; library calls already exist)
 - ⬜ Shell completions (plan 21), self-update (future)
