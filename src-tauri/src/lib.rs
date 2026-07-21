@@ -73,6 +73,20 @@ async fn create_site(
     Ok(site)
 }
 
+/// Clone an existing local site into a brand-new one (plan 20).
+#[tauri::command]
+async fn clone_site(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    new_name: String,
+) -> Result<Site, String> {
+    let site = site::clone_site(Some(&app), &state, &id, new_name).await?;
+    // A new running site has to reach the tray menu like any other.
+    tray::refresh(&app);
+    Ok(site)
+}
+
 #[tauri::command]
 async fn start_site(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Site, String> {
     let site = site::start(&state, &id).await?;
@@ -521,6 +535,7 @@ pub fn run() {
             list_sites,
             get_site,
             create_site,
+            clone_site,
             start_site,
             stop_site,
             delete_site,

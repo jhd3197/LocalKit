@@ -452,6 +452,152 @@ async fn do_create(app: Option<&AppHandle>, state: &AppState, site: &Site) -> Re
     Ok(site)
 }
 
+// ---------------------------------------------------------------------------
+// Clone (plan 20)
+// ---------------------------------------------------------------------------
+
+/// Clone an existing local site into a brand-new one.
+///
+/// Built directly on the plan-17 snapshot engine: the source is snapshotted,
+/// a fresh target is provisioned (unique slug, fresh ports, fresh DB password
+/// and WP salts — secrets are never copied), and the snapshot's data is laid
+/// down on top, then its baked-in URLs are search-replaced to the clone's.
+///
+/// Emits the same `site-event` stages the create/import flows do, so the
+/// progress toast works unchanged: `snapshot` (against the source) →
+/// `files` → `containers` → `waiting` → `import` → `done` (against the clone).
+pub async fn clone_site(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    source_id: &str,
+    new_name: String,
+) -> Result<Site, String> {
+    let source = get(state, source_id)?;
+
+    // 1. Snapshot the source. This reuses the retry-heavy DB export and the
+    //    shared archive format, and gives the clone a consistent point-in-time
+    //    copy. `snapshot::create` emits its own `snapshot`-stage progress.
+    let snap = crate::snapshot::create(
+        app,
+        state,
+        source_id,
+        crate::snapshot::KIND_CLONE_SOURCE,
+        Some(format!("cloning {}", source.name)),
+    )
+    .await
+    .map_err(|e| format!("could not snapshot the source site: {e}"))?;
+
+    // 2. Reserve the target: unique slug, fresh ports, `creating` row. Same
+    //    versions as the source so the snapshot's DB/plugins land on a matching
+    //    stack. A hand-made clone has no remote origin.
+    let target = match reserve(
+        state,
+        new_name,
+        source.wp_version.clone(),
+        source.php_version.clone(),
+        None,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            // Nothing was provisioned yet; just drop the transient snapshot.
+            let _ = crate::snapshot::delete(state, source_id, &snap.id);
+            return Err(e);
+        }
+    };
+
+    match do_clone(app, state, &source, &snap.id, &target).await {
+        Ok(site) => {
+            // The clone_source snapshot is an implementation detail — prune it
+            // aggressively the moment it has served its purpose.
+            let _ = crate::snapshot::delete(state, source_id, &snap.id);
+            let url = router::site_public_url(state, &site);
+            emit(
+                app,
+                &site.id,
+                "done",
+                &format!("{} cloned from {} — now running at {url}", site.name, source.name),
+            );
+            Ok(site)
+        }
+        Err(e) => {
+            let _ = crate::snapshot::delete(state, source_id, &snap.id);
+            emit(app, &target.id, "error", &format!("Clone failed: {e}"));
+            let _ = cleanup(state, &target).await;
+            Err(e)
+        }
+    }
+}
+
+/// The provisioning half of a clone: everything after the source snapshot and
+/// the target reservation, so a failure here can be cleaned up wholesale.
+async fn do_clone(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    source: &Site,
+    snapshot_id: &str,
+    target: &Site,
+) -> Result<Site, String> {
+    let dir = target.dir();
+    let id = target.id.as_str();
+
+    emit(app, id, "files", "Writing project files...");
+    write_project_files(target)?;
+
+    // The source runs the same WP/PHP versions, so its images are already
+    // pulled; `compose_up` fetches anything missing rather than stalling
+    // silently, but there is normally nothing to fetch.
+    emit(app, id, "containers", "Starting Docker containers...");
+    docker::compose_up(&dir).await?;
+
+    emit(app, id, "waiting", "Waiting for WordPress to come online...");
+    wait_for_port(target.port, 180).await?;
+    // The port answering is not the same as WordPress being ready (see
+    // `wordpress::wait_for_config`); without this the first wp-cli call races
+    // the image entrypoint still writing wp-config.php.
+    wordpress::wait_for_config(&dir, 24).await?;
+
+    // 3. Lay the source's database + wp-content down onto the fresh target.
+    emit(app, id, "import", &format!("Copying {}'s content...", source.name));
+    crate::snapshot::restore_into(state, &source.id, snapshot_id, target).await?;
+    // The archive brought the source's mu-plugins over the one just written;
+    // one-click login must survive the clone.
+    wordpress::ensure_login_plugin(&dir)?;
+
+    // 4. Rewrite the source's baked-in URLs to the clone's own public URL.
+    let source_url = router::site_public_url(state, source);
+    let target_url = router::site_public_url(state, target);
+    emit(app, id, "import", "Rewriting URLs to the clone...");
+    wordpress::update_site_urls(&dir, &target_url).await?;
+    if source_url != target_url {
+        wordpress::search_replace(&dir, &source_url, &target_url).await?;
+    }
+    // Permalinks are rules tied to the old host; regenerate or every page 404s.
+    // Best effort — a rewrite/cache hiccup must not throw away a live clone.
+    let _ = docker::compose_run(&dir, "wpcli", &["wp", "rewrite", "flush"]).await;
+    let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
+
+    // 5. The clone's admin login is the source's: the copied database carries
+    //    the source's users table, so the source's WP admin password works
+    //    here too. (The MySQL/WP secrets in `.env`/wp-config are fresh — those
+    //    are what "never copy secrets" refers to.)
+    let mut site = target.clone();
+    site.status = "running".into();
+    site.admin_user = source.admin_user.clone();
+    site.admin_pass = source.admin_pass.clone();
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.set_status(id, "running")?;
+        db.update_credentials(id, &site.admin_user, &site.admin_pass)?;
+    }
+    // A new running site joins the router's Caddyfile + hosts block (no-op when
+    // local domains are disabled).
+    router::refresh_routes(state).await;
+    router::refresh_hosts(state).await;
+    Ok(site)
+}
+
 /// Undo a partial creation: tear the compose project down, remove the files,
 /// and drop the DB row. Shared with the import flow — a failed import must not
 /// leave a half-built site on the dashboard.

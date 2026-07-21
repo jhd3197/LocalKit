@@ -30,6 +30,10 @@ pub const KIND_PRE_PUSH: &str = "pre_push";
 pub const KIND_PRE_PULL: &str = "pre_pull";
 pub const KIND_PRE_DELETE: &str = "pre_delete";
 pub const KIND_PRE_RESTORE: &str = "pre_restore";
+/// Transient snapshot a clone takes of its source (plan 20). It exists only to
+/// seed the new site and is deleted the moment the clone finishes — an
+/// implementation detail, not a snapshot the user asked for.
+pub const KIND_CLONE_SOURCE: &str = "clone_source";
 
 pub const KINDS: &[&str] = &[
     KIND_MANUAL,
@@ -37,6 +41,7 @@ pub const KINDS: &[&str] = &[
     KIND_PRE_PULL,
     KIND_PRE_DELETE,
     KIND_PRE_RESTORE,
+    KIND_CLONE_SOURCE,
 ];
 
 /// How many auto snapshots to keep per site per kind.
@@ -175,9 +180,12 @@ pub fn prunable(snapshots: &[Snapshot]) -> Vec<String> {
 // Read
 // ---------------------------------------------------------------------------
 
-/// All snapshots for a site, newest first. A snapshot directory whose manifest
-/// is missing or unreadable is skipped rather than failing the whole listing.
-pub fn list(state: &AppState, site_id: &str) -> Result<Vec<Snapshot>, String> {
+/// Every snapshot on disk for a site, newest first — including the transient
+/// `clone_source` ones. Internal: retention (`prune`) needs to see them to cap
+/// any orphaned by a hard crash mid-clone; the user-facing `list` hides them.
+/// A directory whose manifest is missing or unreadable is skipped rather than
+/// failing the whole listing.
+fn list_all(state: &AppState, site_id: &str) -> Result<Vec<Snapshot>, String> {
     let dir = site_snapshots_dir(&state.data_dir, site_id);
     if !dir.is_dir() {
         return Ok(vec![]);
@@ -197,6 +205,15 @@ pub fn list(state: &AppState, site_id: &str) -> Result<Vec<Snapshot>, String> {
     }
     out.sort_by(|a, b| b.id.cmp(&a.id));
     Ok(out)
+}
+
+/// User-facing snapshot listing, newest first. Hides `clone_source` snapshots:
+/// they are an internal detail of the clone flow, not something the user took.
+pub fn list(state: &AppState, site_id: &str) -> Result<Vec<Snapshot>, String> {
+    Ok(list_all(state, site_id)?
+        .into_iter()
+        .filter(|s| s.kind != KIND_CLONE_SOURCE)
+        .collect())
 }
 
 fn read_manifest(data_dir: &Path, site_id: &str, id: &str) -> Result<Snapshot, String> {
@@ -294,7 +311,7 @@ async fn export_db(dir: &Path) -> Result<String, String> {
 /// Apply the retention policy. Best effort — a failed prune must never fail
 /// the snapshot that triggered it.
 fn prune(state: &AppState, site_id: &str) {
-    let Ok(all) = list(state, site_id) else { return };
+    let Ok(all) = list_all(state, site_id) else { return };
     for id in prunable(&all) {
         let _ = std::fs::remove_dir_all(snapshot_dir(&state.data_dir, site_id, &id));
     }
@@ -402,6 +419,39 @@ fn restore_wp_content(site_dir: &Path, tgz: &[u8]) -> Result<(), String> {
     archive
         .unpack(site_dir)
         .map_err(|e| format!("failed to restore wp-content: {e}"))
+}
+
+/// Seed a *target* site from a snapshot taken of a *different* site (plan 20).
+///
+/// The clone flow snapshots a source site, provisions a fresh target, and lays
+/// the source's data down onto it here. Distinct from `restore` on three
+/// counts: the snapshot lives under another site's id (`source_id`), no
+/// `pre_restore` snapshot is taken (the target is brand-new — there is nothing
+/// worth preserving), and the source site is never touched. The target must
+/// already be running: importing its database needs the stack up.
+///
+/// The archives are the same format as `restore` reads, so this reuses
+/// `restore_wp_content` — the wp-content bytes are ours, not hostile remote
+/// input, so the plain contents-swap is the right tool (no safe-extract dance).
+pub async fn restore_into(
+    state: &AppState,
+    source_id: &str,
+    snapshot_id: &str,
+    target: &site::Site,
+) -> Result<(), String> {
+    let src = snapshot_dir(&state.data_dir, source_id, snapshot_id);
+    let db_gz = std::fs::read(src.join(DB_FILE))
+        .map_err(|e| format!("failed to read the source snapshot's database dump: {e}"))?;
+    let sql = gunzip(&db_gz)?;
+    let code_tgz = std::fs::read(src.join(CODE_FILE))
+        .map_err(|e| format!("failed to read the source snapshot's wp-content archive: {e}"))?;
+
+    let dir = target.dir();
+    wordpress::import_db(&dir, &sql).await?;
+    restore_wp_content(&dir, &code_tgz)?;
+    // Object/transient caches from the fresh install can outlive the import.
+    let _ = docker::compose_run(&dir, "wpcli", &["wp", "cache", "flush"]).await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
