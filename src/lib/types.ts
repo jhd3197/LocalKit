@@ -39,6 +39,8 @@ export interface Site {
   wp_version: string;
   php_version: string;
   status: string;
+  /** Plan 23 — when `status` was last written (backend forward-only guard). */
+  status_updated_at?: string;
   admin_user: string;
   admin_pass: string;
   created_at: string;

@@ -154,6 +154,13 @@ pub struct Site {
     pub wp_version: String,
     pub php_version: String,
     pub status: String,
+    /// When `status` was last written (RFC3339, UTC). The reconciler's
+    /// forward-only guard: a settle only lands if the stored timestamp still
+    /// matches what the reconciler observed, so a newer command/event write is
+    /// never clobbered by a stale inspect — and vice versa (plan 23). Empty on
+    /// a pre-plan-23 row, which sorts as "long ago".
+    #[serde(default)]
+    pub status_updated_at: String,
     pub admin_user: String,
     pub admin_pass: String,
     pub created_at: String,
@@ -523,6 +530,7 @@ pub(crate) async fn reserve(
         None => (None, None),
     };
 
+    let created_at = chrono::Utc::now().to_rfc3339();
     let mut site = Site {
         id: Uuid::new_v4().to_string(),
         name,
@@ -532,9 +540,10 @@ pub(crate) async fn reserve(
         wp_version,
         php_version,
         status: "creating".into(),
+        status_updated_at: created_at.clone(),
         admin_user: DEFAULT_ADMIN_USER.into(),
         admin_pass: String::new(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at,
         connection_id,
         remote_site_id,
         kind,
@@ -1058,6 +1067,7 @@ mod tests {
             wp_version: String::new(),
             php_version: String::new(),
             status: "running".into(),
+            status_updated_at: "2026-01-01T00:00:00Z".into(),
             admin_user: DEFAULT_ADMIN_USER.into(),
             admin_pass: String::new(),
             created_at: "2026-01-01T00:00:00Z".into(),

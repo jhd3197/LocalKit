@@ -134,6 +134,21 @@ impl Db {
                 )
                 .map_err(|e| format!("migration 6 failed: {e}"))?;
         }
+        if version < 7 {
+            // Plan 23: when `status` was last written, for the reconciler's
+            // forward-only guard. Empty default = "long ago" (it sorts before
+            // any RFC3339 timestamp), so a legacy row is always safe for the
+            // reconciler to settle on its first pass, and no command write it
+            // races can ever be clobbered by a stale observation.
+            self.conn
+                .execute_batch(
+                    "
+                    ALTER TABLE sites ADD COLUMN status_updated_at TEXT NOT NULL DEFAULT '';
+                    PRAGMA user_version = 7;
+                    ",
+                )
+                .map_err(|e| format!("migration 7 failed: {e}"))?;
+        }
         Ok(())
     }
 
@@ -207,6 +222,7 @@ impl Db {
             wp_version: row.get("wp_version")?,
             php_version: row.get("php_version")?,
             status: row.get("status")?,
+            status_updated_at: row.get("status_updated_at")?,
             admin_user: row.get("admin_user")?,
             admin_pass: row.get("admin_pass")?,
             created_at: row.get("created_at")?,
@@ -228,9 +244,9 @@ impl Db {
         self.conn
             .execute(
                 "INSERT INTO sites
-                 (id, name, slug, path, port, wp_version, php_version, status, admin_user, admin_pass,
-                  created_at, connection_id, remote_site_id, kind, config_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 (id, name, slug, path, port, wp_version, php_version, status, status_updated_at,
+                  admin_user, admin_pass, created_at, connection_id, remote_site_id, kind, config_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     site.id,
                     site.name,
@@ -240,6 +256,7 @@ impl Db {
                     site.wp_version,
                     site.php_version,
                     site.status,
+                    site.status_updated_at,
                     site.admin_user,
                     site.admin_pass,
                     site.created_at,
@@ -277,11 +294,41 @@ impl Db {
         Ok(out)
     }
 
+    /// Write a site's status from an explicit command/event. Always stamps
+    /// `status_updated_at = now`, so a command write is dated "now" and can
+    /// never lose to a stale reconciler observation (plan 23 forward-only).
     pub fn set_status(&self, id: &str, status: &str) -> Result<(), String> {
+        let now = chrono::Utc::now().to_rfc3339();
         self.conn
-            .execute("UPDATE sites SET status = ?1 WHERE id = ?2", params![status, id])
+            .execute(
+                "UPDATE sites SET status = ?1, status_updated_at = ?2 WHERE id = ?3",
+                params![status, now, id],
+            )
             .map_err(|e| format!("failed to update site status: {e}"))?;
         Ok(())
+    }
+
+    /// Settle a site's status from the reconciler (plan 23). This is a
+    /// compare-and-swap on `status_updated_at`: the write only lands if the
+    /// stored timestamp still equals `expected_prev` — i.e. no command/event
+    /// wrote a newer status between the reconciler reading the row and settling
+    /// it. Returns whether the settle was applied (false = a newer write won).
+    pub fn settle_status(
+        &self,
+        id: &str,
+        status: &str,
+        expected_prev: &str,
+    ) -> Result<bool, String> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sites SET status = ?1, status_updated_at = ?2
+                 WHERE id = ?3 AND status_updated_at = ?4",
+                params![status, now, id, expected_prev],
+            )
+            .map_err(|e| format!("failed to settle site status: {e}"))?;
+        Ok(changed > 0)
     }
 
     pub fn update_credentials(&self, id: &str, user: &str, pass: &str) -> Result<(), String> {
@@ -481,6 +528,7 @@ mod tests {
             wp_version: "6.7".into(),
             php_version: "8.3".into(),
             status: "running".into(),
+            status_updated_at: "2026-07-20T00:00:00Z".into(),
             admin_user: "admin".into(),
             admin_pass: "secret".into(),
             created_at: "2026-07-20T00:00:00Z".into(),
@@ -547,7 +595,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
 
         // The pre-existing site survives, reads back with a NULL origin, and —
         // crucially for plan 22 — migrates to the fully-capable WordPress stack:
@@ -561,6 +609,37 @@ mod tests {
         assert_eq!(legacy.config.service, "wordpress");
         assert_eq!(legacy.config.sync_path, "wp-content");
         assert_eq!(legacy.capabilities, crate::site::Capabilities::WORDPRESS);
+        // Migration 7 back-fills an empty status timestamp, which sorts before
+        // any real one — so the reconciler may settle a legacy row on sight.
+        assert_eq!(legacy.status_updated_at, "");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn settle_status_is_a_compare_and_swap_on_the_timestamp() {
+        let path = temp_db_path("settle");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let db = Db::open(&path).unwrap();
+
+        // A row whose status was written "long ago" (empty timestamp).
+        let mut s = site("s-1", "one");
+        s.status = "running".into();
+        s.status_updated_at = String::new();
+        db.insert_site(&s).unwrap();
+
+        // The reconciler observed `expected_prev = ""` and settles to stopped.
+        let applied = db.settle_status("s-1", "stopped", "").unwrap();
+        assert!(applied, "settle lands when the timestamp still matches");
+        let after = db.get_site("s-1").unwrap();
+        assert_eq!(after.status, "stopped");
+        assert_ne!(after.status_updated_at, "", "settle stamps a fresh timestamp");
+
+        // A second settle carrying the now-stale `""` must lose: a command (the
+        // first settle) advanced the timestamp, so the CAS matches no row.
+        let applied = db.settle_status("s-1", "running", "").unwrap();
+        assert!(!applied, "a settle carrying a stale timestamp is refused");
+        assert_eq!(db.get_site("s-1").unwrap().status, "stopped");
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

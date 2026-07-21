@@ -1155,6 +1155,7 @@ mod tests {
             wp_version: String::new(),
             php_version: String::new(),
             status: "running".into(),
+            status_updated_at: "2026-07-21T00:00:00Z".into(),
             admin_user: "admin".into(),
             admin_pass: String::new(),
             created_at: "2026-07-21T00:00:00Z".into(),

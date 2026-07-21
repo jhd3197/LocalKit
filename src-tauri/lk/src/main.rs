@@ -1925,6 +1925,7 @@ mod tests {
             wp_version: "6.7".into(),
             php_version: "8.3".into(),
             status: "running".into(),
+            status_updated_at: "2026-01-01T00:00:00Z".into(),
             admin_user: "admin".into(),
             admin_pass: "secret".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
