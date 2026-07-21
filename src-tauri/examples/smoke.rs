@@ -1,7 +1,7 @@
 //! End-to-end smoke test driver for the real LocalKit site lifecycle.
 //! Runs outside the Tauri runtime (no AppHandle; events are skipped).
 //!
-//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|clone|delete|cleanup>
+//! Usage: cargo run --example smoke -- <create|verify|info|stop|start|clone|blueprint|delete|cleanup>
 //!
 //! Uses a fixed smoke data dir + site name so subcommands can run as separate
 //! invocations (each one reconstructs the same AppState).
@@ -9,13 +9,17 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use localkit_lib::{db::Db, docker, site, snapshot, wordpress, AppState};
+use localkit_lib::{blueprint, db::Db, docker, site, snapshot, wordpress, AppState};
 
 const SMOKE_NAME: &str = "Smoke Test";
 const SMOKE_SLUG: &str = "smoke-test";
 /// Plan 20 clone verification: a throwaway copy of the smoke site.
 const CLONE_NAME: &str = "Smoke Clone";
 const CLONE_SLUG: &str = "smoke-clone";
+/// Plan 20 blueprint verification: a template + a site stamped from it.
+const BP_NAME: &str = "Smoke Blueprint";
+const BP_FROM_NAME: &str = "Smoke From BP";
+const BP_FROM_SLUG: &str = "smoke-from-bp";
 
 fn make_state() -> AppState {
     let data_dir = std::env::temp_dir().join("localkit-smoke");
@@ -229,6 +233,119 @@ async fn clone(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Blueprint verification (plan 20): save the smoke site as a blueprint, assert
+/// its artifacts landed and the transient snapshot was pruned, then stamp a new
+/// site out of it and assert the source's content rode along.
+async fn blueprint_smoke(state: &AppState) -> Result<(), String> {
+    let source = find_site(state)?;
+    // Idempotent: drop leftovers from a previous run.
+    remove_from_bp(state).await;
+    for bp in blueprint::list(state)?.iter().filter(|b| b.manifest.name == BP_NAME) {
+        let _ = blueprint::delete(state, &bp.id);
+    }
+
+    if source.status != "running" {
+        site::start(state, &source.id).await?;
+    }
+
+    // Arrange: a uniquely-titled published post on the source.
+    const MARKER: &str = "LocalKit blueprint smoke marker";
+    let titles = wp(
+        &source,
+        &["post", "list", "--post_status=publish", "--field=post_title", "--format=csv"],
+    )
+    .await
+    .unwrap_or_default();
+    if !titles.contains(MARKER) {
+        wp(
+            &source,
+            &["post", "create", &format!("--post_title={MARKER}"), "--post_status=publish"],
+        )
+        .await?;
+    }
+
+    // Save.
+    let bp = blueprint::save(
+        None,
+        state,
+        &source.id,
+        BP_NAME.to_string(),
+        Some("smoke blueprint".into()),
+    )
+    .await?;
+    println!(
+        "BLUEPRINT id={} plugins={} theme={} db={} B code={} B",
+        bp.id,
+        bp.manifest.plugins.len(),
+        bp.manifest.theme,
+        bp.db_bytes,
+        bp.code_bytes
+    );
+
+    // Assert: artifacts landed.
+    let dir = blueprint::blueprints_root(&state.data_dir).join(&bp.id);
+    for f in ["blueprint.json", "db.sql.gz", "wp-content.tar.gz"] {
+        assert!(dir.join(f).exists(), "blueprint missing {f}");
+    }
+    assert!(bp.db_bytes > 0, "empty blueprint database dump");
+    assert!(bp.code_bytes > 0, "empty blueprint wp-content archive");
+
+    // Assert: the transient blueprint_source snapshot was pruned.
+    let snaps = snapshot::list(state, &source.id)?;
+    assert!(
+        snaps.iter().all(|s| s.kind != snapshot::KIND_BLUEPRINT_SOURCE),
+        "a blueprint_source snapshot was left behind"
+    );
+
+    // Act: stamp a new site out of the blueprint.
+    let created = blueprint::create_site(None, state, &bp.id, Some(BP_FROM_NAME.to_string())).await?;
+    println!(
+        "CREATED FROM BLUEPRINT id={} slug={} port={} admin={}",
+        created.id, created.slug, created.port, created.admin_user
+    );
+
+    // Assert: it serves HTTP and carries the source's content.
+    let url = format!("http://localhost:{}", created.port);
+    let home = http_code(&format!("{url}/"));
+    assert!(
+        ["200", "301", "302"].contains(&home.as_str()),
+        "blueprint site home returned unexpected status: {home}"
+    );
+    let created_titles = wp(
+        &created,
+        &["post", "list", "--post_status=publish", "--field=post_title", "--format=csv"],
+    )
+    .await?;
+    assert!(
+        created_titles.contains(MARKER),
+        "marker post missing from the blueprint site: {created_titles:?}"
+    );
+    println!("BLUEPRINT SMOKE OK on {url}");
+
+    // Tidy up.
+    remove_from_bp(state).await;
+    let _ = blueprint::delete(state, &bp.id);
+    Ok(())
+}
+
+async fn remove_from_bp(state: &AppState) {
+    let sites = {
+        let db = state.db.lock().expect("lock db");
+        db.list_sites().unwrap_or_default()
+    };
+    for s in sites {
+        if s.slug == BP_FROM_SLUG || s.slug.starts_with(&format!("{BP_FROM_SLUG}-")) {
+            let _ = site::delete(None, state, &s.id, true).await;
+            println!("cleaned blueprint site {}", s.slug);
+        }
+    }
+    let orphan = state.data_dir.join("sites").join(BP_FROM_SLUG);
+    if orphan.exists() {
+        let _ = docker::compose_down(&orphan, true).await;
+        let _ = std::fs::remove_dir_all(&orphan);
+    }
+}
+
 /// Force-remove any clone leftovers (compose project + dir + db rows + snapshots).
 async fn remove_clone(state: &AppState) {
     let sites = {
@@ -262,8 +379,9 @@ async fn delete(state: &AppState) -> Result<(), String> {
 
 /// Force-remove any smoke-test leftovers (compose project + dir + db rows).
 async fn cleanup(state: &AppState) -> Result<(), String> {
-    // A clone from the `clone` subcommand is a smoke-test leftover too.
+    // Sites the `clone` / `blueprint` subcommands leave behind are leftovers too.
     remove_clone(state).await;
+    remove_from_bp(state).await;
     let sites = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.list_sites()?
@@ -306,6 +424,7 @@ async fn main() {
         "stop" => stop(&state).await,
         "start" => start(&state).await,
         "clone" => clone(&state).await,
+        "blueprint" => blueprint_smoke(&state).await,
         "delete" => delete(&state).await,
         "cleanup" => cleanup(&state).await,
         other => Err(format!("unknown command: {other}")),
