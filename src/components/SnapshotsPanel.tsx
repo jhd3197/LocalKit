@@ -4,6 +4,8 @@ import { toastError } from "../lib/errors";
 import { toast } from "../stores/toast";
 import { isTerminalStage, useSites } from "../stores/sites";
 import type { Snapshot, SnapshotKind } from "../lib/types";
+import SectionTitle from "./SectionTitle";
+import { CameraIcon } from "./icons";
 
 /**
  * Snapshots panel on the site detail page (plan 17).
@@ -112,7 +114,7 @@ export default function SnapshotsPanel({ siteId }: { siteId: string }) {
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Snapshots</h2>
+        <SectionTitle icon={CameraIcon}>Snapshots</SectionTitle>
         <div className="flex items-center gap-2">
           <input
             value={note}

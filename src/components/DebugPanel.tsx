@@ -3,6 +3,8 @@ import { ipc } from "../lib/ipc";
 import { toastError } from "../lib/errors";
 import { toast } from "../stores/toast";
 import type { DebugStatus } from "../lib/types";
+import SectionTitle from "./SectionTitle";
+import { BugIcon } from "./icons";
 
 /**
  * Tools → Debug (plan 24).
@@ -70,7 +72,7 @@ export default function DebugPanel({ siteId }: { siteId: string }) {
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Debug</h2>
+        <SectionTitle icon={BugIcon}>Debug</SectionTitle>
         <button
           onClick={() => void toggle()}
           disabled={!status || toggling}
