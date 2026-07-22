@@ -68,17 +68,27 @@ npm run tauri build
 |                            Panel Principal                             |                            Vista de Lista                            |
 | :--------------------------------------------------------------: | :------------------------------------------------------------: |
 |      ![Panel Principal](screenshots/dashboard.png)       |      ![Vista de lista](screenshots/dashboard-list.png)       |
-|   _Todos tus sitios de un vistazo, con insignias de estado de contenedores en vivo_   |   _Una versión más densa del panel para muchos sitios_   |
+|   _Todos tus sitios de un vistazo — WordPress, PHP y Docker — con insignias de estado en vivo_   |   _Una vista de tabla más densa para muchos sitios_   |
 
-|                             Detalle del Sitio                              |                           Nuevo Sitio                            |
+|                             Detalle del Sitio                              |                           Herramientas                            |
 | :-------------------------------------------------------------: | :------------------------------------------------------------: |
-|         ![Detalle del sitio](screenshots/site-detail.png)         |      ![Nuevo sitio](screenshots/new-site.png)     |
-| _Credenciales, información de wp-cli, sincronización con ServerKit e historial_ | _Elige un nombre, versión de WordPress y versión de PHP_ |
+|         ![Detalle del sitio](screenshots/site-detail.png)         |      ![Herramientas](screenshots/site-tools.png)     |
+| _Credenciales, base de datos, información de wp-cli, snapshots y sincronización_ | _Explorador de BD Adminer, buscar-reemplazar seguro, WP\_DEBUG y editor de configuración — dentro de la app_ |
 
-|                           Ajustes                            |                           Dominios Locales                           |
+|                             Snapshots                             |                           Nuevo Sitio                            |
+| :-------------------------------------------------------------: | :------------------------------------------------------------: |
+|         ![Snapshots](screenshots/snapshots.png)         |      ![Nuevo sitio](screenshots/new-site.png)     |
+| _Restauración en un clic; se toma uno antes de cada push, pull y borrado_ | _WordPress, PHP/Laravel o un proyecto Docker — en blanco o desde un blueprint_ |
+
+|                             Importar                             |                           Ajustes                            |
+| :-------------------------------------------------------------: | :------------------------------------------------------------: |
+|         ![Importar sitio remoto](screenshots/import-site.png)         |      ![Ajustes](screenshots/settings.png)     |
+| _Clona un sitio remoto de ServerKit como una copia local nueva_ | _Estado de Docker, actualizaciones, rutas de datos y valores por defecto_ |
+
+|                           Dominios Locales                            |                           ServerKit                           |
 | :--------------------------------------------------------------: | :-------------------------------------------------------------: |
-|            ![Ajustes](screenshots/settings.png)            |      ![Dominios locales](screenshots/settings-domains.png)      |
-|      _Estado de Docker, rutas de datos y conexiones con ServerKit_      |     _Sirve sitios como `http://<slug>.test` mediante un router Caddy compartido_     |
+|            ![Dominios locales](screenshots/settings-domains.png)            |      ![ServerKit](screenshots/settings-serverkit.png)      |
+|      _Sirve sitios como `http://<slug>.test` mediante un router Caddy compartido_      |     _Explora los sitios de un servidor y haz push/pull o impórtalos_     |
 <!-- LOCALKIT:SHOTS:END -->
 
 ## 🎯 Funcionalidades

@@ -70,17 +70,27 @@ npm run tauri build
 |                            Dashboard                             |                            List View                            |
 | :--------------------------------------------------------------: | :------------------------------------------------------------: |
 |      ![Dashboard](docs/screenshots/dashboard.png)       |      ![List view](docs/screenshots/dashboard-list.png)       |
-|   _All your sites at a glance, with live container status badges_   |   _A denser take on the dashboard for lots of sites_   |
+|   _Every site at a glance — WordPress, PHP and Docker — with live status badges_   |   _A denser table view for lots of sites_   |
 
-|                             Site Detail                              |                           New Site                            |
+|                             Site Detail                              |                           Tools                            |
 | :-------------------------------------------------------------: | :------------------------------------------------------------: |
-|         ![Site detail](docs/screenshots/site-detail.png)         |      ![New site](docs/screenshots/new-site.png)     |
-| _Credentials, wp-cli info, ServerKit sync & history_ | _Pick a name, WordPress version, and PHP version_ |
+|         ![Site detail](docs/screenshots/site-detail.png)         |      ![Tools tab](docs/screenshots/site-tools.png)     |
+| _Credentials, database, wp-cli info, snapshots & sync_ | _Adminer DB browser, safe search-replace, WP\_DEBUG & a config editor — in-app_ |
 
-|                           Settings                            |                           Local Domains                           |
+|                             Snapshots                             |                           New Site                            |
+| :-------------------------------------------------------------: | :------------------------------------------------------------: |
+|         ![Snapshots](docs/screenshots/snapshots.png)         |      ![New site](docs/screenshots/new-site.png)     |
+| _One-click restore; one is taken before every push, pull & delete_ | _WordPress, PHP/Laravel or a Docker project — blank or from a blueprint_ |
+
+|                             Import                             |                           Settings                            |
+| :-------------------------------------------------------------: | :------------------------------------------------------------: |
+|         ![Import remote site](docs/screenshots/import-site.png)         |      ![Settings](docs/screenshots/settings.png)     |
+| _Clone a remote ServerKit site down as a fresh local copy_ | _Docker status, updates, data paths & defaults_ |
+
+|                           Local Domains                            |                           ServerKit                           |
 | :--------------------------------------------------------------: | :-------------------------------------------------------------: |
-|            ![Settings](docs/screenshots/settings.png)            |      ![Local domains](docs/screenshots/settings-domains.png)      |
-|      _Docker status, data paths, and ServerKit connections_      |     _Serve sites as `http://<slug>.test` via a shared Caddy router_     |
+|            ![Local domains](docs/screenshots/settings-domains.png)            |      ![ServerKit](docs/screenshots/settings-serverkit.png)      |
+|      _Serve sites as `http://<slug>.test` via a shared Caddy router_      |     _Browse a server's sites and push/pull or import them_     |
 <!-- LOCALKIT:SHOTS:END -->
 
 ## 🎯 Features
