@@ -27,6 +27,38 @@ pub(crate) fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// The Docker CLI executable to launch, resolved to an absolute path when we
+/// can find one.
+///
+/// This matters only on Windows, and only for callers that spawn Docker
+/// through `portable-pty` (the terminal). Docker Desktop ships *both* a
+/// `docker` POSIX shell script and the real `docker.exe` in the same
+/// `resources\bin` directory. `std::process::Command` appends `.exe` for us,
+/// so the rest of the app resolves the binary correctly — but `portable-pty`'s
+/// PATH search tries the bare name `docker` first and picks the script, which
+/// `CreateProcessW` rejects with "%1 is not a valid Win32 application"
+/// (os error 193). Resolving `docker.exe` ourselves — to an absolute path when
+/// it is on PATH — sidesteps that quirk entirely.
+pub(crate) fn docker_program() -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        // Prefer an absolute `docker.exe` found on PATH; fall back to the bare
+        // name (`CommandBuilder` searches PATH, and the explicit `.exe` still
+        // avoids the extension-less script).
+        return std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .map(|dir| dir.join("docker.exe"))
+            .find(|candidate| candidate.is_file())
+            .map(|path| path.into_os_string())
+            .unwrap_or_else(|| "docker.exe".into());
+    }
+    #[cfg(not(windows))]
+    {
+        "docker".into()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DockerStatus {
     pub available: bool,
