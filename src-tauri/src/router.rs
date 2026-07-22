@@ -1118,12 +1118,28 @@ mod tests {
 
     #[tokio::test]
     async fn probe_returns_empty_when_ports_are_free() {
-        let a = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let b = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let (pa, pb) = (a.local_addr().unwrap().port(), b.local_addr().unwrap().port());
-        drop(a);
-        drop(b);
-        assert_eq!(probe_ports(pa, pb).await, Vec::new());
+        // Probing genuinely-free ports must report no conflicts. `probe_port`
+        // shells out to identify a port's owner, and that subprocess is slow
+        // enough that a concurrently-running test can grab a just-released
+        // ephemeral port before the bind check runs — so a single shot is
+        // racy. Retry with fresh ports: a transient reassignment clears on the
+        // next attempt, while a real regression fails every one.
+        const ATTEMPTS: usize = 5;
+        for attempt in 1..=ATTEMPTS {
+            let a = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let b = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let (pa, pb) = (a.local_addr().unwrap().port(), b.local_addr().unwrap().port());
+            drop(a);
+            drop(b);
+            let conflicts = probe_ports(pa, pb).await;
+            if conflicts.is_empty() {
+                return;
+            }
+            assert!(
+                attempt < ATTEMPTS,
+                "free ports {pa}/{pb} still reported in use after {ATTEMPTS} attempts: {conflicts:?}"
+            );
+        }
     }
 
     #[tokio::test]
