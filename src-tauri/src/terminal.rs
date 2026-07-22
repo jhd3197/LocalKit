@@ -68,7 +68,7 @@ impl PtyManager {
             })
             .map_err(|e| format!("failed to open PTY: {e}"))?;
 
-        let mut cmd = CommandBuilder::new("docker");
+        let mut cmd = CommandBuilder::new(crate::docker::docker_program());
         cmd.args(["compose", "exec", service, "bash"]);
         cmd.cwd(site_dir);
         cmd.env("TERM", "xterm-256color");
