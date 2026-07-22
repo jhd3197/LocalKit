@@ -1,6 +1,7 @@
 import { useDocker } from "../stores/docker";
 import { useNav } from "../stores/nav";
-import { GearIcon, TerminalIcon } from "./icons";
+import { useSites } from "../stores/sites";
+import { GearIcon, LayersIcon, TerminalIcon } from "./icons";
 import logo from "../assets/logo.png";
 
 export default function Sidebar() {
@@ -9,6 +10,13 @@ export default function Sidebar() {
   const settingsOpen = useNav((s) => s.settingsOpen);
   const setSettingsOpen = useNav((s) => s.setSettingsOpen);
   const docker = useDocker((s) => s.status);
+  // Live "n up" pill on Sites — the sidebar answers "is anything running?"
+  // without a trip to the dashboard. Selector returns a primitive, so no
+  // re-render churn.
+  const upCount = useSites(
+    (s) =>
+      s.sites.filter((x) => x.live_status === "running" || x.live_status === "degraded").length,
+  );
   // Only claim "unavailable" once a check has actually returned (plan 23) — a
   // null status is "not checked yet", not "down".
   const dockerDown = docker != null && !docker.available;
@@ -35,7 +43,17 @@ export default function Sidebar() {
           }}
           className={navBtn(sitesActive)}
         >
+          <LayersIcon className="h-4 w-4" />
           Sites
+          {upCount > 0 && (
+            <span
+              title={`${upCount} running`}
+              className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400"
+            >
+              <span className="h-1 w-1 rounded-full bg-current" />
+              {upCount}
+            </span>
+          )}
         </button>
         <button
           onClick={() => {
