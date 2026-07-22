@@ -32,6 +32,13 @@ function staticCommands(): Command[] {
   const nav = useNav.getState();
   return [
     {
+      id: "go-home",
+      title: "Go to Home",
+      group: "Navigation",
+      defaultCombo: "mod+0",
+      run: () => nav.navigate({ name: "home" }),
+    },
+    {
       id: "go-sites",
       title: "Go to Sites",
       group: "Navigation",

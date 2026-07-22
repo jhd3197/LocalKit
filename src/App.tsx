@@ -12,6 +12,7 @@ import CommandPalette from "./components/CommandPalette";
 import KeyboardShortcutsDialog from "./components/KeyboardShortcutsDialog";
 import NewSiteDialog from "./components/NewSiteDialog";
 import ImportSiteDialog from "./components/ImportSiteDialog";
+import Home from "./pages/Home";
 import Dashboard from "./pages/Dashboard";
 import SiteDetail from "./pages/SiteDetail";
 import TerminalPage from "./pages/Terminal";
@@ -52,9 +53,14 @@ export default function App() {
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-950 text-zinc-200">
       <Sidebar />
-      <main className={`flex-1 ${page.name === "terminal" ? "overflow-hidden" : "overflow-y-auto"}`}>
+      <main
+        className={`flex-1 ${
+          page.name === "terminal" ? "overflow-hidden" : "bg-blueprint overflow-y-auto"
+        }`}
+      >
+        {page.name === "home" && <Home />}
         {page.name === "sites" && <Dashboard />}
-        {page.name === "site" && <SiteDetail id={page.id} />}
+        {page.name === "site" && <SiteDetail id={page.id} tab={page.tab} />}
         {page.name === "terminal" && <TerminalPage key={page.siteId ?? ""} siteId={page.siteId} />}
       </main>
 
