@@ -1,6 +1,6 @@
 # 27 — Visual identity pass: site tiles, action icons, micro-polish
 
-Status: ⬜ planned
+Status: ✅ shipped
 
 Frontend-only. No Rust, no migrations. Two icon dependencies, per the
 maintainer's direction (the Faro pattern): `lucide-react` for UI chrome and
