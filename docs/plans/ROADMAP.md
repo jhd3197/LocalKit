@@ -34,6 +34,7 @@ The file numbers ARE the build order — each plan leans on the ones before it.
 | 24 | `24_site-tools` | ✅ shipped | Tools tab: Adminer sidecar, serialization-safe search-replace, WP_DEBUG + log viewer, config editor. |
 | 25 | `25_release-polish-completion` | ✅ | M5 remainder: update checker, OS keyring for API keys, OS notifications, real test suite. |
 | 26 | `26_php-laravel-stack` | ✅ shipped | Generated PHP/Laravel stack + engine-native DB sync + per-kind ServerKit sync/import parity (needs 22, 17–19). Server-side php *hosting* awaits a php backend; `serverkit-localkit` advertises `kinds: ['wordpress']` until then. |
+| 27 | `27_visual-identity-pass` | ⬜ planned | Frontend-only identity layer: deterministic monogram site tiles, icons on every action, sidebar running count, empty state, hover micro-motion. |
 
 Status glyphs: ✅ shipped · 🔄 partial · ⬜ not started · 🅿️ deferred
 
