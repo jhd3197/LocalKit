@@ -1,11 +1,18 @@
+import { BrandIcon, kindIcon } from "../lib/brandIcons";
+
 /**
- * Deterministic monogram tile — a site's face (plan 27).
+ * Deterministic monogram tile — a site's face (plans 27/28).
  *
  * The hue is hashed from the *slug* (not the display name), so it survives
- * renames-in-place, and is identical in grid, list and detail views. The tile
- * doubles as a status light: up sites render saturated with a same-hue glow,
- * everything else keeps the hue but dimmed — identity persists while the
- * site sleeps.
+ * renames-in-place, and is identical in the rail, grid, list and detail
+ * views. The tile doubles as a status light: up sites render saturated with
+ * a same-hue glow, everything else keeps the hue but dimmed — identity
+ * persists while the site sleeps. Dimmed lightness comes from the theme
+ * token layer, so tiles read correctly in light mode too.
+ *
+ * Pass `kind` to stamp the real brand mark (WordPress / Docker / PHP) on
+ * the corner — the Faro pattern: the monogram stays the identity, the
+ * stamp adds recognizability.
  */
 
 const SIZES = {
@@ -35,11 +42,14 @@ export default function SiteTile({
   name,
   slug,
   status,
+  kind,
   size = "md",
 }: {
   name: string;
   slug: string;
   status: string;
+  /** Site kind — when set, the brand mark is stamped on the corner. */
+  kind?: string;
   size?: keyof typeof SIZES;
 }) {
   const hue = hueFromSlug(slug);
@@ -51,19 +61,24 @@ export default function SiteTile({
         color: "#fff",
       }
     : {
-        background: `hsl(${hue} 26% 17%)`,
+        background: `hsl(${hue} 26% var(--tile-dim-bg-l))`,
         boxShadow: "inset 0 1px 0 hsl(0 0% 100% / 0.05)",
-        color: `hsl(${hue} 42% 70%)`,
+        color: `hsl(${hue} 42% var(--tile-dim-fg-l))`,
       };
   return (
     <span
       aria-hidden
       style={style}
-      className={`flex shrink-0 select-none items-center justify-center font-semibold tracking-wide ${
+      className={`relative flex shrink-0 select-none items-center justify-center font-semibold tracking-wide ${
         SIZES[size]
       } ${status === "creating" ? "animate-pulse" : ""}`}
     >
       {initials(name)}
+      {kind && size !== "sm" && (
+        <span className="absolute -bottom-1 -right-1 flex h-[18px] w-[18px] items-center justify-center rounded-md bg-zinc-950 text-zinc-300 ring-1 ring-zinc-700">
+          <BrandIcon icon={kindIcon(kind)} size={11} />
+        </span>
+      )}
     </span>
   );
 }

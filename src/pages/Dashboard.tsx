@@ -9,8 +9,8 @@ import { useSites } from "../stores/sites";
 import { useBlueprints } from "../stores/blueprints";
 import { KIND_DOCKER, KIND_PHP, type SiteWithStatus } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
-import KindBadge from "../components/KindBadge";
 import SiteTile from "../components/SiteTile";
+import { BrandIcon, kindIcon } from "../lib/brandIcons";
 import CloneSiteDialog from "../components/CloneSiteDialog";
 import {
   ArrowUpRightIcon,
@@ -164,11 +164,14 @@ function useSiteActions(site: SiteWithStatus) {
   };
 }
 
-const ghostBtn =
-  "inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-100 disabled:opacity-50";
+// Icon-only action buttons (plan 28) — the glyph + tooltip carry the word.
+const iconBtn =
+  "rounded-md border border-zinc-700 p-1.5 text-zinc-400 transition-colors hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-100 disabled:opacity-50";
 // The hero action on an up site — the one thing you most likely came to do.
-const openBtn =
-  "inline-flex items-center gap-1.5 rounded-md border border-violet-700/60 bg-violet-600/10 px-2.5 py-1 text-xs font-medium text-violet-300 transition-colors hover:bg-violet-600/25 hover:text-violet-200 disabled:opacity-50";
+const openIconBtn =
+  "rounded-md border border-violet-700/60 bg-violet-600/10 p-1.5 text-violet-300 transition-colors hover:bg-violet-600/25 hover:text-violet-200 disabled:opacity-50";
+const dangerIconBtn =
+  "rounded-md border border-red-900 p-1.5 text-red-400 transition-colors hover:border-red-700 hover:bg-red-500/10 disabled:opacity-50";
 const resumeBtn =
   "inline-flex items-center gap-1.5 rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50";
 
@@ -190,9 +193,14 @@ function IncompleteActions({ a }: { a: ReturnType<typeof useSiteActions> }) {
         <PlayIcon className="h-3.5 w-3.5" />
         Resume setup
       </button>
-      <button onClick={a.cleanup} disabled={a.busy} className={dangerBtn}>
-        <TrashIcon className="h-3.5 w-3.5" />
-        Clean up
+      <button
+        onClick={a.cleanup}
+        disabled={a.busy}
+        aria-label="Clean up"
+        title="Clean up — remove the half-created containers, database and files"
+        className={dangerIconBtn}
+      >
+        <TrashIcon className="h-4 w-4" />
       </button>
     </>
   );
@@ -215,35 +223,36 @@ function SiteActions({
   return (
     <>
       {a.up && (
-        <button onClick={a.open} className={openBtn}>
-          <ArrowUpRightIcon className="h-3.5 w-3.5" />
-          Open
+        <button
+          onClick={a.open}
+          aria-label="Open in browser"
+          title="Open in browser"
+          className={openIconBtn}
+        >
+          <ArrowUpRightIcon className="h-4 w-4" />
         </button>
       )}
       <button
         onClick={a.toggle}
         disabled={a.busy || site.live_status === "creating"}
-        className={ghostBtn}
+        aria-label={a.up ? "Stop" : "Start"}
+        title={a.up ? "Stop" : "Start"}
+        className={iconBtn}
       >
-        <ToggleIcon className="h-3.5 w-3.5" />
-        {a.up ? "Stop" : "Start"}
+        <ToggleIcon className="h-4 w-4" />
       </button>
-      <button onClick={a.details} className={ghostBtn}>
-        <WrenchIcon className="h-3.5 w-3.5" />
-        Details
+      <button onClick={a.details} aria-label="Details" title="Details" className={iconBtn}>
+        <WrenchIcon className="h-4 w-4" />
       </button>
-      {/* Clone and Delete are icon-only: five labeled buttons wrap the card's
-          action row, and these two are occasional actions whose glyphs (plus
-          tooltip / confirm dialog) carry the meaning on their own. */}
       {site.capabilities.wp_tools && (
         <button
           onClick={() => onClone(site)}
           disabled={a.busy || site.live_status === "creating"}
           aria-label="Clone"
           title="Copy this site's database and files into a new site"
-          className={ghostBtn}
+          className={iconBtn}
         >
-          <DuplicateIcon className="h-3.5 w-3.5" />
+          <DuplicateIcon className="h-4 w-4" />
         </button>
       )}
       <button
@@ -251,9 +260,9 @@ function SiteActions({
         disabled={a.busy}
         aria-label="Delete"
         title="Delete"
-        className={dangerBtn}
+        className={dangerIconBtn}
       >
-        <TrashIcon className="h-3.5 w-3.5" />
+        <TrashIcon className="h-4 w-4" />
       </button>
     </>
   );
@@ -279,8 +288,6 @@ function ImportedBadge({ site }: { site: SiteWithStatus }) {
     </span>
   );
 }
-const dangerBtn =
-  "inline-flex items-center gap-1.5 rounded-md border border-red-900 px-2.5 py-1 text-xs font-medium text-red-400 transition-colors hover:border-red-700 hover:bg-red-500/10 disabled:opacity-50";
 
 function GridView({
   sites,
@@ -310,17 +317,14 @@ function GridCard({
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 transition-all duration-150 hover:-translate-y-0.5 hover:border-zinc-700 hover:shadow-panel motion-reduce:transform-none motion-reduce:transition-none">
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-3">
-          <SiteTile name={site.name} slug={site.slug} status={site.live_status} />
+          <SiteTile name={site.name} slug={site.slug} status={site.live_status} kind={site.kind} />
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={a.details}
-                className="truncate text-left text-[15px] font-semibold tracking-tight text-white hover:text-violet-400"
-              >
-                {site.name}
-              </button>
-              <KindBadge kind={site.kind} />
-            </div>
+            <button
+              onClick={a.details}
+              className="block max-w-full truncate text-left text-[15px] font-semibold tracking-tight text-zinc-50 hover:text-violet-400"
+            >
+              {site.name}
+            </button>
             <p className="truncate font-mono text-xs text-zinc-500">{a.url}</p>
           </div>
         </div>
@@ -386,11 +390,14 @@ function ListRow({
           <SiteTile name={site.name} slug={site.slug} status={site.live_status} size="sm" />
           <button
             onClick={a.details}
-            className="font-medium tracking-tight text-white hover:text-violet-400"
+            className="font-medium tracking-tight text-zinc-50 hover:text-violet-400"
           >
             {site.name}
           </button>
-          <KindBadge kind={site.kind} />
+          {/* Real brand glyph instead of a text pill (plan 28). */}
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center text-zinc-600">
+            <BrandIcon icon={kindIcon(site.kind)} size={13} title={site.kind} />
+          </span>
           <ImportedBadge site={site} />
         </div>
       </td>

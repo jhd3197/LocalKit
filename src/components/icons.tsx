@@ -10,10 +10,13 @@ import {
   Bug,
   Camera,
   Check,
+  ChevronsLeft,
+  ChevronsRight,
   Copy,
   Database,
   FileText,
   Globe,
+  House,
   Keyboard,
   KeyRound,
   Layers,
@@ -66,7 +69,10 @@ export const TrashIcon = wrap(Trash2);
 export const BookmarkIcon = wrap(Bookmark);
 export const CheckIcon = wrap(Check);
 
-// Navigation + section headers (plan 27)
+// Navigation + section headers (plans 27/28)
+export const HomeIcon = wrap(House);
+export const ChevronsLeftIcon = wrap(ChevronsLeft);
+export const ChevronsRightIcon = wrap(ChevronsRight);
 export const LayersIcon = wrap(Layers);
 export const CameraIcon = wrap(Camera);
 export const DatabaseIcon = wrap(Database);
