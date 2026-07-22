@@ -26,13 +26,16 @@ That script (`scripts/capture-screenshots.mjs`):
 
 | File | Screen |
 |---|---|
-| `dashboard.png` | Site list, grid view — running / stopped / creating badges, `.test` domain URLs |
+| `dashboard.png` | Site list, grid view — kind badges (WP / PHP / Docker), running / degraded / stopped / creating / setup-incomplete states, imported-from link, `.test` domain URLs |
 | `dashboard-list.png` | Site list, dense list view (toolbar toggle) |
-| `site-detail.png` | Detail of a running site (credentials, DB, wp-cli info, sync history, logs) |
-| `new-site.png` | NewSiteDialog open over the dashboard |
-| `settings.png` | Settings modal — Docker status, version allowlists, a ServerKit connection |
+| `site-detail.png` | Detail of a running WordPress site, Overview tab (credentials, DB, wp-cli info, snapshots, sync history, logs) |
+| `snapshots.png` | The Snapshots panel on its own (element crop) — manual + before-push/pull history with one-click Restore |
+| `site-tools.png` | Site detail → Tools tab (Adminer DB browser, search-replace, WP\_DEBUG + log, wp-config/.env editor) |
+| `new-site.png` | NewSiteDialog over the dashboard — WordPress / PHP-Laravel / Docker tabs and the blueprint picker |
+| `import-site.png` | Import-remote-site dialog (from Settings → ServerKit), with the version-fallback warning |
+| `settings.png` | Settings modal — Docker status, updates, data paths, version allowlists |
 | `settings-domains.png` | Settings modal — Local domains section (router toggle, HTTPS trust) |
-| `settings-serverkit.png` | Settings modal — ServerKit section (saved connection, remote sites) |
+| `settings-serverkit.png` | Settings modal — ServerKit section (saved connection, expanded remote-sites table with Import buttons) |
 
 ## Tweaking the shots
 
