@@ -52,7 +52,7 @@ export default function CloneSiteDialog({
         aria-label="Clone site"
         className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl"
       >
-        <h2 className="text-lg font-semibold text-white">Clone “{source.name}”</h2>
+        <h2 className="text-lg font-semibold text-zinc-50">Clone “{source.name}”</h2>
         <p className="mt-1 text-sm text-zinc-500">
           LocalKit copies this site's database and files into a brand-new site with fresh ports and
           credentials — a throwaway copy to test a plugin or theme change.

@@ -62,7 +62,7 @@ export default function ImportSiteDialog() {
         aria-label="Import remote site"
         className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl"
       >
-        <h2 className="text-lg font-semibold text-white">Import “{site.name}”</h2>
+        <h2 className="text-lg font-semibold text-zinc-50">Import “{site.name}”</h2>
         <p className="mt-1 text-sm text-zinc-500">
           {isPhp
             ? "LocalKit will create a new local PHP/Laravel site and copy this server site's application code and database into it. The remote site is not modified."

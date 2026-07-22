@@ -112,6 +112,41 @@ export function useSiteView(): [SiteView, (view: SiteView) => void] {
   return [view, (v) => set("siteView", v)];
 }
 
+// ---------------------------------------------------------------------------
+// Theme (plan 28) — token layer in index.css; dark is the default
+// ---------------------------------------------------------------------------
+
+export type Theme = "dark" | "light";
+
+/** Non-hook read (main.tsx stamps the theme before first render). */
+export function getTheme(): Theme {
+  return useSettings.getState().values.theme === "light" ? "light" : "dark";
+}
+
+/** Stamp `data-theme` on <html> so the CSS-var ramp switches. */
+export function applyTheme(theme: Theme): void {
+  document.documentElement.dataset.theme = theme;
+}
+
+export function useTheme(): [Theme, (t: Theme) => void] {
+  const theme = useSettings((s): Theme => (s.values.theme === "light" ? "light" : "dark"));
+  const set = useSettings((s) => s.set);
+  return [
+    theme,
+    (t) => {
+      set("theme", t);
+      applyTheme(t);
+    },
+  ];
+}
+
+/** Sidebar rail collapse (plan 28) — expanded by default. */
+export function useRailCollapsed(): [boolean, (v: boolean) => void] {
+  const collapsed = useSettings((s) => s.values.railCollapsed === "true");
+  const set = useSettings((s) => s.set);
+  return [collapsed, (v) => set("railCollapsed", String(v))];
+}
+
 /** Terminal font size in px (11–16, default 13). */
 export const TERMINAL_FONT_SIZE_DEFAULT = 13;
 /** Terminal scrollback lines (default 5k). */

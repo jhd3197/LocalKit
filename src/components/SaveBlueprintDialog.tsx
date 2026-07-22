@@ -47,7 +47,7 @@ export default function SaveBlueprintDialog({
         aria-label="Save as blueprint"
         className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl"
       >
-        <h2 className="text-lg font-semibold text-white">Save “{source.name}” as a blueprint</h2>
+        <h2 className="text-lg font-semibold text-zinc-50">Save “{source.name}” as a blueprint</h2>
         <p className="mt-1 text-sm text-zinc-500">
           Captures this site's database, files and plugin list as a reusable template. New sites can
           be created from it with one click.

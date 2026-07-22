@@ -42,7 +42,7 @@ function CheatsheetPanel() {
         className="w-[26rem] max-w-[92vw] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-panel"
       >
         <div className="flex items-center border-b border-zinc-800 px-5 py-3">
-          <span className="text-sm font-semibold text-white">Keyboard shortcuts</span>
+          <span className="text-sm font-semibold text-zinc-50">Keyboard shortcuts</span>
           <div className="flex-1" />
           <button
             onClick={() => setOpen(false)}

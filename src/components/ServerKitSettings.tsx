@@ -130,7 +130,7 @@ function ConnectionCard({ conn }: { conn: ServerKitConnection }) {
     <div className="rounded-lg border border-zinc-800 bg-zinc-950/60">
       <div className="flex items-center justify-between gap-3 p-4">
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-white">{conn.label}</p>
+          <p className="truncate text-sm font-medium text-zinc-50">{conn.label}</p>
           <p className="truncate text-xs text-zinc-500">{conn.url}</p>
         </div>
         <div className="flex shrink-0 gap-2">

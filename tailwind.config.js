@@ -4,20 +4,23 @@ export default {
   theme: {
     extend: {
       colors: {
-        // LocalKit design kit — the zinc scale is remapped to the navy-tinted
-        // palette so existing classes pick up the brand surface colors.
+        // LocalKit design kit — the zinc scale resolves to the CSS-var token
+        // layer in index.css (plan 28), so every zinc-* class is theme-aware:
+        // dark keeps the navy-tinted palette, light inverts the ramp. The
+        // semantic roles are stable: 950 page bg, 900 surface, 800/700
+        // borders, 600/500 dim/muted text, 50 strongest text.
         zinc: {
-          50: "#F7F7FB",
-          100: "#F1F2F7",
-          200: "#E4E7EE",
-          300: "#D3D7E2",
-          400: "#B8BFD0",
-          500: "#9097AB", // muted text
-          600: "#6E7488", // dim text
-          700: "#3A4056", // strong border
-          800: "#2A2F40", // muted border
-          900: "#151822", // surface
-          950: "#0D0F16", // deep navy background
+          50: "rgb(var(--c-zinc-50) / <alpha-value>)",
+          100: "rgb(var(--c-zinc-100) / <alpha-value>)",
+          200: "rgb(var(--c-zinc-200) / <alpha-value>)",
+          300: "rgb(var(--c-zinc-300) / <alpha-value>)",
+          400: "rgb(var(--c-zinc-400) / <alpha-value>)",
+          500: "rgb(var(--c-zinc-500) / <alpha-value>)",
+          600: "rgb(var(--c-zinc-600) / <alpha-value>)",
+          700: "rgb(var(--c-zinc-700) / <alpha-value>)",
+          800: "rgb(var(--c-zinc-800) / <alpha-value>)",
+          900: "rgb(var(--c-zinc-900) / <alpha-value>)",
+          950: "rgb(var(--c-zinc-950) / <alpha-value>)",
         },
         // Brand violet per design kit (#6C5CE7) + soft lavender accent.
         violet: {

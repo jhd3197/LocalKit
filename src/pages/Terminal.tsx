@@ -48,7 +48,7 @@ export default function TerminalPage({ siteId }: { siteId?: string }) {
               onClick={() => setActiveId(site.id)}
               className={`flex shrink-0 items-center gap-2 rounded-t-lg border border-b-0 px-3.5 py-2 text-xs font-medium transition-colors ${
                 active
-                  ? "border-zinc-800 bg-zinc-950 text-white"
+                  ? "border-zinc-800 bg-zinc-950 text-zinc-50"
                   : "border-transparent text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
               }`}
             >
