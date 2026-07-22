@@ -77,6 +77,11 @@ async function main() {
     });
     const page = await browser.newPage();
     page.on("pageerror", (e) => console.warn("  page error:", e.message));
+    // Capture in the light theme (plan 28) — the settings store seeds from
+    // its localStorage mirror, so planting the key before load is enough.
+    await page.evaluateOnNewDocument(() => {
+      localStorage.setItem("localkit.settings.theme", "light");
+    });
     await page.goto(URL, { waitUntil: "networkidle0" });
 
     const settle = (ms = 450) => sleep(ms);
@@ -170,11 +175,20 @@ async function main() {
       if (result !== "ok") throw new Error(`Import for "${name}": ${result}`);
     };
 
-    // 1) Dashboard — grid view: kind badges, status badges (running / degraded /
-    //    stopped / creating), a half-created site, plus PHP and Docker sites.
+    // 0) Home (plan 28) — the landing page: status headline, tile wall,
+    //    attention list, environment card.
     await waitForText("Pixel Bakery");
     await waitForText("Analytics API"); // the docker site — kinds have loaded
+    await waitForText("Environment");
     await settle(600);
+    await shot("home");
+
+    // 1) Dashboard — grid view: stamped tiles, status badges (running /
+    //    degraded / stopped / creating), a half-created site, plus PHP and
+    //    Docker sites.
+    await clickAria("Sites");
+    await waitForText("New Site");
+    await settle(500);
     await shot("dashboard");
 
     // 1b) Dashboard — dense list view via the toolbar toggle.
@@ -185,16 +199,19 @@ async function main() {
     await settle(300);
 
     // 2) Site detail — open a running WordPress site (overview tab: credentials,
-    //    database, wp-cli info, snapshots, sync).
+    //    database, wp-cli info, sync).
     await clickText("button", "Pixel Bakery");
     await waitForText("Core version:");
-    await waitForText("Snapshots");
+    await waitForText("ServerKit sync");
     await settle(600);
     await scrollTop();
     await shot("site-detail");
 
-    // 2b) Snapshots panel on its own — the manual + before-push/pull history
-    //     that makes every destructive action reversible (plan 17).
+    // 2b) Snapshots tab (own tab since plan 28) — the manual + before-push/pull
+    //     history that makes every destructive action reversible (plan 17).
+    await clickText("button", "snapshots");
+    await waitForText("Take snapshot");
+    await settle(400);
     await shotElement("snapshots", "Snapshots");
     await scrollTop();
 
@@ -209,7 +226,8 @@ async function main() {
     // 3) New site dialog — back to the dashboard, open it, type a name. The
     //    WordPress tab shows the version selects and the blueprint picker.
     await clickText("button", "← Back to sites");
-    await waitForText("Pixel Bakery");
+    // The rail always shows site names, so wait on dashboard-only chrome.
+    await waitForText("New Site");
     await clickText("button", "New Site");
     await waitForText("New site");
     await page.type('input[placeholder="My Blog"]', "Portfolio Redesign");

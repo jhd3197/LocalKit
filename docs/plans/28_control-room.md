@@ -1,6 +1,6 @@
 # 28 — Control room: home dashboard, light theme, live rail, stamped tiles
 
-Status: ⬜ planned
+Status: ✅ shipped
 
 Frontend-only. No Rust, no migrations, no new dependencies. Builds directly
 on plan 27's tiles and icon layer, and on the maintainer's direction:
