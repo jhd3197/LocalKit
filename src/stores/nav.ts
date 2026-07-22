@@ -1,6 +1,13 @@
 import { create } from "zustand";
 
-export type Page = { name: "sites" } | { name: "site"; id: string } | { name: "terminal"; siteId?: string };
+/** Sections of the site detail page (plan 28) — deep-linkable from the rail. */
+export type SiteTab = "overview" | "tools" | "snapshots" | "logs";
+
+export type Page =
+  | { name: "home" }
+  | { name: "sites" }
+  | { name: "site"; id: string; tab?: SiteTab }
+  | { name: "terminal"; siteId?: string };
 
 /** Sections of the settings modal (mirrors `SectionId` in pages/Settings.tsx). */
 export type SettingsSection = "general" | "terminal" | "keyboard" | "domains" | "serverkit";
@@ -26,7 +33,8 @@ interface NavState {
 }
 
 export const useNav = create<NavState>((set) => ({
-  page: { name: "sites" },
+  // Home is the landing page (plan 28) — status first, management second.
+  page: { name: "home" },
   navigate: (page) => set({ page }),
   settingsOpen: false,
   setSettingsOpen: (open) => set({ settingsOpen: open }),

@@ -2,13 +2,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../lib/ipc";
 import { siteUrl, sitePort } from "../lib/domains";
-import { useNav } from "../stores/nav";
+import { useNav, type SiteTab } from "../stores/nav";
 import { useRouter } from "../stores/router";
 import { useSites } from "../stores/sites";
 import type { SiteDetail as SiteDetailData, WpUser } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
 import KindBadge from "../components/KindBadge";
+import SiteTile from "../components/SiteTile";
+import SectionTitle from "../components/SectionTitle";
 import CopyButton from "../components/CopyButton";
+import {
+  ArrowUpRightIcon,
+  BookmarkIcon,
+  DatabaseIcon,
+  DuplicateIcon,
+  FileTextIcon,
+  GlobeIcon,
+  KeyIcon,
+  PlayIcon,
+  StopSquareIcon,
+  TerminalIcon,
+  TrashIcon,
+} from "../components/icons";
 import PushPanel from "../components/PushPanel";
 import SnapshotsPanel from "../components/SnapshotsPanel";
 import DeleteSiteDialog from "../components/DeleteSiteDialog";
@@ -17,7 +32,10 @@ import SaveBlueprintDialog from "../components/SaveBlueprintDialog";
 import SiteTools from "../components/SiteTools";
 import { describeConflicts } from "../components/DomainsSettings";
 
-export default function SiteDetail({ id }: { id: string }) {
+const headerGhostBtn =
+  "inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-800/60 disabled:opacity-50";
+
+export default function SiteDetail({ id, tab: navTab }: { id: string; tab?: SiteTab }) {
   const navigate = useNav((s) => s.navigate);
   const start = useSites((s) => s.start);
   const stop = useSites((s) => s.stop);
@@ -39,7 +57,9 @@ export default function SiteDetail({ id }: { id: string }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [blueprintOpen, setBlueprintOpen] = useState(false);
-  const [tab, setTab] = useState<"overview" | "tools">("overview");
+  // The tab lives in the nav store (plan 28) so the rail can deep-link to it.
+  const tab: SiteTab = navTab ?? "overview";
+  const setTab = (t: SiteTab) => navigate({ name: "site", id, tab: t });
   const logRef = useRef<HTMLPreElement>(null);
 
   const loadDetail = useCallback(() => {
@@ -133,7 +153,14 @@ export default function SiteDetail({ id }: { id: string }) {
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-semibold text-white">{detail.name}</h1>
+          <SiteTile
+            name={detail.name}
+            slug={detail.slug}
+            status={detail.live_status}
+            kind={detail.kind}
+            size="lg"
+          />
+          <h1 className="text-2xl font-semibold text-zinc-50">{detail.name}</h1>
           <KindBadge kind={detail.kind} />
           <StatusBadge status={detail.live_status} />
         </div>
@@ -142,23 +169,26 @@ export default function SiteDetail({ id }: { id: string }) {
             <button
               onClick={() => void stop(id)}
               disabled={busyId === id}
-              className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+              className={headerGhostBtn}
             >
+              <StopSquareIcon className="h-4 w-4" />
               Stop
             </button>
           ) : (
             <button
               onClick={() => void start(id)}
               disabled={busyId === id}
-              className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
             >
+              <PlayIcon className="h-4 w-4" />
               Start
             </button>
           )}
           <button
             onClick={() => navigate({ name: "terminal", siteId: id })}
-            className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500"
+            className={headerGhostBtn}
           >
+            <TerminalIcon className="h-4 w-4" />
             Terminal
           </button>
           {caps.wp_tools && (
@@ -166,8 +196,9 @@ export default function SiteDetail({ id }: { id: string }) {
               onClick={() => setCloneOpen(true)}
               disabled={busyId === id}
               title="Copy this site's database and files into a new site"
-              className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+              className={headerGhostBtn}
             >
+              <DuplicateIcon className="h-4 w-4" />
               Clone
             </button>
           )}
@@ -176,16 +207,18 @@ export default function SiteDetail({ id }: { id: string }) {
               onClick={() => setBlueprintOpen(true)}
               disabled={busyId === id}
               title="Save this site's stack as a reusable blueprint"
-              className="rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
+              className={headerGhostBtn}
             >
+              <BookmarkIcon className="h-4 w-4" />
               Save as blueprint
             </button>
           )}
           <button
             onClick={() => setConfirmDelete(true)}
             disabled={busyId === id}
-            className="rounded-md border border-red-900 px-4 py-2 text-sm text-red-400 hover:border-red-700 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-md border border-red-900 px-4 py-2 text-sm text-red-400 transition-colors hover:border-red-700 hover:bg-red-500/10 disabled:opacity-50"
           >
+            <TrashIcon className="h-4 w-4" />
             Delete
           </button>
         </div>
@@ -219,33 +252,45 @@ export default function SiteDetail({ id }: { id: string }) {
 
       <RouterConflictBanner slug={detail.slug} port={sitePort(detail)} />
 
-      {hasTools && (
-        <div className="mt-6 flex gap-1 border-b border-zinc-800">
-          {(["overview", "tools"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium capitalize transition-colors ${
-                tab === t
-                  ? "border-violet-500 text-white"
-                  : "border-transparent text-zinc-500 hover:text-zinc-300"
-              }`}
-            >
-              {t}
-            </button>
-          ))}
+      <div className="mt-6 flex gap-1 border-b border-zinc-800">
+        {(
+          [
+            "overview",
+            ...(hasTools ? (["tools"] as const) : []),
+            ...(caps.snapshots ? (["snapshots"] as const) : []),
+            "logs",
+          ] as SiteTab[]
+        ).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium capitalize transition-colors ${
+              tab === t
+                ? "border-violet-500 text-zinc-50"
+                : "border-transparent text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {hasTools && tab === "tools" && (
+        <SiteTools detail={detail} running={running} onShowSnapshots={() => setTab("snapshots")} />
+      )}
+
+      {/* Snapshots + one-click restore (plan 17) — its own tab since plan 28 */}
+      {caps.snapshots && tab === "snapshots" && (
+        <div className="mt-6">
+          <SnapshotsPanel siteId={id} />
         </div>
       )}
 
-      {hasTools && tab === "tools" && (
-        <SiteTools detail={detail} running={running} onShowSnapshots={() => setTab("overview")} />
-      )}
-
-      <div className={hasTools && tab !== "overview" ? "hidden" : ""}>
+      <div className={tab !== "overview" ? "hidden" : ""}>
       <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* URL */}
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Site</h2>
+          <SectionTitle icon={GlobeIcon}>Site</SectionTitle>
           <p className="mt-3 font-mono text-sm text-violet-400">{url}</p>
           <p className="mt-1 text-xs text-zinc-600">
             {caps.wp_tools
@@ -256,8 +301,9 @@ export default function SiteDetail({ id }: { id: string }) {
             <button
               onClick={() => void openUrl(url)}
               disabled={!running}
-              className="rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
             >
+              <ArrowUpRightIcon className="h-3.5 w-3.5" />
               Open site
             </button>
             {caps.one_click_login && (
@@ -291,7 +337,7 @@ export default function SiteDetail({ id }: { id: string }) {
         {/* Credentials (WordPress only) */}
         {caps.one_click_login && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">WP Admin credentials</h2>
+          <SectionTitle icon={KeyIcon}>WP Admin credentials</SectionTitle>
           <dl className="mt-3 space-y-2 text-sm">
             <div className="flex items-center justify-between gap-2">
               <dt className="text-zinc-500">Username</dt>
@@ -312,7 +358,7 @@ export default function SiteDetail({ id }: { id: string }) {
         {/* Database (needs the db_gui capability — hidden for docker apps) */}
         {caps.db_gui && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Database (MariaDB)</h2>
+          <SectionTitle icon={DatabaseIcon}>Database (MariaDB)</SectionTitle>
           <dl className="mt-3 space-y-2 text-sm">
             {[
               ["Host", detail.db_host],
@@ -336,7 +382,7 @@ export default function SiteDetail({ id }: { id: string }) {
         {caps.wp_tools && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">WordPress info (wp-cli)</h2>
+            <SectionTitle icon={TerminalIcon}>WordPress info (wp-cli)</SectionTitle>
             <button
               onClick={() => void fetchWpInfo(id)}
               disabled={!running}
@@ -382,46 +428,42 @@ export default function SiteDetail({ id }: { id: string }) {
         )}
       </div>
 
-      {/* Snapshots + one-click restore (plan 17) — every kind that supports them */}
-      {caps.snapshots && (
-        <div className="mt-4">
-          <SnapshotsPanel siteId={id} />
-        </div>
-      )}
-
       {/* ServerKit push/pull (M4) — WordPress only until plan 26 */}
       {caps.wp_tools && (
         <div className="mt-4">
           <PushPanel siteId={id} running={running} />
         </div>
       )}
+      </div>
 
-      {/* Logs */}
-      <section className="mt-4 rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Container logs</h2>
-          <div className="flex items-center gap-3 text-xs text-zinc-500">
-            <label className="flex items-center gap-1.5">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(e) => setAutoRefresh(e.target.checked)}
-                className="accent-violet-500"
-              />
-              Auto-refresh
-            </label>
-            <button onClick={() => void fetchLogs(id)} className="hover:text-zinc-300">
-              Refresh
-            </button>
+      {/* Logs — its own tab since plan 28; stays mounted so the auto-scroll
+          and polling survive tab switches. */}
+      <div className={tab !== "logs" ? "hidden" : ""}>
+        <section className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
+          <div className="flex items-center justify-between">
+            <SectionTitle icon={FileTextIcon}>Container logs</SectionTitle>
+            <div className="flex items-center gap-3 text-xs text-zinc-500">
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={(e) => setAutoRefresh(e.target.checked)}
+                  className="accent-violet-500"
+                />
+                Auto-refresh
+              </label>
+              <button onClick={() => void fetchLogs(id)} className="hover:text-zinc-300">
+                Refresh
+              </button>
+            </div>
           </div>
-        </div>
-        <pre
-          ref={logRef}
-          className="mt-3 h-64 overflow-auto rounded-lg bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-400"
-        >
-          {logs || "No logs yet."}
-        </pre>
-      </section>
+          <pre
+            ref={logRef}
+            className="mt-3 h-[28rem] overflow-auto rounded-lg bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-400"
+          >
+            {logs || "No logs yet."}
+          </pre>
+        </section>
       </div>
     </div>
   );

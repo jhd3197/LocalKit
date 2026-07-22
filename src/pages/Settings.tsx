@@ -5,7 +5,13 @@ import { checkForUpdate, getLastUpdateResult } from "../lib/update";
 import type { AppInfo, DockerStatus, UpdateInfo } from "../lib/types";
 import { useDocker } from "../stores/docker";
 import { useNav } from "../stores/nav";
-import { useOsNotifications, useTerminalFontSize, useTerminalScrollback } from "../stores/settings";
+import {
+  useOsNotifications,
+  useTerminalFontSize,
+  useTerminalScrollback,
+  useTheme,
+  type Theme,
+} from "../stores/settings";
 import { useDialog } from "../hooks/useDialog";
 import ServerKitSettings from "../components/ServerKitSettings";
 import DomainsSettings from "../components/DomainsSettings";
@@ -45,7 +51,7 @@ export default function Settings() {
       >
         {/* Left section rail — Faro-style */}
         <nav className="flex w-44 shrink-0 flex-col gap-0.5 border-r border-zinc-800 bg-zinc-950/50 p-2">
-          <div className="px-2 pb-2 pt-1 text-[15px] font-semibold tracking-tight text-white">
+          <div className="px-2 pb-2 pt-1 text-[15px] font-semibold tracking-tight text-zinc-50">
             Settings
           </div>
           {SECTIONS.map((sec) => {
@@ -71,7 +77,7 @@ export default function Settings() {
         {/* Content pane */}
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center border-b border-zinc-800 px-5 py-3">
-            <span className="text-sm font-semibold text-white">{activeLabel}</span>
+            <span className="text-sm font-semibold text-zinc-50">{activeLabel}</span>
             <div className="flex-1" />
             <button
               onClick={() => setSettingsOpen(false)}
@@ -148,6 +154,9 @@ function GeneralSection() {
 
   return (
     <div className="space-y-4">
+      {/* Appearance (plan 28) */}
+      <ThemeSection />
+
       {/* Docker */}
       <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
         <div className="flex items-center justify-between">
@@ -376,5 +385,40 @@ function TerminalSection() {
         </ul>
       </section>
     </div>
+  );
+}
+
+/** Appearance — the theme toggle (plan 28). Applies instantly; persisted in
+ *  the settings KV and stamped pre-render by main.tsx on the next launch. */
+function ThemeSection() {
+  const [theme, setTheme] = useTheme();
+  const options: { id: Theme; label: string }[] = [
+    { id: "dark", label: "Dark" },
+    { id: "light", label: "Light" },
+  ];
+  return (
+    <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Appearance</h2>
+        <div className="flex items-center rounded-md border border-zinc-800 bg-zinc-900/60 p-0.5">
+          {options.map((o) => (
+            <button
+              key={o.id}
+              onClick={() => setTheme(o.id)}
+              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                theme === o.id
+                  ? "bg-zinc-800 text-zinc-50"
+                  : "text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="mt-2.5 text-sm text-zinc-500">
+        Dark keeps the navy control-room look; Light flips the same palette for bright rooms.
+      </p>
+    </section>
   );
 }

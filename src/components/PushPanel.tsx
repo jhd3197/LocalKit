@@ -4,6 +4,8 @@ import { toastError } from "../lib/errors";
 import { useServerKit } from "../stores/serverkit";
 import { isTerminalStage, useSites } from "../stores/sites";
 import type { RemoteWpSite, SyncRecord } from "../lib/types";
+import SectionTitle from "./SectionTitle";
+import { SyncIcon } from "./icons";
 
 /** Sync-history result colours; anything unrecognised falls through to red. */
 const STATUS_CLASSES: Record<string, string> = {
@@ -89,7 +91,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
   if (connections.length === 0) {
     return (
       <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">ServerKit sync</h2>
+        <SectionTitle icon={SyncIcon}>ServerKit sync</SectionTitle>
         <p className="mt-3 text-sm text-zinc-600">
           Add a ServerKit connection in Settings to push this site to a server.
         </p>
@@ -99,7 +101,7 @@ export default function PushPanel({ siteId, running }: { siteId: string; running
 
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">ServerKit sync</h2>
+      <SectionTitle icon={SyncIcon}>ServerKit sync</SectionTitle>
 
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block">

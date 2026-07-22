@@ -3,6 +3,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../lib/ipc";
 import { toastError } from "../lib/errors";
 import { toast } from "../stores/toast";
+import SectionTitle from "./SectionTitle";
+import { DatabaseIcon } from "./icons";
 
 /**
  * Tools → Database (plan 24).
@@ -41,7 +43,7 @@ export default function DatabasePanel({ siteId, running }: { siteId: string; run
 
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Database</h2>
+      <SectionTitle icon={DatabaseIcon}>Database</SectionTitle>
       <p className="mt-2 text-xs text-zinc-600">
         Browse and edit the database in Adminer, a lightweight web GUI. It starts on first use and
         opens with the server and username pre-filled; the password is copied to your clipboard to

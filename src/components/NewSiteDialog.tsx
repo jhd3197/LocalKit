@@ -174,7 +174,7 @@ export default function NewSiteDialog({ onClose }: { onClose: () => void }) {
         aria-label="New site"
         className="flex max-h-[85vh] w-full max-w-md flex-col rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl"
       >
-        <h2 className="text-lg font-semibold text-white">New site</h2>
+        <h2 className="text-lg font-semibold text-zinc-50">New site</h2>
 
         <div className="mt-3 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950/60 p-1">
           {tab("wordpress", "WordPress")}

@@ -7,11 +7,23 @@ import { useRouter } from "../stores/router";
 import { useServerKit } from "../stores/serverkit";
 import { useSites } from "../stores/sites";
 import { useBlueprints } from "../stores/blueprints";
-import { KIND_DOCKER, type SiteWithStatus } from "../lib/types";
+import { KIND_DOCKER, KIND_PHP, type SiteWithStatus } from "../lib/types";
 import StatusBadge from "../components/StatusBadge";
-import KindBadge from "../components/KindBadge";
+import SiteTile from "../components/SiteTile";
+import { BrandIcon, kindIcon } from "../lib/brandIcons";
 import CloneSiteDialog from "../components/CloneSiteDialog";
-import { GridIcon, LinkIcon, ListIcon, PlusIcon } from "../components/icons";
+import {
+  ArrowUpRightIcon,
+  DuplicateIcon,
+  GridIcon,
+  LinkIcon,
+  ListIcon,
+  PlayIcon,
+  PlusIcon,
+  StopSquareIcon,
+  TrashIcon,
+  WrenchIcon,
+} from "../components/icons";
 
 export default function Dashboard() {
   const sites = useSites((s) => s.sites);
@@ -69,11 +81,19 @@ export default function Dashboard() {
 
       {sites.length === 0 && !loading ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800 py-20 text-center">
-          <p className="text-zinc-400">No sites yet.</p>
+          {/* Three site tiles waiting to exist — the violet one is yours. */}
+          <div aria-hidden className="relative h-16 w-28">
+            <div className="absolute left-0 top-3 h-12 w-12 -rotate-6 rounded-xl border border-white/5 bg-zinc-900" />
+            <div className="absolute right-0 top-3 h-12 w-12 rotate-6 rounded-xl border border-white/5 bg-zinc-900" />
+            <div className="absolute left-8 top-0 flex h-12 w-12 rotate-3 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-violet-700 text-white shadow-[0_0_28px_rgba(108,92,231,0.35)]">
+              <PlusIcon className="h-5 w-5" />
+            </div>
+          </div>
+          <p className="mt-5 font-medium text-zinc-200">Create your first site</p>
           <p className="mt-1 text-sm text-zinc-600">
             {blueprints.length > 0
-              ? `Create your first site in one click — blank, or from one of your ${blueprints.length} blueprints.`
-              : "Create your first local WordPress site in one click."}
+              ? `Blank WordPress, PHP or Docker — or one of your ${blueprints.length} blueprints.`
+              : "WordPress, PHP or a Docker app — running in about a minute."}
           </p>
           <button
             onClick={() => setNewSiteOpen(true)}
@@ -100,11 +120,12 @@ export default function Dashboard() {
 }
 
 /** The stack line for a site card/row — versions for WP, the app service for
- * a docker project (whose wp/php versions are empty). */
+ * a docker project (whose wp/php versions are empty), php alone for the
+ * php/laravel kind (whose wp version is empty). */
 function stackLabel(site: SiteWithStatus): string {
-  return site.kind === KIND_DOCKER
-    ? `Docker · ${site.config.service}`
-    : `WP ${site.wp_version} · PHP ${site.php_version}`;
+  if (site.kind === KIND_DOCKER) return `Docker · ${site.config.service}`;
+  if (site.kind === KIND_PHP) return `PHP ${site.php_version}`;
+  return `WP ${site.wp_version} · PHP ${site.php_version}`;
 }
 
 function useSiteActions(site: SiteWithStatus) {
@@ -143,15 +164,21 @@ function useSiteActions(site: SiteWithStatus) {
   };
 }
 
-const ghostBtn =
-  "rounded-md border border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 disabled:opacity-50";
+// Icon-only action buttons (plan 28) — the glyph + tooltip carry the word.
+const iconBtn =
+  "rounded-md border border-zinc-700 p-1.5 text-zinc-400 transition-colors hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-100 disabled:opacity-50";
+// The hero action on an up site — the one thing you most likely came to do.
+const openIconBtn =
+  "rounded-md border border-violet-700/60 bg-violet-600/10 p-1.5 text-violet-300 transition-colors hover:bg-violet-600/25 hover:text-violet-200 disabled:opacity-50";
+const dangerIconBtn =
+  "rounded-md border border-red-900 p-1.5 text-red-400 transition-colors hover:border-red-700 hover:bg-red-500/10 disabled:opacity-50";
 const resumeBtn =
-  "rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50";
+  "inline-flex items-center gap-1.5 rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50";
 
 /** Amber badge for a half-created site (plan 23), shown in place of the status. */
 function IncompleteBadge() {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-800 bg-amber-500/15 px-2.5 py-0.5 text-xs font-medium text-amber-400">
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-amber-800 bg-amber-500/15 px-2.5 py-0.5 text-xs font-medium text-amber-400">
       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
       Setup incomplete
     </span>
@@ -163,10 +190,79 @@ function IncompleteActions({ a }: { a: ReturnType<typeof useSiteActions> }) {
   return (
     <>
       <button onClick={a.resume} disabled={a.busy} className={resumeBtn}>
+        <PlayIcon className="h-3.5 w-3.5" />
         Resume setup
       </button>
-      <button onClick={a.cleanup} disabled={a.busy} className={dangerBtn}>
-        Clean up
+      <button
+        onClick={a.cleanup}
+        disabled={a.busy}
+        aria-label="Clean up"
+        title="Clean up — remove the half-created containers, database and files"
+        className={dangerIconBtn}
+      >
+        <TrashIcon className="h-4 w-4" />
+      </button>
+    </>
+  );
+}
+
+/**
+ * The shared action row for a healthy site — identical buttons in grid cards
+ * and list rows, so the two views never drift.
+ */
+function SiteActions({
+  site,
+  a,
+  onClone,
+}: {
+  site: SiteWithStatus;
+  a: ReturnType<typeof useSiteActions>;
+  onClone: (site: SiteWithStatus) => void;
+}) {
+  const ToggleIcon = a.up ? StopSquareIcon : PlayIcon;
+  return (
+    <>
+      {a.up && (
+        <button
+          onClick={a.open}
+          aria-label="Open in browser"
+          title="Open in browser"
+          className={openIconBtn}
+        >
+          <ArrowUpRightIcon className="h-4 w-4" />
+        </button>
+      )}
+      <button
+        onClick={a.toggle}
+        disabled={a.busy || site.live_status === "creating"}
+        aria-label={a.up ? "Stop" : "Start"}
+        title={a.up ? "Stop" : "Start"}
+        className={iconBtn}
+      >
+        <ToggleIcon className="h-4 w-4" />
+      </button>
+      <button onClick={a.details} aria-label="Details" title="Details" className={iconBtn}>
+        <WrenchIcon className="h-4 w-4" />
+      </button>
+      {site.capabilities.wp_tools && (
+        <button
+          onClick={() => onClone(site)}
+          disabled={a.busy || site.live_status === "creating"}
+          aria-label="Clone"
+          title="Copy this site's database and files into a new site"
+          className={iconBtn}
+        >
+          <DuplicateIcon className="h-4 w-4" />
+        </button>
+      )}
+      <button
+        onClick={a.remove}
+        disabled={a.busy}
+        aria-label="Delete"
+        title="Delete"
+        className={dangerIconBtn}
+      >
+        <TrashIcon className="h-4 w-4" />
       </button>
     </>
   );
@@ -192,8 +288,6 @@ function ImportedBadge({ site }: { site: SiteWithStatus }) {
     </span>
   );
 }
-const dangerBtn =
-  "rounded-md border border-red-900 px-2.5 py-1 text-xs font-medium text-red-400 hover:border-red-700 disabled:opacity-50";
 
 function GridView({
   sites,
@@ -220,58 +314,32 @@ function GridCard({
 }) {
   const a = useSiteActions(site);
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 transition-colors hover:border-zinc-700">
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 transition-all duration-150 hover:-translate-y-0.5 hover:border-zinc-700 hover:shadow-panel motion-reduce:transform-none motion-reduce:transition-none">
       <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <button
-            onClick={a.details}
-            className="truncate text-left text-[15px] font-semibold tracking-tight text-white hover:text-violet-400"
-          >
-            {site.name}
-          </button>
-          <KindBadge kind={site.kind} />
+        <div className="flex min-w-0 items-center gap-3">
+          <SiteTile name={site.name} slug={site.slug} status={site.live_status} kind={site.kind} />
+          <div className="min-w-0">
+            <button
+              onClick={a.details}
+              className="block max-w-full truncate text-left text-[15px] font-semibold tracking-tight text-zinc-50 hover:text-violet-400"
+            >
+              {site.name}
+            </button>
+            <p className="truncate font-mono text-xs text-zinc-500">{a.url}</p>
+          </div>
         </div>
         {a.incomplete ? <IncompleteBadge /> : <StatusBadge status={site.live_status} />}
       </div>
-      <p className="mt-1 font-mono text-xs text-zinc-500">{a.url}</p>
-      <div className="mt-1 flex items-center gap-2 text-xs text-zinc-600">
+      <div className="mt-2.5 flex items-center gap-2 text-xs text-zinc-600">
         <span>{stackLabel(site)}</span>
         <ImportedBadge site={site} />
       </div>
 
-      <div className="mt-3.5 flex flex-wrap gap-1.5">
+      <div className="mt-3 flex flex-wrap gap-1.5">
         {a.incomplete ? (
           <IncompleteActions a={a} />
         ) : (
-          <>
-            {a.up && (
-              <button onClick={a.open} className={ghostBtn}>
-                Open
-              </button>
-            )}
-            <button
-              onClick={a.toggle}
-              disabled={a.busy || site.live_status === "creating"}
-              className={ghostBtn}
-            >
-              {a.up ? "Stop" : "Start"}
-            </button>
-            <button onClick={a.details} className={ghostBtn}>
-              Details
-            </button>
-            {site.capabilities.wp_tools && (
-              <button
-                onClick={() => onClone(site)}
-                disabled={a.busy || site.live_status === "creating"}
-                className={ghostBtn}
-              >
-                Clone
-              </button>
-            )}
-            <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
-              Delete
-            </button>
-          </>
+          <SiteActions site={site} a={a} onClone={onClone} />
         )}
       </div>
     </div>
@@ -318,14 +386,18 @@ function ListRow({
   return (
     <tr className="border-b border-zinc-800/60 transition-colors last:border-0 hover:bg-zinc-900">
       <td className="px-4 py-2.5">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
+          <SiteTile name={site.name} slug={site.slug} status={site.live_status} size="sm" />
           <button
             onClick={a.details}
-            className="font-medium tracking-tight text-white hover:text-violet-400"
+            className="font-medium tracking-tight text-zinc-50 hover:text-violet-400"
           >
             {site.name}
           </button>
-          <KindBadge kind={site.kind} />
+          {/* Real brand glyph instead of a text pill (plan 28). */}
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center text-zinc-600">
+            <BrandIcon icon={kindIcon(site.kind)} size={13} title={site.kind} />
+          </span>
           <ImportedBadge site={site} />
         </div>
       </td>
@@ -339,35 +411,7 @@ function ListRow({
           {a.incomplete ? (
             <IncompleteActions a={a} />
           ) : (
-            <>
-              {a.up && (
-                <button onClick={a.open} className={ghostBtn}>
-                  Open
-                </button>
-              )}
-              <button
-                onClick={a.toggle}
-                disabled={a.busy || site.live_status === "creating"}
-                className={ghostBtn}
-              >
-                {a.up ? "Stop" : "Start"}
-              </button>
-              <button onClick={a.details} className={ghostBtn}>
-                Details
-              </button>
-              {site.capabilities.wp_tools && (
-                <button
-                  onClick={() => onClone(site)}
-                  disabled={a.busy || site.live_status === "creating"}
-                  className={ghostBtn}
-                >
-                  Clone
-                </button>
-              )}
-              <button onClick={a.remove} disabled={a.busy} className={dangerBtn}>
-                Delete
-              </button>
-            </>
+            <SiteActions site={site} a={a} onClone={onClone} />
           )}
         </div>
       </td>

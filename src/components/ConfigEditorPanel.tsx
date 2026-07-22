@@ -3,6 +3,8 @@ import { ipc } from "../lib/ipc";
 import { errMsg, toastError } from "../lib/errors";
 import { toast } from "../stores/toast";
 import { useSites } from "../stores/sites";
+import SectionTitle from "./SectionTitle";
+import { SlidersIcon } from "./icons";
 
 /**
  * Tools → Config (plan 24).
@@ -73,7 +75,7 @@ export default function ConfigEditorPanel({ siteId }: { siteId: string }) {
   return (
     <section className="rounded-xl border border-red-900/50 bg-zinc-900/60 p-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Config</h2>
+        <SectionTitle icon={SlidersIcon}>Config</SectionTitle>
         <div className="flex gap-1">
           {FILES.map((f) => (
             <button

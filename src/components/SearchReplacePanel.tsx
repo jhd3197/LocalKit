@@ -2,6 +2,8 @@ import { useState } from "react";
 import { ipc } from "../lib/ipc";
 import { toastError } from "../lib/errors";
 import type { SearchReplaceResult } from "../lib/types";
+import SectionTitle from "./SectionTitle";
+import { SearchIcon } from "./icons";
 
 /**
  * Tools → Search & Replace (plan 24).
@@ -78,7 +80,7 @@ export default function SearchReplacePanel({
 
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Search &amp; Replace</h2>
+      <SectionTitle icon={SearchIcon}>Search &amp; Replace</SectionTitle>
       <p className="mt-2 text-xs text-zinc-600">
         A serialization-safe replace across every table (<code className="font-mono">wp search-replace</code>) — safe for
         widget and option data a raw SQL replace would corrupt. Preview first, then apply.

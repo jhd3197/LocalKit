@@ -10,6 +10,57 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Theme token layer (plan 28). The Tailwind zinc ramp resolves to these RGB
+ * triplets (see tailwind.config.js), so every existing `zinc-*` class is
+ * theme-aware for free. `data-theme` is stamped on <html> by main.tsx before
+ * first render and kept in sync by App.
+ *
+ * The ramp keeps its MEANING across themes (950 = page, 900 = surface,
+ * 800/700 = borders, 600/500 = dim/muted text, 50 = strongest text) — light
+ * mode inverts the values, not the semantics. Solid accent buttons keep
+ * literal `text-white` in both themes; titles use `text-zinc-50`.
+ */
+:root {
+  --c-zinc-50: 247 247 251;
+  --c-zinc-100: 241 242 247;
+  --c-zinc-200: 228 231 238;
+  --c-zinc-300: 211 215 226;
+  --c-zinc-400: 184 191 208;
+  --c-zinc-500: 144 151 171;
+  --c-zinc-600: 110 116 136;
+  --c-zinc-700: 58 64 86;
+  --c-zinc-800: 42 47 64;
+  --c-zinc-900: 21 24 34;
+  --c-zinc-950: 13 15 22;
+  /* Dimmed (stopped) site-tile lightness — SiteTile builds hsl() from these. */
+  --tile-dim-bg-l: 17%;
+  --tile-dim-fg-l: 70%;
+  /* Blueprint grid line (ServerKit's squares — accent-tinted, barely there). */
+  --grid-line: rgba(122, 107, 234, 0.05);
+  --scrollbar-thumb: #2a2f40;
+  --scrollbar-thumb-hover: #3a4056;
+}
+
+:root[data-theme="light"] {
+  --c-zinc-50: 18 20 30;
+  --c-zinc-100: 26 29 42;
+  --c-zinc-200: 42 47 64;
+  --c-zinc-300: 58 64 86;
+  --c-zinc-400: 76 82 104;
+  --c-zinc-500: 102 109 131;
+  --c-zinc-600: 138 145 166;
+  --c-zinc-700: 201 206 221;
+  --c-zinc-800: 226 229 238;
+  --c-zinc-900: 255 255 255;
+  --c-zinc-950: 244 245 249;
+  --tile-dim-bg-l: 88%;
+  --tile-dim-fg-l: 34%;
+  --grid-line: rgba(108, 92, 231, 0.07);
+  --scrollbar-thumb: #c9cedd;
+  --scrollbar-thumb-hover: #aeb5c9;
+}
+
 @layer base {
   html,
   body,
@@ -25,16 +76,25 @@
   }
 }
 
+@layer utilities {
+  /* ServerKit's blueprint squares — 1px lines every 40px on the content pane. */
+  .bg-blueprint {
+    background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2f40;
+  background: var(--scrollbar-thumb);
   border-radius: 8px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a4056;
+  background: var(--scrollbar-thumb-hover);
 }
 ::-webkit-scrollbar-track {
   background: transparent;

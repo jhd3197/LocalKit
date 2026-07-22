@@ -35,7 +35,7 @@ export default function DeleteSiteDialog({
         aria-label={`Delete ${siteName}`}
         className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl"
       >
-        <h2 className="text-lg font-semibold text-white">Delete “{siteName}”?</h2>
+        <h2 className="text-lg font-semibold text-zinc-50">Delete “{siteName}”?</h2>
         <p className="mt-2 text-sm text-zinc-400">
           This removes its containers, database volume and files. A restorable snapshot will be
           kept.

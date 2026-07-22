@@ -68,17 +68,27 @@ npm run tauri build
 |                            仪表盘                             |                            列表视图                            |
 | :--------------------------------------------------------------: | :------------------------------------------------------------: |
 |      ![仪表盘](screenshots/dashboard.png)       |      ![列表视图](screenshots/dashboard-list.png)       |
-|   _一览所有站点，容器状态徽标实时更新_   |   _站点较多时更紧凑的仪表盘视图_   |
+|   _一览所有站点 —— WordPress、PHP 与 Docker —— 状态徽标实时更新_   |   _站点较多时更紧凑的表格视图_   |
 
-|                             站点详情                              |                           新建站点                            |
+|                             站点详情                              |                           工具                            |
 | :-------------------------------------------------------------: | :------------------------------------------------------------: |
-|         ![站点详情](screenshots/site-detail.png)         |      ![新建站点](screenshots/new-site.png)     |
-| _凭据、wp-cli 信息、ServerKit 同步与历史记录_ | _选择名称、WordPress 版本和 PHP 版本_ |
+|         ![站点详情](screenshots/site-detail.png)         |      ![工具](screenshots/site-tools.png)     |
+| _凭据、数据库、wp-cli 信息、快照与同步_ | _Adminer 数据库浏览器、安全的搜索替换、WP\_DEBUG 与配置编辑器 —— 全部内置_ |
 
-|                           设置                            |                           本地域名                           |
+|                             快照                             |                           新建站点                            |
+| :-------------------------------------------------------------: | :------------------------------------------------------------: |
+|         ![快照](screenshots/snapshots.png)         |      ![新建站点](screenshots/new-site.png)     |
+| _一键还原；每次推送、拉取和删除前都会自动生成一个_ | _WordPress、PHP/Laravel 或 Docker 项目 —— 空白或基于蓝图_ |
+
+|                             导入                             |                           设置                            |
+| :-------------------------------------------------------------: | :------------------------------------------------------------: |
+|         ![导入远程站点](screenshots/import-site.png)         |      ![设置](screenshots/settings.png)     |
+| _将远程 ServerKit 站点克隆为一个全新的本地副本_ | _Docker 状态、更新、数据路径与默认设置_ |
+
+|                           本地域名                            |                           ServerKit                           |
 | :--------------------------------------------------------------: | :-------------------------------------------------------------: |
-|            ![设置](screenshots/settings.png)            |      ![本地域名](screenshots/settings-domains.png)      |
-|      _Docker 状态、数据路径和 ServerKit 连接_      |     _通过共享 Caddy 路由器以 `http://<slug>.test` 提供站点访问_     |
+|            ![本地域名](screenshots/settings-domains.png)            |      ![ServerKit](screenshots/settings-serverkit.png)      |
+|      _通过共享 Caddy 路由器以 `http://<slug>.test` 提供站点访问_      |     _浏览服务器上的站点并进行推送/拉取或导入_     |
 <!-- LOCALKIT:SHOTS:END -->
 
 ## 🎯 功能特性
